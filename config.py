@@ -37,7 +37,6 @@ API_PORT: int = int(os.getenv("API_PORT", "8000"))
 MAX_ROUTES: int = int(os.getenv("MAX_ROUTES", "5"))
 MAX_TRANSFERS: int = int(os.getenv("MAX_TRANSFERS", "2"))
 MIN_TRANSFER_MINUTES: int = int(os.getenv("MIN_TRANSFER_MINUTES", "10"))
-
 # Walking transfer
 MAX_WALK_METRES: int = int(os.getenv("MAX_WALK_METRES", "500"))
 WALK_SPEED_KPH: float = float(os.getenv("WALK_SPEED_KPH", "4.5"))

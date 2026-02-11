@@ -14,7 +14,7 @@ Endpoints (v1):
 
 import logging
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, date as Date
 from typing import Any
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -101,15 +101,44 @@ async def search_stops(
 async def get_routes(
     origin: str = Query(..., description="Origin stop_id"),
     destination: str = Query(..., description="Destination stop_id"),
+    departure_time: str | None = Query(
+        None,
+        description="Earliest departure time as HH:MM or HH:MM:SS. Defaults to current time.",
+    ),
+    travel_date: str | None = Query(
+        None,
+        description="Travel date as YYYY-MM-DD. Defaults to today.",
+    ),
     explain: bool = Query(False, description="Include LLM plain-language explanation"),
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
     """
     Return top-N scored routes from origin to destination.
-    Optionally include an LLM-generated explanation of tradeoffs.
+
+    Routes have real scheduled departure/arrival times for the requested date
+    and time.  Optionally include an LLM-generated explanation of tradeoffs.
     """
+    # Parse departure datetime, defaulting to now.
     try:
-        routes = find_routes(origin, destination, max_routes=MAX_ROUTES)
+        base_date = Date.fromisoformat(travel_date) if travel_date else datetime.now().date()
+        if departure_time:
+            parts = departure_time.split(":")
+            h, m, s = int(parts[0]), int(parts[1]), int(parts[2]) if len(parts) > 2 else 0
+            departure_dt = datetime(base_date.year, base_date.month, base_date.day, h, m, s)
+        else:
+            now = datetime.now()
+            departure_dt = datetime(base_date.year, base_date.month, base_date.day,
+                                    now.hour, now.minute, now.second)
+    except (ValueError, IndexError) as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid date/time parameter: {exc}")
+
+    try:
+        routes = find_routes(
+            origin, destination,
+            departure_dt=departure_dt,
+            session=session,
+            max_routes=MAX_ROUTES,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except Exception as exc:

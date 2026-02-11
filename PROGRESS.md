@@ -9,11 +9,11 @@ GTFS-RT (30–60s)     ──► ingestion/gtfs_realtime.py        │
                               │ (in-memory state)           │
                               │                             ▼
                               │                    graph/builder.py
-                              │                    (networkx DiGraph)
+                              │                    (networkx MultiDiGraph)
                               │                             │
                               │                             ▼
                               │                    routing/engine.py
-                              │                    (top-N by schedule)
+                              │                    (Yen's k-shortest paths)
                               │                             │
                               └────────────────────►        ▼
                                                    reliability/
@@ -33,26 +33,65 @@ GTFS-RT (30–60s)     ──► ingestion/gtfs_realtime.py        │
 
 ## Module Status
 
-| Module                          | Status      | Notes                                     |
-|---------------------------------|-------------|-------------------------------------------|
-| `db/models.py`                  | Complete    | SQLAlchemy models for GTFS + reliability  |
-| `db/session.py`                 | Complete    | Engine, SessionLocal, get_session         |
-| `ingestion/gtfs_static.py`      | Complete    | Download, parse, store all GTFS CSVs      |
-| `ingestion/gtfs_realtime.py`    | **Blocked** | Code complete; awaiting Metrolinx API key (up to 10 business days) |
-| `graph/builder.py`              | Complete    | MultiDiGraph; one edge per (stop-pair, route_id); single SQL join query |
-| `routing/engine.py`             | Complete    | Yen's k-shortest paths + filters          |
-| `reliability/historical.py`     | Complete    | Rolling-window score per route/stop/bucket|
-| `reliability/live.py`           | Complete    | Live GTFS-RT risk modifiers               |
-| `llm/explainer.py`              | Complete    | Claude explanation layer (scoped)         |
-| `api/main.py`                   | Complete    | /routes, /stops, /health endpoints        |
+| Module                          | Status      | Notes                                                              |
+|---------------------------------|-------------|--------------------------------------------------------------------|
+| `db/models.py`                  | Complete    | SQLAlchemy models for GTFS + reliability                           |
+| `db/session.py`                 | Complete    | Engine, SessionLocal, get_session                                  |
+| `ingestion/gtfs_static.py`      | Complete    | Download, parse, store all GTFS CSVs                               |
+| `ingestion/gtfs_realtime.py`    | **Blocked** | Code complete; awaiting Metrolinx API key                          |
+| `graph/builder.py`              | Complete    | MultiDiGraph; one edge per (stop-pair, route_id); single SQL join  |
+| `routing/engine.py`             | Complete    | Yen's k-shortest paths on projected DiGraph; MAX_CANDIDATES cap    |
+| `reliability/historical.py`     | Complete    | Rolling-window score per route/stop/bucket                         |
+| `reliability/live.py`           | Complete    | Live GTFS-RT risk modifiers                                        |
+| `llm/explainer.py`              | Complete    | Claude explanation layer (scoped)                                  |
+| `api/main.py`                   | Complete    | /routes, /stops, /health, /ingest/gtfs-static endpoints            |
 
 **Blocked:**
-- GTFS-RT live feeds blocked on Metrolinx API key — registration submitted, up to 10 business days. Static GTFS feed does not require a key.
+- GTFS-RT live feeds blocked on Metrolinx API key — registration submitted.
+  Static GTFS feed does not require a key.
 
-**Remaining before first real test:**
-- [ ] Run first GTFS static ingest (`POST /ingest/gtfs-static`) — unblocked, no key needed
-- [ ] Verify stop IDs for Toronto (Sheppard–Yonge) and Guelph stops
-- [ ] Configure `GTFS_RT_API_KEY` in `.env` once key arrives
+---
+
+## End-to-end test results (2026-02-11)
+
+Verified against real GO Transit GTFS data:
+
+- **904 stops**, 43 routes, 125 245 trips, 2 081 547 stop times ingested
+- **Graph**: 904 nodes, 4 017 edges (1 867 trip + 2 150 walk)
+- **Routes confirmed working**: `GET /routes?origin=UN&destination=GL` returns
+  5 scored routes in < 2 s
+- **Sample result** (Route 1):
+  Union Station → Bramalea → Brampton → Mount Pleasant → Georgetown → Acton → **Guelph Central** — 1h 21m, risk = Low (0.2)
+- **Risk scoring**: historical prior (0.8 neutral) + live modifiers applied per
+  leg; late-evening departures correctly flagged
+- **LLM endpoint**: `?explain=true` wired and callable (requires `ANTHROPIC_API_KEY`)
+
+---
+
+## Known TODOs inside the code
+
+| Location | Issue |
+|---|---|
+| `routing/engine.py` | ~~Incoherent departure times~~ — fixed: `_schedule_path` queries real trips per segment; ~~transfer wait-time stubbed~~ — now enforced in `_passes_filters` |
+| `routing/engine.py` | ~~Routes 4–5 use local street stops~~ — fixed: `_passes_filters` now rejects any route containing a zero-second trip leg |
+| `reliability/historical.py` `record_observed_departure()` | Needs background job calling it from GTFS-RT replay to seed historical data |
+| `api/main.py` `POST /ingest/gtfs-static` | No auth — add before any production deployment |
+| `graph/builder.py` `_add_walk_edges()` | O(n²) stop comparison — fine for GO Transit stop count, but add spatial indexing if expanded to full GTA |
+
+---
+
+## Routing engine — implementation notes
+
+The graph stores one edge per `(from_stop, to_stop, route_id)` keeping the
+minimum travel time across all trips on that route. This means:
+
+- `nx.shortest_simple_paths` cannot be called on a `MultiDiGraph` → the engine
+  first projects to a `DiGraph` (min-weight edge per pair) before running Yen's
+- Transfer counting must use **route_id changes**, not trip_id changes (adjacent
+  edges on the same route may carry different trip_ids from independent min-time
+  selection)
+- A `MAX_CANDIDATES = max_routes * 20` cap prevents Yen's from hanging when
+  walk edges create high-branching alternative paths
 
 ---
 
@@ -75,7 +114,7 @@ GTFS-RT (30–60s)     ──► ingestion/gtfs_realtime.py        │
 
 ### ADR-004: LLM scope boundary
 - **Decision:** LLM receives structured JSON, outputs plain-language explanation only.
-- **Rationale:** Per CLAUDE.md — LLMs must never generate routes, invent transit data, or override deterministic scoring logic.
+- **Rationale:** LLMs must never generate routes, invent transit data, or override deterministic scoring logic.
 - **Date:** 2026-02-10
 
 ### ADR-005: GTFS times stored as HH:MM:SS strings
@@ -88,30 +127,40 @@ GTFS-RT (30–60s)     ──► ingestion/gtfs_realtime.py        │
 - **Rationale:** The weakest link dominates. A route is only as reliable as its riskiest leg. Open to revision once we have real data.
 - **Date:** 2026-02-10
 
+### ADR-007: DiGraph projection for Yen's algorithm
+- **Decision:** Before calling `nx.shortest_simple_paths`, project the `MultiDiGraph` to a `DiGraph` keeping only the min-weight edge per `(u, v)` pair.
+- **Rationale:** `shortest_simple_paths` is decorated `@not_implemented_for("multigraph")` in NetworkX. The projection is cheap and preserves optimal path weights.
+- **Date:** 2026-02-11
+
+### ADR-008: Transfer = route_id change, not trip_id change
+- **Decision:** Count a transfer whenever `route_id` changes between consecutive trip legs, not when `trip_id` changes.
+- **Rationale:** The graph picks the minimum-travel-time trip independently per edge, so consecutive edges on the same route may carry different trip_ids. Counting trip_id changes would falsely produce 10+ transfers on a direct ride.
+- **Date:** 2026-02-11
+
 ---
 
 ## Data Sources
 
-| Feed                     | Format         | Refresh | Config key                        |
-|--------------------------|----------------|---------|-----------------------------------|
-| GO Transit GTFS Static   | ZIP (CSV)      | Daily   | `GTFS_STATIC_URL`                 |
-| GTFS-RT Trip Updates     | Protobuf       | 30s     | `GTFS_RT_TRIP_UPDATES_URL`        |
-| GTFS-RT Vehicle Positions| Protobuf       | 30s     | `GTFS_RT_VEHICLE_POSITIONS_URL`   |
-| GTFS-RT Service Alerts   | Protobuf       | 30s     | `GTFS_RT_ALERTS_URL`              |
+| Feed                      | Format    | Refresh | Config key                        |
+|---------------------------|-----------|---------|-----------------------------------|
+| GO Transit GTFS Static    | ZIP (CSV) | Daily   | `GTFS_STATIC_URL`                 |
+| GTFS-RT Trip Updates      | Protobuf  | 30 s    | `GTFS_RT_TRIP_UPDATES_URL`        |
+| GTFS-RT Vehicle Positions | Protobuf  | 30 s    | `GTFS_RT_VEHICLE_POSITIONS_URL`   |
+| GTFS-RT Service Alerts    | Protobuf  | 30 s    | `GTFS_RT_ALERTS_URL`              |
 
 > **Feed URLs:** Obtain from the Metrolinx Open Data portal.
-> GTFS-RT feeds may require an API key.
+> GTFS-RT feeds require an API key.
 
 ---
 
 ## Open Questions
 
-- [ ] Does Metrolinx require an API key for GTFS-RT feeds?
-- [ ] Which specific stop IDs cover the Toronto (Sheppard–Yonge) ↔ Guelph corridor?
-- [ ] What is the right max walking radius? (Currently `MAX_WALK_METRES=500`)
+- [ ] Metrolinx GTFS-RT API key — when does it arrive?
+- [ ] Departure-time model: how to pick the right trip per leg given a query time?
+- [ ] Filter for route type / stop type to exclude local bus from long-haul routes
 - [ ] Should route risk = max leg risk, or a weighted sum? Revisit with real data.
-- [ ] How to seed historical reliability before enough data accumulates? (Use 0.8 neutral prior for now.)
-- [ ] Should the `/ingest/gtfs-static` endpoint require auth in production?
+- [ ] How to seed historical reliability before enough data accumulates?
+- [ ] Should `/ingest/gtfs-static` require auth in production?
 
 ---
 
@@ -121,22 +170,31 @@ GTFS-RT (30–60s)     ──► ingestion/gtfs_realtime.py        │
 - [x] GTFS static ingestion
 - [x] Graph construction
 - [x] Routing engine
-- [x] GTFS-RT polling
+- [x] GTFS-RT polling (code complete; blocked on API key)
 - [x] Historical reliability tracking
 - [x] Live risk modifiers
 - [x] LLM explanation layer
 - [x] FastAPI endpoints
-- [ ] **First end-to-end test** with real GTFS data
+- [x] **First end-to-end test** with real GTFS data (2026-02-11)
+- [x] **Route-type filter** — zero-second leg filter eliminates street-stop chains (2026-02-11)
+- [x] **Departure-time aware routing** — `departure_time` + `travel_date` params; single coherent trip per route segment (2026-02-11)
 - [ ] Unit tests for routing + reliability modules
 - [ ] Reliability data seeding / backfill strategy
+- [ ] Auth on `POST /ingest/gtfs-static`
 
 ---
 
 ## Environment Setup
 
 ```bash
-# Install uv if you haven't already: https://docs.astral.sh/uv/getting-started/installation/
-uv sync                        # creates .venv + installs all dependencies
-cp .env.example .env           # fill in GTFS_RT_API_KEY + ANTHROPIC_API_KEY when available
-uv run uvicorn api.main:app --reload
+# Install uv: https://docs.astral.sh/uv/getting-started/installation/
+uv sync                    # create .venv + install all deps
+cp .env.example .env       # fill in ANTHROPIC_API_KEY; GTFS_RT_API_KEY optional
+
+uv run uvicorn api.main:app --port 8000    # start server (no --reload in dev to avoid stale processes)
+curl -X POST http://localhost:8000/ingest/gtfs-static   # first-run data load (~30s)
+curl "http://localhost:8000/routes?origin=UN&destination=GL"
 ```
+
+> **Note:** Do not use `--reload` in development — multiple reloader processes
+> can survive `Ctrl+C` and serve stale bytecode. Use a clean restart instead.
