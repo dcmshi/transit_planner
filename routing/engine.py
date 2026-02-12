@@ -92,12 +92,13 @@ def find_routes(
             H.add_edge(u, v, weight=w)
 
     # Hard cap on total candidate paths examined — prevents hanging on graphs
-    # with many walk edges.  The first path is found via Dijkstra (fast); each
-    # subsequent Yen spur adds one more Dijkstra call, cheap on a 900-node graph.
-    MAX_CANDIDATES = max_routes * 20
+    # with many walk edges.  Raised vs the old value because cheap dedup now
+    # discards same-trip duplicates quickly, so we can afford to look further.
+    MAX_CANDIDATES = max_routes * 40
 
     raw_paths = nx.shortest_simple_paths(H, origin_stop_id, destination_stop_id, weight="weight")
 
+    seen_signatures: set[tuple[str, ...]] = set()
     routes: list[Route] = []
     for examined, node_path in enumerate(raw_paths):
         if examined >= MAX_CANDIDATES:
@@ -107,6 +108,10 @@ def find_routes(
             continue
         if not _passes_filters(legs):
             continue
+        sig = _route_signature(legs)
+        if sig in seen_signatures:
+            continue
+        seen_signatures.add(sig)
         routes.append(legs)
         if len(routes) >= max_routes:
             break
@@ -341,6 +346,27 @@ def _passes_filters(legs: Route) -> bool:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _route_signature(legs: Route) -> tuple[str, ...]:
+    """
+    Produce a deduplication key for a scheduled route.
+
+    Two routes are considered the same physical journey if they ride
+    exactly the same trips in the same order.  Walk legs are ignored;
+    consecutive legs sharing a trip_id are collapsed to one entry.
+
+    Example:
+        Trip T1 (A→B), walk (B→B'), Trip T2 (B'→C)  →  ("T1", "T2")
+        Trip T1 (A→C, skipping B)                    →  ("T1",)   ← duplicate of above if T1==T1
+    """
+    sig: list[str] = []
+    for leg in legs:
+        if leg["kind"] == "trip":
+            trip_id = leg["trip_id"]
+            if not sig or sig[-1] != trip_id:
+                sig.append(trip_id)
+    return tuple(sig)
+
 
 def total_travel_seconds(legs: Route) -> int:
     """Sum of all leg durations in seconds (trip travel + walk time)."""

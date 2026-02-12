@@ -8,7 +8,7 @@ logic that lives entirely inside routing/engine.py.
 import pytest
 
 from config import MAX_TRANSFERS, MIN_TRANSFER_MINUTES
-from routing.engine import _hms_to_seconds, _passes_filters, total_travel_seconds
+from routing.engine import _hms_to_seconds, _passes_filters, _route_signature, total_travel_seconds
 
 
 # ---------------------------------------------------------------------------
@@ -198,3 +198,54 @@ class TestPassesFilters:
             _trip("R1", "09:15:00", "10:00:00", 2700),
         ]
         assert _passes_filters(legs) is True
+
+
+# ---------------------------------------------------------------------------
+# _route_signature
+# ---------------------------------------------------------------------------
+
+class TestRouteSignature:
+    def test_single_trip(self):
+        legs = [_trip("R1", "08:00:00", "09:00:00", 3600, trip_id="T1")]
+        assert _route_signature(legs) == ("T1",)
+
+    def test_consecutive_same_trip_collapsed(self):
+        # Two legs on the same trip_id → appears once in signature
+        legs = [
+            _trip("R1", "08:00:00", "08:30:00", 1800, trip_id="T1"),
+            _trip("R1", "08:30:00", "09:00:00", 1800, trip_id="T1"),
+        ]
+        assert _route_signature(legs) == ("T1",)
+
+    def test_two_different_trips(self):
+        legs = [
+            _trip("R1", "08:00:00", "09:00:00", 3600, trip_id="T1"),
+            _trip("R2", "09:30:00", "10:30:00", 3600, trip_id="T2"),
+        ]
+        assert _route_signature(legs) == ("T1", "T2")
+
+    def test_walk_legs_excluded(self):
+        legs = [
+            _trip("R1", "08:00:00", "09:00:00", 3600, trip_id="T1"),
+            _walk(300),
+            _trip("R2", "09:30:00", "10:30:00", 3600, trip_id="T2"),
+        ]
+        assert _route_signature(legs) == ("T1", "T2")
+
+    def test_walk_only_is_empty(self):
+        assert _route_signature([_walk(300)]) == ()
+
+    def test_same_trip_ids_are_duplicates(self):
+        # Two routes riding the same trips are equal even if stops differ
+        route_a = [_trip("R1", "08:00:00", "09:00:00", 3600, trip_id="T1")]
+        route_b = [
+            _trip("R1", "08:00:00", "08:30:00", 1800, trip_id="T1"),
+            _trip("R1", "08:30:00", "09:00:00", 1800, trip_id="T1"),
+        ]
+        assert _route_signature(route_a) == _route_signature(route_b)
+
+    def test_different_trip_ids_are_not_duplicates(self):
+        # Same route_id but different trip (later departure) → different signature
+        route_early = [_trip("R1", "08:00:00", "09:00:00", 3600, trip_id="T_early")]
+        route_late = [_trip("R1", "10:00:00", "11:00:00", 3600, trip_id="T_late")]
+        assert _route_signature(route_early) != _route_signature(route_late)

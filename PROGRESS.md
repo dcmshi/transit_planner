@@ -159,7 +159,7 @@ minimum travel time across all trips on that route. This means:
 - [ ] Should route risk = max leg risk, or a weighted sum? Revisit with real data.
 - [ ] How to seed historical reliability before enough data accumulates?
 - [ ] Should `/ingest/gtfs-static` require auth in production?
-- [ ] Route alternatives: Yen's currently returns stop-sequence variants of the same trip. Should surface genuinely different departure times or routes instead.
+- [x] Route deduplication — `_route_signature` deduplicates by ordered trip_id sequence; same train with different stop coverage no longer appears as multiple routes (2026-02-11)
 
 ---
 
