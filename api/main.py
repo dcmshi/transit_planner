@@ -18,10 +18,11 @@ from datetime import datetime, date as Date
 from typing import Any
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Security
+from fastapi.security import APIKeyHeader
 from sqlalchemy.orm import Session
 
-from config import GTFS_RT_API_KEY, GTFS_RT_POLL_SECONDS, MAX_ROUTES
+from config import GTFS_RT_API_KEY, GTFS_RT_POLL_SECONDS, INGEST_API_KEY, MAX_ROUTES
 from db.session import SessionLocal, get_session, init_db
 from graph.builder import build_graph, get_graph
 from ingestion.gtfs_realtime import poll_all
@@ -33,6 +34,21 @@ from routing.engine import find_routes, total_travel_seconds
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+_ingest_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+
+def _require_ingest_key(key: str | None = Security(_ingest_key_header)) -> None:
+    """
+    Optional API-key guard for the ingest endpoint.
+
+    If INGEST_API_KEY is not set the endpoint is open (local dev / testing).
+    If it is set, the request must include the matching X-API-Key header.
+    """
+    if not INGEST_API_KEY:
+        return  # no key configured → open
+    if key != INGEST_API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid or missing X-API-Key header.")
 
 scheduler = AsyncIOScheduler()
 
@@ -208,7 +224,10 @@ async def get_routes(
 
 
 @app.post("/ingest/gtfs-static")
-async def trigger_gtfs_ingest(session: Session = Depends(get_session)) -> dict[str, str]:
+async def trigger_gtfs_ingest(
+    session: Session = Depends(get_session),
+    _: None = Depends(_require_ingest_key),
+) -> dict[str, str]:
     """
     Manually trigger a GTFS static data refresh and graph rebuild.
     (In production this runs on a daily schedule.)

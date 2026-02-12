@@ -29,6 +29,11 @@ GTFS_RT_POLL_SECONDS: int = int(os.getenv("GTFS_RT_POLL_SECONDS", "30"))
 OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "llama3.2")
 
+# Ingest auth (optional)
+# If set, POST /ingest/gtfs-static requires X-API-Key: <value> header.
+# Leave blank to keep the endpoint open (safe for local development).
+INGEST_API_KEY: str = os.getenv("INGEST_API_KEY", "")
+
 # API
 API_HOST: str = os.getenv("API_HOST", "0.0.0.0")
 API_PORT: int = int(os.getenv("API_PORT", "8000"))

@@ -305,3 +305,60 @@ class TestGetRoutes:
                 "&travel_date=2026-02-11&departure_time=08:00"
             )
         assert resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# POST /ingest/gtfs-static — auth
+# ---------------------------------------------------------------------------
+
+class TestIngestAuth:
+    """
+    The ingest endpoint is open when INGEST_API_KEY is unset (local dev)
+    and requires a matching X-API-Key header when it is set.
+    """
+
+    def test_open_when_no_key_configured(self, client):
+        """No INGEST_API_KEY set → request succeeds without a header."""
+        with (
+            patch("api.main.INGEST_API_KEY", ""),
+            patch("api.main.refresh_static_data"),
+            patch("api.main.build_graph"),
+        ):
+            resp = client.post("/ingest/gtfs-static")
+        assert resp.status_code == 200
+
+    def test_correct_key_accepted(self, client):
+        """Correct X-API-Key header → 200."""
+        with (
+            patch("api.main.INGEST_API_KEY", "secret"),
+            patch("api.main.refresh_static_data"),
+            patch("api.main.build_graph"),
+        ):
+            resp = client.post(
+                "/ingest/gtfs-static",
+                headers={"X-API-Key": "secret"},
+            )
+        assert resp.status_code == 200
+
+    def test_wrong_key_rejected(self, client):
+        """Wrong X-API-Key header → 401."""
+        with (
+            patch("api.main.INGEST_API_KEY", "secret"),
+            patch("api.main.refresh_static_data"),
+            patch("api.main.build_graph"),
+        ):
+            resp = client.post(
+                "/ingest/gtfs-static",
+                headers={"X-API-Key": "wrong"},
+            )
+        assert resp.status_code == 401
+
+    def test_missing_header_rejected(self, client):
+        """No X-API-Key header when key is configured → 401."""
+        with (
+            patch("api.main.INGEST_API_KEY", "secret"),
+            patch("api.main.refresh_static_data"),
+            patch("api.main.build_graph"),
+        ):
+            resp = client.post("/ingest/gtfs-static")
+        assert resp.status_code == 401
