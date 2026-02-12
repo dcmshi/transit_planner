@@ -4,12 +4,18 @@ FastAPI application entry point.
 On startup:
   1. Initialise the database schema.
   2. Build the transit graph from stored GTFS data (if available).
-  3. Start the GTFS-RT polling scheduler.
+  3. Start the APScheduler:
+       - Daily GTFS static refresh + graph rebuild + reliability reseed
+         (every GTFS_REFRESH_HOURS, default 24h — always active).
+       - GTFS-RT polling every GTFS_RT_POLL_SECONDS
+         (only when GTFS_RT_API_KEY is set).
 
 Endpoints (v1):
-  GET /routes?origin=<stop_id>&destination=<stop_id>&explain=<bool>
-  GET /stops?query=<name>
-  GET /health
+  GET  /routes?origin=<stop_id>&destination=<stop_id>&explain=<bool>
+  GET  /stops?query=<name>
+  GET  /health
+  POST /ingest/gtfs-static
+  POST /ingest/reliability-seed
 """
 
 import logging
@@ -22,7 +28,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Security
 from fastapi.security import APIKeyHeader
 from sqlalchemy.orm import Session
 
-from config import GTFS_RT_API_KEY, GTFS_RT_POLL_SECONDS, INGEST_API_KEY, MAX_ROUTES
+from config import GTFS_REFRESH_HOURS, GTFS_RT_API_KEY, GTFS_RT_POLL_SECONDS, INGEST_API_KEY, MAX_ROUTES
 from db.session import SessionLocal, get_session, init_db
 from graph.builder import build_graph, get_graph, get_last_built_at
 from ingestion.gtfs_realtime import poll_all
@@ -54,6 +60,29 @@ def _require_ingest_key(key: str | None = Security(_ingest_key_header)) -> None:
 scheduler = AsyncIOScheduler()
 
 
+async def _daily_gtfs_refresh() -> None:
+    """
+    Scheduled job: refresh GTFS static data, rebuild the graph, and
+    reseed reliability records.
+
+    Runs every GTFS_REFRESH_HOURS hours (default 24).  Opens its own DB
+    session because APScheduler jobs run outside FastAPI's DI system.
+    Exceptions are caught and logged so a transient network failure cannot
+    crash the scheduler process.
+    """
+    logger.info("Daily GTFS static refresh starting.")
+    db = SessionLocal()
+    try:
+        await refresh_static_data(db)
+        build_graph(db)
+        seeded = seed_from_static(db, fill_gaps_only=False)
+        logger.info("Daily GTFS static refresh complete: %d reliability records reseeded.", seeded)
+    except Exception as exc:
+        logger.error("Daily GTFS static refresh failed: %s", exc, exc_info=True)
+    finally:
+        db.close()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
@@ -68,12 +97,29 @@ async def lifespan(app: FastAPI):
     finally:
         db.close()
 
+    # Daily GTFS static refresh — always registered regardless of RT key.
+    scheduler.add_job(
+        _daily_gtfs_refresh,
+        "interval",
+        hours=GTFS_REFRESH_HOURS,
+        id="daily_gtfs_refresh",
+    )
+
     if GTFS_RT_API_KEY:
-        scheduler.add_job(poll_all, "interval", seconds=GTFS_RT_POLL_SECONDS)
-        scheduler.start()
+        scheduler.add_job(
+            poll_all,
+            "interval",
+            seconds=GTFS_RT_POLL_SECONDS,
+            id="gtfs_rt_poll",
+        )
         logger.info("GTFS-RT polling started (every %ds).", GTFS_RT_POLL_SECONDS)
     else:
         logger.info("GTFS-RT polling disabled — GTFS_RT_API_KEY not set.")
+
+    scheduler.start()
+    logger.info(
+        "Scheduler started. Daily GTFS refresh every %dh.", GTFS_REFRESH_HOURS
+    )
 
     yield
 
@@ -129,6 +175,12 @@ async def health(session: Session = Depends(get_session)) -> dict[str, Any]:
     except RuntimeError:
         pass
 
+    # Next scheduled static refresh
+    next_refresh_at: str | None = None
+    daily_job = scheduler.get_job("daily_gtfs_refresh")
+    if daily_job and daily_job.next_run_time:
+        next_refresh_at = daily_job.next_run_time.isoformat()
+
     return {
         "status": "ok",
         "timestamp": datetime.utcnow().isoformat(),
@@ -140,6 +192,7 @@ async def health(session: Session = Depends(get_session)) -> dict[str, Any]:
             "graph_edges": graph_edges,
             "graph_built": graph_built,
             "last_built_at": last_built_at,
+            "next_refresh_at": next_refresh_at,
         },
         "reliability": {
             "records": reliability_count,

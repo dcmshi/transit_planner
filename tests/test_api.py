@@ -8,7 +8,7 @@ the db_session / client fixtures, so tests are fully isolated.
 
 import pytest
 from datetime import datetime
-from unittest.mock import patch, MagicMock
+from unittest.mock import AsyncMock, patch, MagicMock
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -94,6 +94,7 @@ class TestHealth:
         assert "graph_built" in gtfs
         assert "last_built_at" in gtfs
         assert "latest_service_date" in gtfs
+        assert "next_refresh_at" in gtfs
 
     def test_reliability_section_present(self, client):
         body = client.get("/health").json()
@@ -428,3 +429,59 @@ class TestIngestAuth:
             body = client.post("/ingest/gtfs-static").json()
 
         assert "99" in body["message"]
+
+
+# ---------------------------------------------------------------------------
+# _daily_gtfs_refresh job function
+# ---------------------------------------------------------------------------
+
+class TestDailyGtfsRefreshJob:
+
+    @pytest.mark.anyio
+    async def test_calls_refresh_build_seed(self):
+        """Job invokes refresh_static_data, build_graph, and seed_from_static."""
+        from api.main import _daily_gtfs_refresh
+
+        mock_session = MagicMock()
+        with (
+            patch("api.main.SessionLocal", return_value=mock_session),
+            patch("api.main.refresh_static_data", new_callable=AsyncMock) as mock_refresh,
+            patch("api.main.build_graph") as mock_build,
+            patch("api.main.seed_from_static", return_value=5) as mock_seed,
+        ):
+            await _daily_gtfs_refresh()
+
+        mock_refresh.assert_called_once_with(mock_session)
+        mock_build.assert_called_once_with(mock_session)
+        mock_seed.assert_called_once_with(mock_session, fill_gaps_only=False)
+
+    @pytest.mark.anyio
+    async def test_error_does_not_propagate(self):
+        """A failure during refresh is swallowed — the job must not crash the scheduler."""
+        from api.main import _daily_gtfs_refresh
+
+        with (
+            patch("api.main.SessionLocal", return_value=MagicMock()),
+            patch("api.main.refresh_static_data", new_callable=AsyncMock,
+                  side_effect=Exception("network down")),
+            patch("api.main.build_graph"),
+            patch("api.main.seed_from_static"),
+        ):
+            await _daily_gtfs_refresh()  # must not raise
+
+    @pytest.mark.anyio
+    async def test_session_always_closed(self):
+        """DB session is closed in the finally block even when the job fails."""
+        from api.main import _daily_gtfs_refresh
+
+        mock_session = MagicMock()
+        with (
+            patch("api.main.SessionLocal", return_value=mock_session),
+            patch("api.main.refresh_static_data", new_callable=AsyncMock,
+                  side_effect=Exception("fail")),
+            patch("api.main.build_graph"),
+            patch("api.main.seed_from_static"),
+        ):
+            await _daily_gtfs_refresh()
+
+        mock_session.close.assert_called_once()

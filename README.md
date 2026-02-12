@@ -146,7 +146,8 @@ Liveness and data-freshness check.
     "graph_nodes": 904,
     "graph_edges": 4017,
     "graph_built": true,
-    "last_built_at": "2026-02-11T09:30:00"
+    "last_built_at": "2026-02-11T09:30:00",
+    "next_refresh_at": "2026-02-12T09:30:00"
   },
   "reliability": {
     "records": 1234,
