@@ -43,7 +43,7 @@ GTFS-RT (30–60s)     ──► ingestion/gtfs_realtime.py        │
 | `routing/engine.py`             | Complete    | Yen's k-shortest paths on projected DiGraph; MAX_CANDIDATES cap    |
 | `reliability/historical.py`     | Complete    | Rolling-window score per route/stop/bucket                         |
 | `reliability/live.py`           | Complete    | Live GTFS-RT risk modifiers                                        |
-| `llm/explainer.py`              | Complete    | Claude explanation layer (scoped)                                  |
+| `llm/explainer.py`              | Complete    | Local Ollama explanation layer (scoped); graceful fallback if server unreachable |
 | `api/main.py`                   | Complete    | /routes, /stops, /health, /ingest/gtfs-static endpoints            |
 
 **Blocked:**
@@ -64,7 +64,7 @@ Verified against real GO Transit GTFS data:
   Union Station → Bramalea → Brampton → Mount Pleasant → Georgetown → Acton → **Guelph Central** — 1h 21m, risk = Low (0.2)
 - **Risk scoring**: historical prior (0.8 neutral) + live modifiers applied per
   leg; late-evening departures correctly flagged
-- **LLM endpoint**: `?explain=true` wired and callable (requires `ANTHROPIC_API_KEY`)
+- **LLM endpoint**: `?explain=true` wired and callable (requires local Ollama; returns graceful fallback message if not running)
 
 ---
 
@@ -156,11 +156,10 @@ minimum travel time across all trips on that route. This means:
 ## Open Questions
 
 - [ ] Metrolinx GTFS-RT API key — when does it arrive?
-- [ ] Departure-time model: how to pick the right trip per leg given a query time?
-- [ ] Filter for route type / stop type to exclude local bus from long-haul routes
 - [ ] Should route risk = max leg risk, or a weighted sum? Revisit with real data.
 - [ ] How to seed historical reliability before enough data accumulates?
 - [ ] Should `/ingest/gtfs-static` require auth in production?
+- [ ] Route alternatives: Yen's currently returns stop-sequence variants of the same trip. Should surface genuinely different departure times or routes instead.
 
 ---
 

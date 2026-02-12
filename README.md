@@ -21,11 +21,12 @@ GO Transit buses between Toronto and Guelph regularly suffer from:
 ```
 GTFS Static  ──► graph (networkx)  ──► Yen's k-shortest paths
 GTFS-RT      ──►  reliability score (historical × live modifiers)
-                       └──► Claude LLM ──► plain-language explanation
+                       └──► local LLM (Ollama) ──► plain-language explanation
 ```
 
 Routes are generated deterministically. The LLM explains them — it never
-generates routes or invents transit data.
+generates routes or invents transit data. The explanation layer runs locally
+via [Ollama](https://ollama.com) — no API key or cloud account required.
 
 ---
 
@@ -37,17 +38,24 @@ uv sync
 
 # 2. Configure environment
 cp .env.example .env
-# Fill in ANTHROPIC_API_KEY (required for ?explain=true)
-# Fill in GTFS_RT_API_KEY once Metrolinx approves registration (optional)
+# Edit .env: fill in GTFS_RT_API_KEY once Metrolinx approves registration (optional)
+# OLLAMA_BASE_URL and OLLAMA_MODEL have sensible defaults — no API key needed
 
-# 3. Start the API
+# 3. (Optional) Set up local LLM for ?explain=true
+#    Install Ollama from https://ollama.com, then:
+ollama pull llama3.2
+
+# 4. Start the API
 uv run uvicorn api.main:app --port 8000
 
-# 4. Load GTFS data (first run only; ~30s)
+# 5. Load GTFS data (first run only; ~30s)
 curl -X POST http://localhost:8000/ingest/gtfs-static
 
-# 5. Query routes
+# 6. Query routes
 curl "http://localhost:8000/routes?origin=UN&destination=GL"
+
+# 7. Query with explanation (requires Ollama running)
+curl "http://localhost:8000/routes?origin=UN&destination=GL&explain=true"
 ```
 
 ---
@@ -157,7 +165,8 @@ All settings are environment variables (see `.env.example`):
 | `DATABASE_URL` | `sqlite:///data/transit.db` | SQLite for dev; set to PostgreSQL for prod |
 | `GTFS_STATIC_URL` | Metrolinx CDN | URL of GO GTFS ZIP |
 | `GTFS_RT_API_KEY` | *(blank)* | Metrolinx Open Data API key; RT polling disabled if unset |
-| `ANTHROPIC_API_KEY` | *(blank)* | Required for `?explain=true` |
+| `OLLAMA_BASE_URL` | `http://localhost:11434` | Local Ollama server URL; required for `?explain=true` |
+| `OLLAMA_MODEL` | `llama3.2` | Model to use (must be pulled first: `ollama pull <model>`) |
 | `MAX_ROUTES` | `5` | Max candidate routes returned |
 | `MAX_TRANSFERS` | `2` | Hard cap on route changes |
 | `MIN_TRANSFER_MINUTES` | `10` | Minimum transfer buffer |

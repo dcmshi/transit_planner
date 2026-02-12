@@ -25,9 +25,9 @@ GTFS_RT_ALERTS_URL: str = os.getenv("GTFS_RT_ALERTS_URL", "")
 GTFS_RT_API_KEY: str = os.getenv("GTFS_RT_API_KEY", "")  # appended as ?key= on each RT request
 GTFS_RT_POLL_SECONDS: int = int(os.getenv("GTFS_RT_POLL_SECONDS", "30"))
 
-# LLM
-ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
-LLM_MODEL: str = os.getenv("LLM_MODEL", "claude-opus-4-6")
+# LLM (local Ollama — https://ollama.com)
+OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "llama3.2")
 
 # API
 API_HOST: str = os.getenv("API_HOST", "0.0.0.0")
