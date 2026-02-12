@@ -133,7 +133,32 @@ curl "http://localhost:8000/stops?query=Union"
 
 ### `GET /health`
 
-Liveness check. Returns `{"status": "ok", "timestamp": "<ISO 8601>"}`.
+Liveness and data-freshness check.
+
+```json
+{
+  "status": "ok",
+  "timestamp": "2026-02-11T10:00:00",
+  "gtfs": {
+    "stops": 904,
+    "trips": 125245,
+    "latest_service_date": "20260601",
+    "graph_nodes": 904,
+    "graph_edges": 4017,
+    "graph_built": true,
+    "last_built_at": "2026-02-11T09:30:00"
+  },
+  "reliability": {
+    "records": 1234,
+    "last_seeded_at": "2026-02-11T09:35:00"
+  },
+  "gtfs_rt": {
+    "polling_active": false
+  }
+}
+```
+
+All counts are `0` (and timestamps `null`) before `/ingest/gtfs-static` has been called.
 
 ---
 

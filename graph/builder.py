@@ -16,6 +16,7 @@ in memory. It must be rebuilt after each daily GTFS refresh.
 
 import logging
 import math
+from datetime import datetime
 from typing import Optional
 
 import networkx as nx
@@ -27,8 +28,9 @@ from db.models import Stop, StopTime, Trip
 
 logger = logging.getLogger(__name__)
 
-# Module-level cached graph
+# Module-level cached graph and build timestamp
 _graph: Optional[nx.MultiDiGraph] = None
+_last_built_at: Optional[datetime] = None
 
 
 def get_graph() -> nx.MultiDiGraph:
@@ -38,12 +40,17 @@ def get_graph() -> nx.MultiDiGraph:
     return _graph
 
 
+def get_last_built_at() -> Optional[datetime]:
+    """Return the UTC timestamp of the last successful build_graph() call, or None."""
+    return _last_built_at
+
+
 def build_graph(session: Session) -> nx.MultiDiGraph:
     """
     Construct and cache the full transit + walking graph from the database.
     Returns the graph and stores it in the module-level cache.
     """
-    global _graph
+    global _graph, _last_built_at
     G = nx.MultiDiGraph()
 
     stops = session.query(Stop).all()
@@ -52,6 +59,7 @@ def build_graph(session: Session) -> nx.MultiDiGraph:
     _add_walk_edges(G, stops)
 
     _graph = G
+    _last_built_at = datetime.utcnow()
     logger.info(
         "Graph built: %d nodes, %d edges (%d trip, %d walk).",
         G.number_of_nodes(),

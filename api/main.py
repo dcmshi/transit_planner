@@ -24,7 +24,7 @@ from sqlalchemy.orm import Session
 
 from config import GTFS_RT_API_KEY, GTFS_RT_POLL_SECONDS, INGEST_API_KEY, MAX_ROUTES
 from db.session import SessionLocal, get_session, init_db
-from graph.builder import build_graph, get_graph
+from graph.builder import build_graph, get_graph, get_last_built_at
 from ingestion.gtfs_realtime import poll_all
 from ingestion.gtfs_static import refresh_static_data
 from ingestion.seed_reliability import seed_from_static
@@ -91,8 +91,64 @@ app = FastAPI(
 
 
 @app.get("/health")
-async def health() -> dict[str, str]:
-    return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
+async def health(session: Session = Depends(get_session)) -> dict[str, Any]:
+    """
+    Liveness + data-freshness check.
+
+    Returns DB record counts, graph stats, and timestamps so operators can
+    quickly tell whether GTFS data has been loaded and the graph is ready.
+    """
+    from db.models import ReliabilityRecord, Stop, Trip
+    from sqlalchemy import func, text as sa_text
+
+    # GTFS data counts (0 if no data loaded yet)
+    stop_count: int = session.query(func.count(Stop.stop_id)).scalar() or 0
+    trip_count: int = session.query(func.count(Trip.trip_id)).scalar() or 0
+    latest_service_date: str | None = session.query(func.max(Trip.service_id)).scalar()
+
+    # Reliability records
+    reliability_count: int = (
+        session.query(func.count(ReliabilityRecord.id)).scalar() or 0
+    )
+    last_seeded_at: str | None = (
+        session.query(func.max(ReliabilityRecord.updated_at)).scalar()
+    )
+
+    # Graph stats (may not be built yet)
+    graph_built = False
+    graph_nodes = 0
+    graph_edges = 0
+    last_built_at: str | None = None
+    try:
+        G = get_graph()
+        graph_built = True
+        graph_nodes = G.number_of_nodes()
+        graph_edges = G.number_of_edges()
+        ts = get_last_built_at()
+        last_built_at = ts.isoformat() if ts else None
+    except RuntimeError:
+        pass
+
+    return {
+        "status": "ok",
+        "timestamp": datetime.utcnow().isoformat(),
+        "gtfs": {
+            "stops": stop_count,
+            "trips": trip_count,
+            "latest_service_date": latest_service_date,
+            "graph_nodes": graph_nodes,
+            "graph_edges": graph_edges,
+            "graph_built": graph_built,
+            "last_built_at": last_built_at,
+        },
+        "reliability": {
+            "records": reliability_count,
+            "last_seeded_at": last_seeded_at,
+        },
+        "gtfs_rt": {
+            "polling_active": GTFS_RT_API_KEY != "" and scheduler.running,
+        },
+    }
 
 
 @app.get("/stops")

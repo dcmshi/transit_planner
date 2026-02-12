@@ -84,6 +84,43 @@ class TestHealth:
         body = client.get("/health").json()
         assert "timestamp" in body
 
+    def test_gtfs_section_present(self, client):
+        body = client.get("/health").json()
+        gtfs = body["gtfs"]
+        assert "stops" in gtfs
+        assert "trips" in gtfs
+        assert "graph_nodes" in gtfs
+        assert "graph_edges" in gtfs
+        assert "graph_built" in gtfs
+        assert "last_built_at" in gtfs
+        assert "latest_service_date" in gtfs
+
+    def test_reliability_section_present(self, client):
+        body = client.get("/health").json()
+        rel = body["reliability"]
+        assert "records" in rel
+        assert "last_seeded_at" in rel
+
+    def test_gtfs_rt_section_present(self, client):
+        body = client.get("/health").json()
+        assert "polling_active" in body["gtfs_rt"]
+
+    def test_empty_db_returns_zero_counts(self, client):
+        body = client.get("/health").json()
+        assert body["gtfs"]["stops"] == 0
+        assert body["gtfs"]["trips"] == 0
+        assert body["gtfs"]["latest_service_date"] is None
+        assert body["reliability"]["records"] == 0
+        assert body["reliability"]["last_seeded_at"] is None
+
+    def test_graph_not_built_reports_false(self, client):
+        # build_graph is patched to a no-op in the client fixture, so
+        # the module-level graph cache is never set → graph_built should be False
+        with patch("api.main.get_graph", side_effect=RuntimeError("not built")):
+            body = client.get("/health").json()
+        assert body["gtfs"]["graph_built"] is False
+        assert body["gtfs"]["graph_nodes"] == 0
+
 
 # ---------------------------------------------------------------------------
 # GET /stops
