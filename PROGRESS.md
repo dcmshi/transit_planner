@@ -188,7 +188,7 @@ Priority tiers based on impact and dependency on GTFS-RT.
 ### Tier 1 — Correctness gaps (no external dependency)
 
 - [ ] **Daily GTFS static refresh scheduler** — APScheduler job to call `refresh_static_data` + `build_graph` + `seed_from_static` daily; currently the scheduler only handles GTFS-RT polling, so static data silently goes stale
-- [ ] **Chain reliability reseed into static ingest** — `POST /ingest/gtfs-static` should automatically trigger `seed_from_static` after rebuilding the graph so records stay in sync with the current schedule
+- [x] **Chain reliability reseed into static ingest** — `POST /ingest/gtfs-static` now calls `seed_from_static(fill_gaps_only=False)` after rebuilding the graph; `fill_gaps_only=True` mode added for post-GTFS-RT use (2026-02-11)
 - [ ] **Enhanced `/health` endpoint** — include GTFS data age, graph node/edge counts, reliability record count, and last-seeded timestamp; currently just returns `{"status": "ok"}`
 
 ### Tier 2 — Quality / developer experience

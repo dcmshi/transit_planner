@@ -60,22 +60,31 @@ _PRIORS: dict[str, dict] = {
 }
 
 
-def seed_from_static(session: Session, window_days: int = 14) -> int:
+def seed_from_static(
+    session: Session,
+    window_days: int = 14,
+    fill_gaps_only: bool = False,
+) -> int:
     """
     Seed ReliabilityRecord from the static GTFS schedule.
 
     Finds a `window_days`-day slice of service dates in the DB (preferring
     dates near today), counts scheduled departures per
     (route_id, stop_id, time_bucket), then upserts ReliabilityRecord rows
-    using the synthetic prior rates.  Existing records are overwritten so
-    the function is safe to call repeatedly.
+    using the synthetic prior rates.
 
     Args:
-        session:     SQLAlchemy session (DB must already have GTFS data).
-        window_days: Number of calendar days to sample from the schedule.
+        session:        SQLAlchemy session (DB must already have GTFS data).
+        window_days:    Number of calendar days to sample from the schedule.
+        fill_gaps_only: When False (default), overwrite every matching record
+                        so the synthetic priors stay in sync with the current
+                        schedule.  When True, skip any (route_id, stop_id,
+                        bucket) that already has a record — use this mode
+                        after GTFS-RT data starts flowing so real observations
+                        are not overwritten by synthetic values.
 
     Returns:
-        Number of ReliabilityRecord rows written.
+        Number of ReliabilityRecord rows written (new + updated).
 
     Raises:
         RuntimeError: If no trips are found in the database.
@@ -164,6 +173,9 @@ def seed_from_static(session: Session, window_days: int = 14) -> int:
                 window_start_date=start_str,
             )
             session.add(record)
+        elif fill_gaps_only:
+            # Existing record — preserve real RT observations.
+            continue
 
         record.scheduled_departures = scheduled
         record.observed_departures = observed

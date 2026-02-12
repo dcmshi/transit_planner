@@ -212,6 +212,81 @@ class TestSeedFromStatic:
 
 
 # ---------------------------------------------------------------------------
+# fill_gaps_only tests
+# ---------------------------------------------------------------------------
+
+class TestFillGapsOnly:
+
+    def test_fill_gaps_skips_existing_record(self, db):
+        """fill_gaps_only=True does not overwrite an already-seeded record."""
+        service_id = "20260209"
+        _add_trip(db, "T1", "R1", service_id)
+        _add_stop_time(db, "T1", "S1", 1, "08:00:00")
+        db.commit()
+
+        with patch("ingestion.seed_reliability.date") as mock_date:
+            mock_date.today.return_value = date(2026, 2, 9)
+            mock_date.side_effect = lambda *a, **kw: date(*a, **kw)
+            # First seed — full overwrite
+            seed_from_static(db, window_days=1, fill_gaps_only=False)
+
+        # Simulate a real RT observation by manually bumping the count
+        record = db.query(ReliabilityRecord).first()
+        record.observed_departures = 999
+        db.commit()
+
+        with patch("ingestion.seed_reliability.date") as mock_date:
+            mock_date.today.return_value = date(2026, 2, 9)
+            mock_date.side_effect = lambda *a, **kw: date(*a, **kw)
+            written = seed_from_static(db, window_days=1, fill_gaps_only=True)
+
+        # Record should be unchanged — fill_gaps_only skipped it
+        record = db.query(ReliabilityRecord).first()
+        assert record.observed_departures == 999
+        assert written == 0
+
+    def test_fill_gaps_inserts_new_records(self, db):
+        """fill_gaps_only=True inserts records for combos that don't exist yet."""
+        service_id = "20260209"
+        _add_trip(db, "T1", "R1", service_id)
+        _add_stop_time(db, "T1", "S1", 1, "08:00:00")
+        db.commit()
+
+        # No records yet — fill_gaps_only should insert
+        with patch("ingestion.seed_reliability.date") as mock_date:
+            mock_date.today.return_value = date(2026, 2, 9)
+            mock_date.side_effect = lambda *a, **kw: date(*a, **kw)
+            written = seed_from_static(db, window_days=1, fill_gaps_only=True)
+
+        assert written == 1
+        assert db.query(ReliabilityRecord).count() == 1
+
+    def test_full_overwrite_replaces_existing(self, db):
+        """fill_gaps_only=False (default) overwrites existing records."""
+        service_id = "20260209"
+        _add_trip(db, "T1", "R1", service_id)
+        _add_stop_time(db, "T1", "S1", 1, "08:00:00")
+        db.commit()
+
+        with patch("ingestion.seed_reliability.date") as mock_date:
+            mock_date.today.return_value = date(2026, 2, 9)
+            mock_date.side_effect = lambda *a, **kw: date(*a, **kw)
+            seed_from_static(db, window_days=1, fill_gaps_only=False)
+
+        record = db.query(ReliabilityRecord).first()
+        record.observed_departures = 999
+        db.commit()
+
+        with patch("ingestion.seed_reliability.date") as mock_date:
+            mock_date.today.return_value = date(2026, 2, 9)
+            mock_date.side_effect = lambda *a, **kw: date(*a, **kw)
+            seed_from_static(db, window_days=1, fill_gaps_only=False)
+
+        record = db.query(ReliabilityRecord).first()
+        assert record.observed_departures != 999
+
+
+# ---------------------------------------------------------------------------
 # API endpoint tests
 # ---------------------------------------------------------------------------
 

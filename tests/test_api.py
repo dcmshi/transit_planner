@@ -360,6 +360,7 @@ class TestIngestAuth:
             patch("api.main.INGEST_API_KEY", ""),
             patch("api.main.refresh_static_data"),
             patch("api.main.build_graph"),
+            patch("api.main.seed_from_static", return_value=0),
         ):
             resp = client.post("/ingest/gtfs-static")
         assert resp.status_code == 200
@@ -370,6 +371,7 @@ class TestIngestAuth:
             patch("api.main.INGEST_API_KEY", "secret"),
             patch("api.main.refresh_static_data"),
             patch("api.main.build_graph"),
+            patch("api.main.seed_from_static", return_value=0),
         ):
             resp = client.post(
                 "/ingest/gtfs-static",
@@ -399,3 +401,30 @@ class TestIngestAuth:
         ):
             resp = client.post("/ingest/gtfs-static")
         assert resp.status_code == 401
+
+    def test_reseed_chained_after_ingest(self, client):
+        """POST /ingest/gtfs-static calls seed_from_static with fill_gaps_only=False."""
+        with (
+            patch("api.main.INGEST_API_KEY", ""),
+            patch("api.main.refresh_static_data"),
+            patch("api.main.build_graph"),
+            patch("api.main.seed_from_static", return_value=42) as mock_seed,
+        ):
+            resp = client.post("/ingest/gtfs-static")
+
+        assert resp.status_code == 200
+        mock_seed.assert_called_once()
+        _, kwargs = mock_seed.call_args
+        assert kwargs.get("fill_gaps_only") is False
+
+    def test_ingest_response_includes_seed_count(self, client):
+        """Response body reports how many reliability records were reseeded."""
+        with (
+            patch("api.main.INGEST_API_KEY", ""),
+            patch("api.main.refresh_static_data"),
+            patch("api.main.build_graph"),
+            patch("api.main.seed_from_static", return_value=99),
+        ):
+            body = client.post("/ingest/gtfs-static").json()
+
+        assert "99" in body["message"]

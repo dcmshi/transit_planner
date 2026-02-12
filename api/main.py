@@ -284,14 +284,26 @@ async def get_routes(
 async def trigger_gtfs_ingest(
     session: Session = Depends(get_session),
     _: None = Depends(_require_ingest_key),
-) -> dict[str, str]:
+) -> dict[str, Any]:
     """
-    Manually trigger a GTFS static data refresh and graph rebuild.
-    (In production this runs on a daily schedule.)
+    Manually trigger a GTFS static data refresh, graph rebuild, and
+    reliability reseed.  (In production this runs on a daily schedule.)
+
+    The reseed always runs as a full overwrite (fill_gaps_only=False) so
+    that synthetic priors stay in sync with the updated schedule.  Once
+    GTFS-RT data is flowing, the daily scheduler should switch to
+    fill_gaps_only=True to preserve accumulated real observations.
     """
     await refresh_static_data(session)
     build_graph(session)
-    return {"status": "ok", "message": "GTFS static data refreshed and graph rebuilt."}
+    seeded = seed_from_static(session, fill_gaps_only=False)
+    return {
+        "status": "ok",
+        "message": (
+            f"GTFS static data refreshed, graph rebuilt, "
+            f"and {seeded} reliability records reseeded."
+        ),
+    }
 
 
 @app.post("/ingest/reliability-seed")
