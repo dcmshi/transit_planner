@@ -66,13 +66,18 @@ curl "http://localhost:8000/routes?origin=UN&destination=GL&explain=true"
 
 Return up to N reliability-scored routes between two stops.
 
-| Parameter | Required | Description |
-|-----------|----------|-------------|
-| `origin` | yes | GTFS `stop_id` of departure stop |
-| `destination` | yes | GTFS `stop_id` of arrival stop |
-| `departure_time` | no | Earliest departure as `HH:MM` or `HH:MM:SS`. Defaults to current time. |
-| `travel_date` | no | Travel date as `YYYY-MM-DD`. Defaults to today. |
-| `explain` | no | `true` to include LLM plain-language explanation |
+| Parameter | Required | Default | Description |
+|-----------|----------|---------|-------------|
+| `origin` | yes | — | GTFS `stop_id` of departure stop |
+| `destination` | yes | — | GTFS `stop_id` of arrival stop |
+| `departure_time` | no | now | Earliest departure as `HH:MM` or `HH:MM:SS` |
+| `travel_date` | no | today | Travel date as `YYYY-MM-DD` |
+| `explain` | no | `false` | `true` to include local LLM explanation (requires Ollama) |
+
+**Responses:**
+- `200` — routes found; body contains `routes` array (+ optional `explanation` string)
+- `404` — unknown stop ID, or no routes exist between the stops
+- `422` — invalid parameter format
 
 **Example response:**
 ```json
@@ -98,23 +103,73 @@ Return up to N reliability-scored routes between two stops.
 }
 ```
 
-### `GET /stops?query=<name>`
+Each leg `risk` object contains:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `risk_score` | float 0–1 | Combined historical + live risk (higher = riskier) |
+| `risk_label` | string | `Low` (< 0.33) / `Medium` (< 0.66) / `High` |
+| `modifiers` | list[str] | Human-readable notes (alerts, cancellations, late evening, etc.) |
+| `is_cancelled` | bool | `true` if the trip is currently marked cancelled in GTFS-RT |
+
+---
+
+### `GET /stops`
 
 Search stops by name substring. Use this to find `stop_id` values.
+
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `query` | yes | Name substring (min 2 characters) |
+
+**Responses:** `200` with array of `{stop_id, stop_name, lat, lon}` objects; empty array if no match.
 
 ```bash
 curl "http://localhost:8000/stops?query=Guelph"
 curl "http://localhost:8000/stops?query=Union"
 ```
 
+---
+
 ### `GET /health`
 
-Liveness check.
+Liveness check. Returns `{"status": "ok", "timestamp": "<ISO 8601>"}`.
+
+---
 
 ### `POST /ingest/gtfs-static`
 
 Trigger a full GTFS static data refresh and graph rebuild. Runs automatically
 on a daily schedule; call manually after first install.
+
+If `INGEST_API_KEY` is set, the request must include `X-API-Key: <key>`.
+
+**Responses:** `200 {"status": "ok", ...}` on success; `401` if key is wrong/missing.
+
+---
+
+### `POST /ingest/reliability-seed`
+
+Seed the reliability database from the static GTFS schedule. No GTFS-RT
+feed required. Uses synthetic per-bucket priors derived from schedule
+density (see [Risk model](#risk-model)).
+
+Run this once after `/ingest/gtfs-static` so that risk scores reflect
+real route/time-of-day patterns rather than the flat 0.8 neutral prior.
+
+| Parameter | Required | Default | Description |
+|-----------|----------|---------|-------------|
+| `window_days` | no | `14` | Days of schedule to sample (1–90) |
+
+**Responses:** `200 {"status": "ok", "records_written": N, ...}` on success; `409` if no GTFS data loaded yet.
+
+```bash
+# Seed with default 14-day window
+curl -X POST http://localhost:8000/ingest/reliability-seed
+
+# Seed using 30 days for a broader sample
+curl -X POST "http://localhost:8000/ingest/reliability-seed?window_days=30"
+```
 
 ---
 

@@ -74,7 +74,7 @@ Verified against real GO Transit GTFS data:
 |---|---|
 | `routing/engine.py` | ~~Incoherent departure times~~ — fixed: `_schedule_path` queries real trips per segment; ~~transfer wait-time stubbed~~ — now enforced in `_passes_filters` |
 | `routing/engine.py` | ~~Routes 4–5 use local street stops~~ — fixed: `_passes_filters` now rejects any route containing a zero-second trip leg |
-| `reliability/historical.py` `record_observed_departure()` | Needs background job calling it from GTFS-RT replay to seed historical data |
+| `reliability/historical.py` `record_observed_departure()` | Called by `seed_from_static` (synthetic) and future GTFS-RT background job (real observations) |
 | `api/main.py` `POST /ingest/gtfs-static` | ~~No auth~~ — optional `INGEST_API_KEY` guard added; open when unset |
 | `graph/builder.py` `_add_walk_edges()` | O(n²) stop comparison — fine for GO Transit stop count, but add spatial indexing if expanded to full GTA |
 
@@ -178,7 +178,7 @@ minimum travel time across all trips on that route. This means:
 - [x] **Route-type filter** — zero-second leg filter eliminates street-stop chains (2026-02-11)
 - [x] **Departure-time aware routing** — `departure_time` + `travel_date` params; single coherent trip per route segment (2026-02-11)
 - [x] **Unit + integration tests** — 80 tests across routing, reliability, graph, API (2026-02-11)
-- [ ] Reliability data seeding / backfill strategy
+- [x] **Reliability data seeding** — `POST /ingest/reliability-seed` seeds synthetic priors from static schedule; no GTFS-RT required (2026-02-11)
 - [x] **Auth on `POST /ingest/gtfs-static`** — optional `INGEST_API_KEY`; open when unset (2026-02-11)
 
 ---

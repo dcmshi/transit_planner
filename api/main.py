@@ -27,6 +27,7 @@ from db.session import SessionLocal, get_session, init_db
 from graph.builder import build_graph, get_graph
 from ingestion.gtfs_realtime import poll_all
 from ingestion.gtfs_static import refresh_static_data
+from ingestion.seed_reliability import seed_from_static
 from llm.explainer import explain_routes
 from reliability.historical import classify_time_bucket, get_historical_reliability
 from reliability.live import compute_live_risk
@@ -235,3 +236,27 @@ async def trigger_gtfs_ingest(
     await refresh_static_data(session)
     build_graph(session)
     return {"status": "ok", "message": "GTFS static data refreshed and graph rebuilt."}
+
+
+@app.post("/ingest/reliability-seed")
+async def trigger_reliability_seed(
+    window_days: int = Query(14, ge=1, le=90, description="Days of schedule to sample"),
+    session: Session = Depends(get_session),
+    _: None = Depends(_require_ingest_key),
+) -> dict[str, Any]:
+    """
+    Seed reliability_records from the static GTFS schedule.
+
+    Uses synthetic per-bucket reliability priors (no GTFS-RT required).
+    Safe to call repeatedly — existing records are overwritten.
+    Run this once after /ingest/gtfs-static to populate baseline risk scores.
+    """
+    try:
+        written = seed_from_static(session, window_days=window_days)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return {
+        "status": "ok",
+        "records_written": written,
+        "message": f"Seeded {written} reliability records from {window_days}-day schedule window.",
+    }
