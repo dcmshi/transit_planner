@@ -155,31 +155,59 @@ minimum travel time across all trips on that route. This means:
 
 ## Open Questions
 
-- [ ] Metrolinx GTFS-RT API key — when does it arrive?
-- [ ] Should route risk = max leg risk, or a weighted sum? Revisit with real data.
-- [ ] How to seed historical reliability before enough data accumulates?
-- [ ] Should `/ingest/gtfs-static` require auth in production?
-- [x] Route deduplication — `_route_signature` deduplicates by ordered trip_id sequence; same train with different stop coverage no longer appears as multiple routes (2026-02-11)
+- [ ] Metrolinx GTFS-RT API key — registration submitted ~2026-02-11, expected ~10 days
+- [ ] Should route risk = max leg risk, or a weighted sum? Revisit once real RT data flows in.
 
 ---
 
-## Build Order (v1)
+## Build Order (v1 — completed)
 
 - [x] Project scaffolding + DB models
 - [x] GTFS static ingestion
 - [x] Graph construction
-- [x] Routing engine
+- [x] Routing engine (Yen's k-shortest paths, departure-time aware)
 - [x] GTFS-RT polling (code complete; blocked on API key)
 - [x] Historical reliability tracking
 - [x] Live risk modifiers
-- [x] LLM explanation layer
+- [x] LLM explanation layer → **switched to local Ollama** (2026-02-11)
 - [x] FastAPI endpoints
-- [x] **First end-to-end test** with real GTFS data (2026-02-11)
-- [x] **Route-type filter** — zero-second leg filter eliminates street-stop chains (2026-02-11)
-- [x] **Departure-time aware routing** — `departure_time` + `travel_date` params; single coherent trip per route segment (2026-02-11)
-- [x] **Unit + integration tests** — 80 tests across routing, reliability, graph, API (2026-02-11)
-- [x] **Reliability data seeding** — `POST /ingest/reliability-seed` seeds synthetic priors from static schedule; no GTFS-RT required (2026-02-11)
-- [x] **Auth on `POST /ingest/gtfs-static`** — optional `INGEST_API_KEY`; open when unset (2026-02-11)
+- [x] End-to-end test with real GTFS data (2026-02-11)
+- [x] Route-type filter — zero-second leg filter (2026-02-11)
+- [x] Departure-time aware routing (2026-02-11)
+- [x] Unit + integration tests — 104 tests (2026-02-11)
+- [x] Reliability data seeding from static schedule (2026-02-11)
+- [x] Optional auth on ingest endpoints (2026-02-11)
+- [x] Route deduplication by trip_id signature (2026-02-11)
+
+---
+
+## Post-v1 Backlog
+
+Priority tiers based on impact and dependency on GTFS-RT.
+
+### Tier 1 — Correctness gaps (no external dependency)
+
+- [ ] **Daily GTFS static refresh scheduler** — APScheduler job to call `refresh_static_data` + `build_graph` + `seed_from_static` daily; currently the scheduler only handles GTFS-RT polling, so static data silently goes stale
+- [ ] **Chain reliability reseed into static ingest** — `POST /ingest/gtfs-static` should automatically trigger `seed_from_static` after rebuilding the graph so records stay in sync with the current schedule
+- [ ] **Enhanced `/health` endpoint** — include GTFS data age, graph node/edge counts, reliability record count, and last-seeded timestamp; currently just returns `{"status": "ok"}`
+
+### Tier 2 — Quality / developer experience
+
+- [ ] **Pydantic response models** — replace `dict[str, Any]` on all endpoints with typed models; gives validated responses, better Swagger UI at `/docs`, and catches field mismatches at dev time
+- [ ] **Surface `transfers` and `total_walk_metres` on `/routes` response** — both computable from existing leg data; useful for UI consumers
+- [ ] **GTFS-RT mock state injector** — `ingestion/mock_realtime.py` utility to push synthetic cancellations, alerts, and vehicle positions into the in-memory state dicts; lets the full live-risk path be tested and validated before the API key arrives
+
+### Tier 3 — Future niceness
+
+- [ ] **Later-departure fill** — if dedup finds fewer than `max_routes` distinct trip sequences, fill remaining result slots with later departures of already-seen route combinations
+- [ ] **`GET /stops` — include routes served** — return which route_ids call at each matching stop
+- [ ] **Response caching for `/routes`** — same origin/dest/date/time → skip Yen's; useful once traffic grows
+- [ ] **Spatial index for walk edges** — replace O(n²) stop comparison in `graph/builder._add_walk_edges` with an R-tree or k-d tree; not needed at 904 stops but required if scope expands to full GTA
+
+### Blocked on GTFS-RT API key
+
+- [ ] **Live risk modifiers in production** — cancellations, vehicle positions, service alerts; code complete in `reliability/live.py` and `ingestion/gtfs_realtime.py`
+- [ ] **Real reliability data accumulation** — `record_observed_departure()` called from RT replay to replace synthetic priors with actual observations
 
 ---
 
@@ -187,12 +215,17 @@ minimum travel time across all trips on that route. This means:
 
 ```bash
 # Install uv: https://docs.astral.sh/uv/getting-started/installation/
-uv sync                    # create .venv + install all deps
-cp .env.example .env       # fill in ANTHROPIC_API_KEY; GTFS_RT_API_KEY optional
+uv sync --group dev            # create .venv + install all deps including pytest
+cp .env.example .env           # fill in GTFS_RT_API_KEY (optional), Ollama settings
 
-uv run uvicorn api.main:app --port 8000    # start server (no --reload in dev to avoid stale processes)
-curl -X POST http://localhost:8000/ingest/gtfs-static   # first-run data load (~30s)
+ollama pull llama3.2           # optional: enables ?explain=true
+
+uv run uvicorn api.main:app --port 8000    # start server (no --reload)
+curl -X POST http://localhost:8000/ingest/gtfs-static       # first-run (~30s)
+curl -X POST http://localhost:8000/ingest/reliability-seed  # seed risk priors
 curl "http://localhost:8000/routes?origin=UN&destination=GL"
+
+uv run pytest tests/ -q        # run test suite
 ```
 
 > **Note:** Do not use `--reload` in development — multiple reloader processes
