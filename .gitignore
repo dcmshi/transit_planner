@@ -29,3 +29,6 @@ Thumbs.db
 # Claude Code — AI assistant config (local only, not for version control)
 CLAUDE.md
 .claude/
+
+# Metrolinx API documentation (confidential, not for distribution)
+*.pdf
