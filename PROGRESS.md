@@ -38,17 +38,18 @@ GTFS-RT (30–60s)     ──► ingestion/gtfs_realtime.py        │
 | `db/models.py`                  | Complete    | SQLAlchemy models for GTFS + reliability                           |
 | `db/session.py`                 | Complete    | Engine, SessionLocal, get_session                                  |
 | `ingestion/gtfs_static.py`      | Complete    | Download, parse, store all GTFS CSVs                               |
-| `ingestion/gtfs_realtime.py`    | Complete    | Live — Metrolinx API key obtained 2026-02-16; correct endpoint URLs and protobuf Accept header confirmed |
+| `ingestion/gtfs_realtime.py`    | Complete    | Live — `poll_all()` feeds three RT feeds; `observe_departures(session)` accumulates real cancellations/delays into `ReliabilityRecord`; `_recorded_today` deduplicates across 30-second cycles |
 | `graph/builder.py`              | Complete    | MultiDiGraph; one edge per (stop-pair, route_id); single SQL join  |
 | `routing/engine.py`             | Complete    | Yen's k-shortest paths on projected DiGraph; MAX_CANDIDATES cap    |
 | `reliability/historical.py`     | Complete    | Rolling-window score per route/stop/bucket                         |
 | `reliability/live.py`           | Complete    | Live GTFS-RT risk modifiers                                        |
 | `llm/explainer.py`              | Complete    | Local Ollama explanation layer (scoped); graceful fallback if server unreachable |
-| `api/main.py`                   | Complete    | /routes, /stops, /health, /ingest/gtfs-static endpoints            |
+| `api/schemas.py`                | Complete    | Pydantic response models for all 5 endpoints; discriminated union on `kind` for `TripLeg`/`WalkLeg`; `Literal` types for `risk_label`, `status`, `kind` |
+| `api/main.py`                   | Complete    | /routes, /stops, /health, /ingest/gtfs-static endpoints; `response_model=` on all 5 decorators; `_rt_poll_and_observe()` wraps poll + DB observation; daily refresh uses `fill_gaps_only=True` |
 
 ---
 
-## End-to-end test results (2026-02-17)
+## End-to-end test results (2026-02-16)
 
 Verified against real GO Transit GTFS data with live GTFS-RT feeds active:
 
@@ -62,7 +63,9 @@ Verified against real GO Transit GTFS data with live GTFS-RT feeds active:
   differentiated (off-peak ~0.13, PM peak ~0.2)
 - **GTFS-RT**: all three feeds (TripUpdates, VehiclePosition, Alerts) polling
   live at 30 s intervals; 113 trip update entities parsed on first poll
+- **RT observation**: `observe_departures()` called after every poll; real cancellations and delays accumulate into `ReliabilityRecord`; `/health` `reliability.records` grows beyond initial 5 439 seed as observations are written
 - **LLM endpoint**: `?explain=true` wired and callable (requires local Ollama; returns graceful fallback message if not running)
+- **Test suite**: 117 tests, all passing
 
 ### GTFS-RT endpoint URLs (Metrolinx Open API)
 
@@ -84,7 +87,7 @@ API key appended as `?key=<value>`. Protobuf format requires `Accept: applicatio
 |---|---|
 | `routing/engine.py` | ~~Incoherent departure times~~ — fixed: `_schedule_path` queries real trips per segment; ~~transfer wait-time stubbed~~ — now enforced in `_passes_filters` |
 | `routing/engine.py` | ~~Routes 4–5 use local street stops~~ — fixed: `_passes_filters` now rejects any route containing a zero-second trip leg |
-| `reliability/historical.py` `record_observed_departure()` | Called by `seed_from_static` (synthetic) and future GTFS-RT background job (real observations) |
+| `reliability/historical.py` `record_observed_departure()` | Called by `seed_from_static` (synthetic priors) and `observe_departures()` in `ingestion/gtfs_realtime.py` (real RT observations) |
 | `api/main.py` `POST /ingest/gtfs-static` | ~~No auth~~ — optional `INGEST_API_KEY` guard added; open when unset |
 | `graph/builder.py` `_add_walk_edges()` | O(n²) stop comparison — fine for GO Transit stop count, but add spatial indexing if expanded to full GTA |
 
@@ -170,6 +173,40 @@ minimum travel time across all trips on that route. This means:
 
 ---
 
+## Frontend
+
+A web UI is the natural next step.  The backend already exposes a clean,
+OpenAPI-documented HTTP API (FastAPI `/docs`).
+
+**Recommendation: separate repository.**
+
+| Concern | Reason |
+|---|---|
+| Different package manager | Backend uses `uv`; frontend needs npm/bun/yarn |
+| Different CI | Python tests vs lint + Vitest + build + preview deployments |
+| Different deployment target | Python server vs Vercel / Netlify / Cloudflare Pages |
+| Independent release cadence | Frontend iteration shouldn't require a backend deploy and vice versa |
+| Type safety | FastAPI generates an OpenAPI spec at `/openapi.json`; `openapi-typescript` or `hey-api` can generate TypeScript types from it — no shared code needed |
+
+A monorepo (`frontend/` subdirectory) only makes sense if this will never be deployed separately and you want a single place to track everything.  Even then, JS tooling artefacts (`node_modules`, `package.json`, lock files) polluting the Python repo is unpleasant.
+
+**Suggested stack for the frontend repo:**
+
+- **Framework**: Next.js (App Router) or SvelteKit — both have excellent fetch patterns and are trivially deployable on Vercel/Netlify
+- **Type generation**: `openapi-typescript` against `GET /openapi.json`
+- **Map**: Leaflet or MapLibre GL for stop/route visualisation
+- **State**: React Query / TanStack Query for route fetching + caching
+
+**Minimum viable features for a v1 frontend:**
+
+- [ ] Origin / destination stop search (calls `GET /stops?query=`)
+- [ ] Date + departure time picker
+- [ ] Route results list with risk label badges (Low / Medium / High)
+- [ ] Leg-by-leg breakdown with departure/arrival times
+- [ ] Optional LLM explanation toggle (calls `?explain=true`)
+
+---
+
 ## Build Order (v1 — completed)
 
 - [x] Project scaffolding + DB models
@@ -184,10 +221,11 @@ minimum travel time across all trips on that route. This means:
 - [x] End-to-end test with real GTFS data (2026-02-11)
 - [x] Route-type filter — zero-second leg filter (2026-02-11)
 - [x] Departure-time aware routing (2026-02-11)
-- [x] Unit + integration tests — 104 tests (2026-02-11)
+- [x] Unit + integration tests — 117 tests (2026-02-16)
 - [x] Reliability data seeding from static schedule (2026-02-11)
 - [x] Optional auth on ingest endpoints (2026-02-11)
 - [x] Route deduplication by trip_id signature (2026-02-11)
+- [x] Pydantic response models — `api/schemas.py`; all 5 endpoints typed (2026-02-16)
 
 ---
 
@@ -197,27 +235,27 @@ Priority tiers based on impact and dependency on GTFS-RT.
 
 ### Tier 1 — Correctness gaps (no external dependency)
 
-- [x] **Daily GTFS static refresh scheduler** — `_daily_gtfs_refresh()` APScheduler interval job (every `GTFS_REFRESH_HOURS`, default 24h); calls `refresh_static_data` + `build_graph` + `seed_from_static(fill_gaps_only=False)`; scheduler now starts unconditionally (2026-02-11)
-- [x] **Chain reliability reseed into static ingest** — `POST /ingest/gtfs-static` now calls `seed_from_static(fill_gaps_only=False)` after rebuilding the graph; `fill_gaps_only=True` mode added for post-GTFS-RT use (2026-02-11)
+- [x] **Daily GTFS static refresh scheduler** — `_daily_gtfs_refresh()` APScheduler interval job (every `GTFS_REFRESH_HOURS`, default 24h); calls `refresh_static_data` + `build_graph` + `seed_from_static(fill_gaps_only=True)` to preserve accumulated RT data; scheduler starts unconditionally (2026-02-11; fill_gaps_only switched 2026-02-16)
+- [x] **Chain reliability reseed into static ingest** — `POST /ingest/gtfs-static` calls `seed_from_static(fill_gaps_only=False)` (manual full reseed); `fill_gaps_only=True` used by scheduled refresh to preserve real observations (2026-02-11)
 - [x] **Enhanced `/health` endpoint** — includes GTFS data age, graph node/edge counts, reliability record count, last-seeded timestamp, RT polling status (2026-02-11)
 
 ### Tier 2 — Quality / developer experience
 
-- [ ] **Pydantic response models** — replace `dict[str, Any]` on all endpoints with typed models; gives validated responses, better Swagger UI at `/docs`, and catches field mismatches at dev time
-- [ ] **Surface `transfers` and `total_walk_metres` on `/routes` response** — both computable from existing leg data; useful for UI consumers
-- [ ] **GTFS-RT mock state injector** — `ingestion/mock_realtime.py` utility to push synthetic cancellations, alerts, and vehicle positions into the in-memory state dicts; lets the full live-risk path be tested and validated before the API key arrives
+- [x] **Pydantic response models** — `api/schemas.py` defines typed models for all 5 endpoints; discriminated union (`TripLeg`/`WalkLeg` on `kind`), `Literal` constraints on `risk_label`/`status`; `response_model=` wired on all decorators; `/docs` now shows full schemas (2026-02-16)
+- [x] **Surface `transfers` and `total_walk_metres` on `/routes` response** — `count_transfers()` and `total_walk_metres()` helpers in `routing/engine.py`; included in `ScoredRoute` schema and `/routes` response (2026-02-16)
+- [~] **GTFS-RT mock state injector** — won't do; Metrolinx API key obtained 2026-02-16, live feeds active
 
 ### Tier 3 — Future niceness
 
-- [ ] **Later-departure fill** — if dedup finds fewer than `max_routes` distinct trip sequences, fill remaining result slots with later departures of already-seen route combinations
-- [ ] **`GET /stops` — include routes served** — return which route_ids call at each matching stop
-- [ ] **Response caching for `/routes`** — same origin/dest/date/time → skip Yen's; useful once traffic grows
-- [ ] **Spatial index for walk edges** — replace O(n²) stop comparison in `graph/builder._add_walk_edges` with an R-tree or k-d tree; not needed at 904 stops but required if scope expands to full GTA
+- [x] **Later-departure fill** — `_fill_later_departures()` in `routing/engine.py`; round-robins over candidate paths, advancing each path's pointer 1 second past its last known departure until slots are filled or paths exhausted; 132 tests passing (2026-02-17)
+- [x] **`GET /stops` — include routes served** — `routes_served: list[str]` added to `StopResult`; fetched via a single `stop_times → trips` join across all matched stops (2026-02-16)
+- [x] **Response caching for `/routes`** — module-level dict in `api/main.py`, keyed by `(origin, destination, YYYY-MM-DD, HH:MM)`; caches raw `find_routes()` output only (risk scoring stays fresh); 1-hour TTL + explicit clear on daily refresh and manual ingest; 139 tests passing (2026-02-17)
+- [x] **Spatial index for walk edges** — latitude-sorted index + binary search (stdlib `bisect`, no new deps); O(n·k) vs O(n²); Δlon pre-filter gates haversine; `test_matches_brute_force` verifies identical edge sets; ~200× fewer haversine calls at 10 000 stops (2026-02-17)
 
 ### Unblocked by GTFS-RT API key (2026-02-16)
 
 - [x] **Live risk modifiers in production** — cancellations, vehicle positions, service alerts flowing via `reliability/live.py` and `ingestion/gtfs_realtime.py`
-- [ ] **Real reliability data accumulation** — `record_observed_departure()` to be called from an RT observation loop to replace synthetic priors with real observations over time
+- [x] **Real reliability data accumulation** — `observe_departures()` called after every `poll_all()`; cancelled trips recorded at all stops; in-progress trips recorded per-stop once departure time has passed; `_recorded_today` prevents double-counting; daily refresh uses `fill_gaps_only=True` so accumulated data survives schedule refreshes (2026-02-16)
 
 ---
 

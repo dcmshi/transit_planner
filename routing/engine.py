@@ -100,6 +100,7 @@ def find_routes(
 
     seen_signatures: set[tuple[str, ...]] = set()
     routes: list[Route] = []
+    candidate_paths: list[list[str]] = []
     for examined, node_path in enumerate(raw_paths):
         if examined >= MAX_CANDIDATES:
             break
@@ -113,8 +114,16 @@ def find_routes(
             continue
         seen_signatures.add(sig)
         routes.append(legs)
+        candidate_paths.append(node_path)
         if len(routes) >= max_routes:
             break
+
+    # Fill remaining slots with later departures on already-found paths.
+    if len(routes) < max_routes and candidate_paths:
+        routes = _fill_later_departures(
+            session, G, routes, candidate_paths, seen_signatures,
+            departure_dt, max_routes,
+        )
 
     logger.info(
         "Found %d routes from %s to %s.", len(routes), origin_stop_id, destination_stop_id
@@ -377,6 +386,96 @@ def total_travel_seconds(legs: Route) -> int:
         else:
             total += leg.get("walk_seconds", 0)
     return total
+
+
+def count_transfers(legs: Route) -> int:
+    """
+    Number of route changes in a route (i.e. number of transfers).
+
+    A transfer is counted each time the route_id changes between consecutive
+    trip legs.  Walk legs are ignored (ADR-008).
+    """
+    trip_legs = [l for l in legs if l["kind"] == "trip"]
+    transfers = 0
+    for i in range(1, len(trip_legs)):
+        if trip_legs[i]["route_id"] != trip_legs[i - 1]["route_id"]:
+            transfers += 1
+    return transfers
+
+
+def total_walk_metres(legs: Route) -> float:
+    """Total walking distance across all walk legs in metres."""
+    return sum(l.get("distance_m", 0.0) for l in legs if l["kind"] == "walk")
+
+
+def _fill_later_departures(
+    session: Session,
+    G: nx.MultiDiGraph,
+    routes: list[Route],
+    candidate_paths: list[list[str]],
+    seen_signatures: set[tuple[str, ...]],
+    departure_dt: datetime,
+    max_routes: int,
+) -> list[Route]:
+    """
+    Fill remaining route slots with later departures on already-found paths.
+
+    After the Yen's loop, deduplication may leave fewer than max_routes
+    results.  This function iterates over the candidate paths in round-robin
+    order.  For each path it advances the not_before pointer to 1 second past
+    the first trip departure of the last result found for that path, then calls
+    _schedule_path again to discover the next departure.  New trip signatures
+    are added to results; known signatures are skipped but the pointer still
+    advances so the following departure is tried in the next round.
+
+    Terminates when the target count is reached or every path is exhausted
+    (no more trips in the timetable for that date).
+
+    Note: datetime cannot represent hours >= 24, so fill stops at 23:59:59.
+    GO Transit Toronto–Guelph service ends well before midnight, so this is
+    not a practical limitation.
+    """
+    travel_day = departure_dt.date()
+
+    # Seed each path's not_before with 1 second past its first trip departure.
+    path_not_before: list[int | None] = []
+    for legs in routes:
+        first_trip = next((l for l in legs if l["kind"] == "trip"), None)
+        if first_trip:
+            path_not_before.append(_hms_to_seconds(first_trip["departure_time"]) + 1)
+        else:
+            path_not_before.append(None)
+
+    MAX_SECONDS = 23 * 3600 + 59 * 60 + 59  # 23:59:59
+
+    while len(routes) < max_routes:
+        any_active = False
+        for i, node_path in enumerate(candidate_paths):
+            if len(routes) >= max_routes:
+                break
+            nb = path_not_before[i]
+            if nb is None or nb > MAX_SECONDS:
+                continue
+            any_active = True
+            h, m, s = nb // 3600, (nb % 3600) // 60, nb % 60
+            next_dt = datetime(travel_day.year, travel_day.month, travel_day.day, h, m, s)
+            legs = _schedule_path(session, G, node_path, next_dt)
+            if legs is None or not _passes_filters(legs):
+                path_not_before[i] = None
+                continue
+            # Always advance the pointer so the next round tries the departure after this one.
+            first_trip = next((l for l in legs if l["kind"] == "trip"), None)
+            path_not_before[i] = (
+                _hms_to_seconds(first_trip["departure_time"]) + 1
+            ) if first_trip else None
+            sig = _route_signature(legs)
+            if sig not in seen_signatures:
+                seen_signatures.add(sig)
+                routes.append(legs)
+        if not any_active:
+            break
+
+    return routes
 
 
 def _hms_to_seconds(hms: str) -> int:

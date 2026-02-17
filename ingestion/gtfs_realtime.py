@@ -11,12 +11,14 @@ every GTFS_RT_POLL_SECONDS seconds by the scheduler started at API boot.
 """
 
 import logging
+from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 
 import httpx
 from google.transit import gtfs_realtime_pb2
+from sqlalchemy.orm import Session
 
 from config import (
     GTFS_RT_ALERTS_URL,
@@ -25,6 +27,7 @@ from config import (
     GTFS_RT_TRIP_UPDATES_URL,
     GTFS_RT_VEHICLE_POSITIONS_URL,
 )
+from reliability.historical import record_observed_departure
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +58,10 @@ service_alerts: list[ServiceAlertState] = []
 vehicle_positions: dict[str, dict[str, Any]] = {} # trip_id → {lat, lon, timestamp}
 
 _last_fetched: datetime | None = None
+
+# Tracks trip_ids already recorded today — prevents double-counting across polls
+_recorded_today: set[str] = set()
+_recorded_date: str = ""   # YYYYMMDD; set resets when date changes
 
 
 async def _fetch_feed(url: str) -> gtfs_realtime_pb2.FeedMessage | None:
@@ -194,3 +201,107 @@ async def poll_all() -> None:
     await poll_vehicle_positions()
     _last_fetched = datetime.utcnow()
     logger.info("GTFS-RT poll complete at %s", _last_fetched.isoformat())
+
+
+def _parse_scheduled_at(departure_time_str: str, service_id: str) -> datetime | None:
+    """Convert GTFS departure_time string + service_id (YYYYMMDD) to a datetime.
+
+    Handles GTFS times > 24:00:00 (post-midnight trips) via timedelta.
+    """
+    try:
+        h, m, s = (int(x) for x in departure_time_str.split(":"))
+        base = datetime.strptime(service_id, "%Y%m%d")
+        return base + timedelta(hours=h, minutes=m, seconds=s)
+    except (ValueError, AttributeError):
+        return None
+
+
+def observe_departures(session: Session) -> int:
+    """
+    Record observed/cancelled departures from current trip_updates into DB.
+
+    Called after poll_all() to accumulate real reliability data.
+    Each trip_id is processed at most once per service day to avoid
+    double-counting across 30-second poll cycles.
+
+    Returns the number of ReliabilityRecord updates written.
+    """
+    global _recorded_today, _recorded_date
+
+    today = date.today().strftime("%Y%m%d")
+    if today != _recorded_date:
+        _recorded_today = set()
+        _recorded_date = today
+
+    unrecorded = {tid: state for tid, state in trip_updates.items()
+                  if tid not in _recorded_today}
+    if not unrecorded:
+        return 0
+
+    # Batch query: stop_id + departure_time + service_id for all unrecorded trips
+    from db.models import StopTime, Trip
+    rows = (
+        session.query(StopTime.trip_id, StopTime.stop_id, StopTime.departure_time, Trip.service_id)
+        .join(Trip, Trip.trip_id == StopTime.trip_id)
+        .filter(StopTime.trip_id.in_(list(unrecorded)))
+        .all()
+    )
+
+    # Group rows by trip_id
+    stops_by_trip: dict[str, list] = defaultdict(list)
+    for trip_id, stop_id, dep_time, service_id in rows:
+        stops_by_trip[trip_id].append((stop_id, dep_time, service_id))
+
+    now = datetime.utcnow()
+    recorded = 0
+
+    for trip_id, state in unrecorded.items():
+        stop_rows = stops_by_trip.get(trip_id, [])
+        if not stop_rows:
+            continue  # not in static schedule — skip
+
+        wrote_any = False
+
+        if state.is_cancelled:
+            # Record all stops as cancelled
+            for stop_id, dep_time, service_id in stop_rows:
+                scheduled_at = _parse_scheduled_at(dep_time, service_id)
+                if scheduled_at is None:
+                    continue
+                record_observed_departure(
+                    route_id=state.route_id,
+                    stop_id=stop_id,
+                    scheduled_at=scheduled_at,
+                    delay_seconds=0,
+                    was_cancelled=True,
+                    session=session,
+                )
+                recorded += 1
+                wrote_any = True
+
+        elif state.stop_time_overrides:
+            # Only record stops that have RT delay data AND whose scheduled
+            # departure time has already passed (trip is underway)
+            override_stops = set(state.stop_time_overrides.keys())
+            for stop_id, dep_time, service_id in stop_rows:
+                if stop_id not in override_stops:
+                    continue
+                scheduled_at = _parse_scheduled_at(dep_time, service_id)
+                if scheduled_at is None or scheduled_at > now:
+                    continue  # not yet departed — don't record yet
+                delay = state.stop_time_overrides[stop_id]
+                record_observed_departure(
+                    route_id=state.route_id,
+                    stop_id=stop_id,
+                    scheduled_at=scheduled_at,
+                    delay_seconds=delay,
+                    was_cancelled=False,
+                    session=session,
+                )
+                recorded += 1
+                wrote_any = True
+
+        if wrote_any:
+            _recorded_today.add(trip_id)
+
+    return recorded

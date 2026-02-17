@@ -14,6 +14,7 @@ The graph is built once from the DB after static ingestion and cached
 in memory. It must be rebuilt after each daily GTFS refresh.
 """
 
+import bisect
 import logging
 import math
 from datetime import datetime
@@ -148,12 +149,44 @@ def _add_walk_edges(G: nx.MultiDiGraph, stops: list[Stop]) -> None:
     """
     Add bidirectional walking edges between stops within MAX_WALK_METRES.
     Walk time (seconds) = distance / walk speed.
-    """
-    walk_speed_ms = WALK_SPEED_KPH * 1000 / 3600  # metres per second
 
-    for i, a in enumerate(stops):
-        for j, b in enumerate(stops):
-            if i == j:
+    Uses a latitude-sorted index with binary search to reduce comparisons
+    from O(n²) to O(n·k) where k is the average number of stops inside the
+    lat/lon bounding box for one stop.  A cheap ±Δlon longitude pre-filter
+    gates the more expensive haversine call.
+
+    Δlat is constant globally (1° ≈ 111 320 m).
+    Δlon is computed per-stop because it shrinks toward the poles:
+      Δlon = MAX_WALK_METRES / (111 320 · cos(lat)).
+
+    For Toronto (~43 °N), with MAX_WALK_METRES = 500 m and 10 000 stops
+    spread over ~100 km × 60 km, each lat band contains ~50 candidates
+    on average — a ~200× reduction vs the brute-force O(n²) approach.
+    """
+    if not stops:
+        return
+
+    walk_speed_ms = WALK_SPEED_KPH * 1000 / 3600  # metres per second
+    # 1 degree of latitude is the same distance everywhere.
+    delta_lat = MAX_WALK_METRES / 111_320
+
+    # Build a lat-sorted parallel list for binary-search range lookups.
+    by_lat = sorted(stops, key=lambda s: s.stop_lat)
+    lat_values = [s.stop_lat for s in by_lat]
+
+    for a in stops:
+        # Longitude delta shrinks toward the poles.
+        delta_lon = MAX_WALK_METRES / (111_320 * math.cos(math.radians(a.stop_lat)))
+
+        # Binary search: narrow candidates to the latitude band [a.lat ± delta_lat].
+        lo = bisect.bisect_left(lat_values, a.stop_lat - delta_lat)
+        hi = bisect.bisect_right(lat_values, a.stop_lat + delta_lat)
+
+        for b in by_lat[lo:hi]:
+            if a.stop_id == b.stop_id:
+                continue
+            # Cheap longitude pre-filter before the haversine call.
+            if abs(b.stop_lon - a.stop_lon) > delta_lon:
                 continue
             dist = _haversine_metres(a.stop_lat, a.stop_lon, b.stop_lat, b.stop_lon)
             if dist <= MAX_WALK_METRES:

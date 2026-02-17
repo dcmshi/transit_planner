@@ -20,7 +20,7 @@ Endpoints (v1):
 
 import logging
 from contextlib import asynccontextmanager
-from datetime import datetime, date as Date
+from datetime import datetime, date as Date, timedelta
 from typing import Any
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -28,6 +28,13 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Security
 from fastapi.security import APIKeyHeader
 from sqlalchemy.orm import Session
 
+from api.schemas import (
+    HealthResponse,
+    IngestResponse,
+    RoutesResponse,
+    SeedResponse,
+    StopResult,
+)
 from config import GTFS_REFRESH_HOURS, GTFS_RT_API_KEY, GTFS_RT_POLL_SECONDS, INGEST_API_KEY, MAX_ROUTES
 from db.session import SessionLocal, get_session, init_db
 from graph.builder import build_graph, get_graph, get_last_built_at
@@ -37,7 +44,7 @@ from ingestion.seed_reliability import seed_from_static
 from llm.explainer import explain_routes
 from reliability.historical import classify_time_bucket, get_historical_reliability
 from reliability.live import compute_live_risk
-from routing.engine import find_routes, total_travel_seconds
+from routing.engine import count_transfers, find_routes, total_travel_seconds, total_walk_metres
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -59,6 +66,38 @@ def _require_ingest_key(key: str | None = Security(_ingest_key_header)) -> None:
 
 scheduler = AsyncIOScheduler()
 
+# ---------------------------------------------------------------------------
+# Route cache — keyed by (origin, destination, YYYY-MM-DD, HH:MM)
+# Caches raw find_routes() output (legs only); risk scoring is always fresh.
+# ---------------------------------------------------------------------------
+_routes_cache: dict[tuple[str, str, str, str], tuple[list, datetime]] = {}
+_ROUTES_CACHE_TTL = timedelta(hours=1)
+
+
+def _routes_cache_key(origin: str, destination: str, departure_dt: datetime) -> tuple[str, str, str, str]:
+    """Stable cache key at minute resolution."""
+    return (origin, destination, departure_dt.strftime("%Y-%m-%d"), departure_dt.strftime("%H:%M"))
+
+
+def _get_cached_routes(key: tuple[str, str, str, str]) -> list | None:
+    entry = _routes_cache.get(key)
+    if entry is None:
+        return None
+    cached_routes, cached_at = entry
+    if datetime.now() - cached_at > _ROUTES_CACHE_TTL:
+        del _routes_cache[key]
+        return None
+    return cached_routes
+
+
+def _store_cached_routes(key: tuple[str, str, str, str], routes: list) -> None:
+    _routes_cache[key] = (routes, datetime.now())
+
+
+def _clear_routes_cache() -> None:
+    _routes_cache.clear()
+    logger.info("Route cache cleared.")
+
 
 async def _daily_gtfs_refresh() -> None:
     """
@@ -69,16 +108,35 @@ async def _daily_gtfs_refresh() -> None:
     session because APScheduler jobs run outside FastAPI's DI system.
     Exceptions are caught and logged so a transient network failure cannot
     crash the scheduler process.
+
+    Uses fill_gaps_only=True to preserve accumulated RT observations; new
+    routes/stops that have no records yet still get synthetic priors.
     """
     logger.info("Daily GTFS static refresh starting.")
     db = SessionLocal()
     try:
         await refresh_static_data(db)
         build_graph(db)
-        seeded = seed_from_static(db, fill_gaps_only=False)
+        seeded = seed_from_static(db, fill_gaps_only=True)
         logger.info("Daily GTFS static refresh complete: %d reliability records reseeded.", seeded)
+        _clear_routes_cache()
     except Exception as exc:
         logger.error("Daily GTFS static refresh failed: %s", exc, exc_info=True)
+    finally:
+        db.close()
+
+
+async def _rt_poll_and_observe() -> None:
+    """Poll all GTFS-RT feeds then record observed departures into DB."""
+    from ingestion.gtfs_realtime import observe_departures
+    await poll_all()
+    db = SessionLocal()
+    try:
+        count = observe_departures(db)
+        if count:
+            logger.info("RT observation: recorded %d departures.", count)
+    except Exception as exc:
+        logger.error("RT observation failed: %s", exc, exc_info=True)
     finally:
         db.close()
 
@@ -106,11 +164,11 @@ async def lifespan(app: FastAPI):
     )
 
     if GTFS_RT_API_KEY:
-        await poll_all()
+        await _rt_poll_and_observe()
         logger.info("GTFS-RT initial poll complete.")
         if GTFS_RT_POLL_SECONDS > 0:
             scheduler.add_job(
-                poll_all,
+                _rt_poll_and_observe,
                 "interval",
                 seconds=GTFS_RT_POLL_SECONDS,
                 id="gtfs_rt_poll",
@@ -141,8 +199,8 @@ app = FastAPI(
 )
 
 
-@app.get("/health")
-async def health(session: Session = Depends(get_session)) -> dict[str, Any]:
+@app.get("/health", response_model=HealthResponse)
+async def health(session: Session = Depends(get_session)) -> HealthResponse:
     """
     Liveness + data-freshness check.
 
@@ -210,26 +268,48 @@ async def health(session: Session = Depends(get_session)) -> dict[str, Any]:
     }
 
 
-@app.get("/stops")
+@app.get("/stops", response_model=list[StopResult])
 async def search_stops(
     query: str = Query(..., min_length=2, description="Stop name substring to search"),
     session: Session = Depends(get_session),
-) -> list[dict[str, Any]]:
+) -> list[StopResult]:
     """Search stops by name substring."""
-    from db.models import Stop
+    from collections import defaultdict
+    from db.models import Stop, StopTime, Trip
+
     results = (
         session.query(Stop)
         .filter(Stop.stop_name.ilike(f"%{query}%"))
         .limit(20)
         .all()
     )
+
+    # Fetch distinct route_ids for all matching stops in one query.
+    stop_ids = [s.stop_id for s in results]
+    route_rows = (
+        session.query(StopTime.stop_id, Trip.route_id)
+        .join(Trip, Trip.trip_id == StopTime.trip_id)
+        .filter(StopTime.stop_id.in_(stop_ids))
+        .distinct()
+        .all()
+    )
+    routes_by_stop: dict[str, list[str]] = defaultdict(list)
+    for stop_id, route_id in route_rows:
+        routes_by_stop[stop_id].append(route_id)
+
     return [
-        {"stop_id": s.stop_id, "stop_name": s.stop_name, "lat": s.stop_lat, "lon": s.stop_lon}
+        {
+            "stop_id": s.stop_id,
+            "stop_name": s.stop_name,
+            "lat": s.stop_lat,
+            "lon": s.stop_lon,
+            "routes_served": sorted(routes_by_stop[s.stop_id]),
+        }
         for s in results
     ]
 
 
-@app.get("/routes")
+@app.get("/routes", response_model=RoutesResponse)
 async def get_routes(
     origin: str = Query(..., description="Origin stop_id"),
     destination: str = Query(..., description="Destination stop_id"),
@@ -243,7 +323,7 @@ async def get_routes(
     ),
     explain: bool = Query(False, description="Include LLM plain-language explanation"),
     session: Session = Depends(get_session),
-) -> dict[str, Any]:
+) -> RoutesResponse:
     """
     Return top-N scored routes from origin to destination.
 
@@ -264,17 +344,22 @@ async def get_routes(
     except (ValueError, IndexError) as exc:
         raise HTTPException(status_code=422, detail=f"Invalid date/time parameter: {exc}")
 
-    try:
-        routes = find_routes(
-            origin, destination,
-            departure_dt=departure_dt,
-            session=session,
-            max_routes=MAX_ROUTES,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Routing error: {exc}")
+    cache_key = _routes_cache_key(origin, destination, departure_dt)
+    routes = _get_cached_routes(cache_key)
+    if routes is None:
+        try:
+            routes = find_routes(
+                origin, destination,
+                departure_dt=departure_dt,
+                session=session,
+                max_routes=MAX_ROUTES,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Routing error: {exc}")
+        if routes:
+            _store_cached_routes(cache_key, routes)
 
     if not routes:
         raise HTTPException(status_code=404, detail="No routes found between these stops.")
@@ -312,6 +397,8 @@ async def get_routes(
         scored_routes.append({
             "legs": scored_legs,
             "total_travel_seconds": total_travel_seconds(route_legs),
+            "transfers": count_transfers(route_legs),
+            "total_walk_metres": round(total_walk_metres(route_legs), 1),
             "risk_score": round(overall_risk, 3),
             "risk_label": risk_label,
         })
@@ -339,11 +426,11 @@ async def get_routes(
     return response
 
 
-@app.post("/ingest/gtfs-static")
+@app.post("/ingest/gtfs-static", response_model=IngestResponse)
 async def trigger_gtfs_ingest(
     session: Session = Depends(get_session),
     _: None = Depends(_require_ingest_key),
-) -> dict[str, Any]:
+) -> IngestResponse:
     """
     Manually trigger a GTFS static data refresh, graph rebuild, and
     reliability reseed.  (In production this runs on a daily schedule.)
@@ -356,6 +443,7 @@ async def trigger_gtfs_ingest(
     await refresh_static_data(session)
     build_graph(session)
     seeded = seed_from_static(session, fill_gaps_only=False)
+    _clear_routes_cache()
     return {
         "status": "ok",
         "message": (
@@ -365,12 +453,12 @@ async def trigger_gtfs_ingest(
     }
 
 
-@app.post("/ingest/reliability-seed")
+@app.post("/ingest/reliability-seed", response_model=SeedResponse)
 async def trigger_reliability_seed(
     window_days: int = Query(14, ge=1, le=90, description="Days of schedule to sample"),
     session: Session = Depends(get_session),
     _: None = Depends(_require_ingest_key),
-) -> dict[str, Any]:
+) -> SeedResponse:
     """
     Seed reliability_records from the static GTFS schedule.
 

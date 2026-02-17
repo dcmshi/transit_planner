@@ -185,7 +185,7 @@ class TestStopsSearch:
         db_session.commit()
 
         result = client.get("/stops?query=Guelph").json()[0]
-        assert set(result.keys()) == {"stop_id", "stop_name", "lat", "lon"}
+        assert set(result.keys()) == {"stop_id", "stop_name", "lat", "lon", "routes_served"}
 
 
 # ---------------------------------------------------------------------------
@@ -453,7 +453,7 @@ class TestDailyGtfsRefreshJob:
 
         mock_refresh.assert_called_once_with(mock_session)
         mock_build.assert_called_once_with(mock_session)
-        mock_seed.assert_called_once_with(mock_session, fill_gaps_only=False)
+        mock_seed.assert_called_once_with(mock_session, fill_gaps_only=True)
 
     @pytest.mark.anyio
     async def test_error_does_not_propagate(self):
@@ -485,3 +485,91 @@ class TestDailyGtfsRefreshJob:
             await _daily_gtfs_refresh()
 
         mock_session.close.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Route cache helpers
+# ---------------------------------------------------------------------------
+
+class TestRoutesCache:
+
+    def setup_method(self):
+        """Clear the module-level cache before each test."""
+        from api.main import _clear_routes_cache
+        _clear_routes_cache()
+
+    def test_cache_key_includes_all_fields(self):
+        from api.main import _routes_cache_key
+        dt = datetime(2026, 2, 17, 8, 30, 0)
+        key = _routes_cache_key("UN", "GL", dt)
+        assert key == ("UN", "GL", "2026-02-17", "08:30")
+
+    def test_cache_miss_returns_none(self):
+        from api.main import _get_cached_routes
+        assert _get_cached_routes(("UN", "GL", "2026-02-17", "08:30")) is None
+
+    def test_store_and_retrieve(self):
+        from api.main import _get_cached_routes, _store_cached_routes
+        key = ("UN", "GL", "2026-02-17", "08:30")
+        routes = [[{"kind": "trip", "route_id": "R1"}]]
+        _store_cached_routes(key, routes)
+        assert _get_cached_routes(key) == routes
+
+    def test_clear_removes_entries(self):
+        from api.main import _clear_routes_cache, _get_cached_routes, _store_cached_routes
+        key = ("UN", "GL", "2026-02-17", "08:30")
+        _store_cached_routes(key, [[]])
+        _clear_routes_cache()
+        assert _get_cached_routes(key) is None
+
+    def test_expired_entry_returns_none(self, monkeypatch):
+        from datetime import timedelta
+        import api.main as main_mod
+        from api.main import _get_cached_routes, _store_cached_routes
+
+        key = ("UN", "GL", "2026-02-17", "08:30")
+        _store_cached_routes(key, [[]])
+        # Artificially expire by shrinking the TTL to zero.
+        monkeypatch.setattr(main_mod, "_ROUTES_CACHE_TTL", timedelta(seconds=0))
+        assert _get_cached_routes(key) is None
+
+    def test_find_routes_called_once_on_cache_hit(self, client, monkeypatch):
+        """Second identical request uses cached routes; find_routes called once."""
+        import api.main as main_mod
+
+        fake_legs = [{
+            "kind": "trip",
+            "from_stop_id": "UN", "to_stop_id": "GL",
+            "from_stop_name": "Union", "to_stop_name": "Guelph",
+            "trip_id": "T1", "route_id": "R1", "service_id": "20260217",
+            "departure_time": "08:00:00", "arrival_time": "09:30:00",
+            "travel_seconds": 5400,
+        }]
+        call_count = {"n": 0}
+
+        def fake_find_routes(*args, **kwargs):
+            call_count["n"] += 1
+            return [fake_legs]
+
+        monkeypatch.setattr(main_mod, "find_routes", fake_find_routes)
+        monkeypatch.setattr(main_mod, "get_historical_reliability", lambda *a, **kw: 0.8)
+        monkeypatch.setattr(main_mod, "compute_live_risk", lambda **kw: {
+            "risk_score": 0.1, "risk_label": "Low", "modifiers": [], "is_cancelled": False,
+        })
+
+        params = "origin=UN&destination=GL&travel_date=2026-02-17&departure_time=08:00"
+        client.get(f"/routes?{params}")
+        client.get(f"/routes?{params}")
+
+        assert call_count["n"] == 1
+
+    def test_different_params_not_shared(self, monkeypatch):
+        """Different origin/destination get independent cache entries."""
+        from api.main import _get_cached_routes, _routes_cache_key
+        import api.main as main_mod
+
+        key_a = _routes_cache_key("UN", "GL", datetime(2026, 2, 17, 8, 0))
+        key_b = _routes_cache_key("BR", "GL", datetime(2026, 2, 17, 8, 0))
+        from api.main import _store_cached_routes
+        _store_cached_routes(key_a, [["route_a"]])
+        assert _get_cached_routes(key_b) is None

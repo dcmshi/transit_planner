@@ -8,7 +8,15 @@ logic that lives entirely inside routing/engine.py.
 import pytest
 
 from config import MAX_TRANSFERS, MIN_TRANSFER_MINUTES
-from routing.engine import _hms_to_seconds, _passes_filters, _route_signature, total_travel_seconds
+from routing.engine import (
+    _fill_later_departures,
+    _hms_to_seconds,
+    _passes_filters,
+    _route_signature,
+    count_transfers,
+    total_travel_seconds,
+    total_walk_metres,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -249,3 +257,174 @@ class TestRouteSignature:
         route_early = [_trip("R1", "08:00:00", "09:00:00", 3600, trip_id="T_early")]
         route_late = [_trip("R1", "10:00:00", "11:00:00", 3600, trip_id="T_late")]
         assert _route_signature(route_early) != _route_signature(route_late)
+
+
+# ---------------------------------------------------------------------------
+# count_transfers
+# ---------------------------------------------------------------------------
+
+class TestCountTransfers:
+    def test_empty_route(self):
+        assert count_transfers([]) == 0
+
+    def test_single_trip_leg(self):
+        assert count_transfers([_trip("R1", "08:00:00", "09:00:00", 3600)]) == 0
+
+    def test_same_route_two_legs(self):
+        legs = [
+            _trip("R1", "08:00:00", "08:30:00", 1800),
+            _trip("R1", "08:30:00", "09:00:00", 1800),
+        ]
+        assert count_transfers(legs) == 0
+
+    def test_one_transfer(self):
+        legs = [
+            _trip("R1", "08:00:00", "09:00:00", 3600),
+            _trip("R2", "09:30:00", "10:30:00", 3600),
+        ]
+        assert count_transfers(legs) == 1
+
+    def test_two_transfers(self):
+        legs = [
+            _trip("R1", "08:00:00", "09:00:00", 3600),
+            _trip("R2", "09:30:00", "10:30:00", 3600),
+            _trip("R3", "11:00:00", "12:00:00", 3600),
+        ]
+        assert count_transfers(legs) == 2
+
+    def test_walk_legs_ignored(self):
+        legs = [
+            _trip("R1", "08:00:00", "09:00:00", 3600),
+            _walk(300),
+            _trip("R2", "09:30:00", "10:30:00", 3600),
+        ]
+        assert count_transfers(legs) == 1
+
+    def test_walk_only(self):
+        assert count_transfers([_walk(300)]) == 0
+
+
+# ---------------------------------------------------------------------------
+# total_walk_metres
+# ---------------------------------------------------------------------------
+
+class TestTotalWalkMetres:
+    def test_no_walk_legs(self):
+        legs = [_trip("R1", "08:00:00", "09:00:00", 3600)]
+        assert total_walk_metres(legs) == 0.0
+
+    def test_single_walk_leg(self):
+        leg = {**_walk(300), "distance_m": 400.0}
+        assert total_walk_metres([leg]) == 400.0
+
+    def test_multiple_walk_legs(self):
+        legs = [
+            {**_walk(300), "distance_m": 250.0},
+            _trip("R1", "08:10:00", "09:00:00", 3000),
+            {**_walk(120), "distance_m": 100.0},
+        ]
+        assert total_walk_metres(legs) == 350.0
+
+    def test_empty_route(self):
+        assert total_walk_metres([]) == 0.0
+
+
+# ---------------------------------------------------------------------------
+# _fill_later_departures
+# ---------------------------------------------------------------------------
+
+class TestFillLaterDepartures:
+    """
+    Unit tests for _fill_later_departures using a stub _schedule_path
+    via monkeypatching.
+    """
+
+    def _make_route(self, trip_id: str, dep: str, arr: str, route_id: str = "R1") -> list:
+        return [_trip(route_id, dep, arr, _hms_to_seconds(arr) - _hms_to_seconds(dep), trip_id=trip_id)]
+
+    def test_no_fill_needed_when_full(self):
+        """If routes already at max_routes, fill returns unchanged list."""
+        import networkx as nx
+        from unittest.mock import MagicMock
+        from datetime import datetime
+
+        routes = [
+            self._make_route("T1", "08:00:00", "09:00:00"),
+            self._make_route("T2", "10:00:00", "11:00:00"),
+        ]
+        seen = {("T1",), ("T2",)}
+        result = _fill_later_departures(
+            MagicMock(), nx.MultiDiGraph(),
+            routes, [["A", "B"], ["A", "B"]],
+            seen, datetime(2026, 2, 17, 8, 0, 0), max_routes=2,
+        )
+        assert len(result) == 2
+
+    def test_fills_one_slot_with_later_departure(self, monkeypatch):
+        """One existing route, max_routes=2: fill finds next departure."""
+        import networkx as nx
+        from unittest.mock import MagicMock
+        from datetime import datetime
+        import routing.engine as eng
+
+        later_legs = self._make_route("T2", "10:00:00", "11:00:00")
+
+        call_count = {"n": 0}
+        def fake_schedule(session, G, node_path, dt):
+            call_count["n"] += 1
+            if dt.hour >= 10:
+                return None  # exhausted after T2
+            return later_legs
+
+        monkeypatch.setattr(eng, "_schedule_path", fake_schedule)
+        monkeypatch.setattr(eng, "_passes_filters", lambda legs: True)
+
+        routes = [self._make_route("T1", "08:00:00", "09:00:00")]
+        seen = {("T1",)}
+        result = _fill_later_departures(
+            MagicMock(), nx.MultiDiGraph(),
+            routes, [["A", "B"]],
+            seen, datetime(2026, 2, 17, 8, 0, 0), max_routes=2,
+        )
+        assert len(result) == 2
+        assert ("T2",) in seen
+
+    def test_skips_already_seen_signature(self, monkeypatch):
+        """Fill skips a known sig and keeps advancing until exhausted."""
+        import networkx as nx
+        from unittest.mock import MagicMock
+        from datetime import datetime
+        import routing.engine as eng
+
+        known_legs = self._make_route("T1", "10:00:00", "11:00:00")
+
+        monkeypatch.setattr(eng, "_schedule_path", lambda *a, **kw: known_legs)
+        monkeypatch.setattr(eng, "_passes_filters", lambda legs: False)  # force exhaustion
+
+        routes = [self._make_route("T_orig", "08:00:00", "09:00:00")]
+        seen = {("T_orig",)}
+        result = _fill_later_departures(
+            MagicMock(), nx.MultiDiGraph(),
+            routes, [["A", "B"]],
+            seen, datetime(2026, 2, 17, 8, 0, 0), max_routes=2,
+        )
+        # Could not fill — path exhausted immediately
+        assert len(result) == 1
+
+    def test_exhausted_path_returns_none(self, monkeypatch):
+        """If _schedule_path returns None immediately, no fill occurs."""
+        import networkx as nx
+        from unittest.mock import MagicMock
+        from datetime import datetime
+        import routing.engine as eng
+
+        monkeypatch.setattr(eng, "_schedule_path", lambda *a, **kw: None)
+
+        routes = [self._make_route("T1", "08:00:00", "09:00:00")]
+        seen = {("T1",)}
+        result = _fill_later_departures(
+            MagicMock(), nx.MultiDiGraph(),
+            routes, [["A", "B"]],
+            seen, datetime(2026, 2, 17, 8, 0, 0), max_routes=3,
+        )
+        assert len(result) == 1
