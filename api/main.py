@@ -106,13 +106,18 @@ async def lifespan(app: FastAPI):
     )
 
     if GTFS_RT_API_KEY:
-        scheduler.add_job(
-            poll_all,
-            "interval",
-            seconds=GTFS_RT_POLL_SECONDS,
-            id="gtfs_rt_poll",
-        )
-        logger.info("GTFS-RT polling started (every %ds).", GTFS_RT_POLL_SECONDS)
+        await poll_all()
+        logger.info("GTFS-RT initial poll complete.")
+        if GTFS_RT_POLL_SECONDS > 0:
+            scheduler.add_job(
+                poll_all,
+                "interval",
+                seconds=GTFS_RT_POLL_SECONDS,
+                id="gtfs_rt_poll",
+            )
+            logger.info("GTFS-RT polling scheduled (every %ds).", GTFS_RT_POLL_SECONDS)
+        else:
+            logger.info("GTFS-RT periodic polling disabled (GTFS_RT_POLL_SECONDS=0) — startup fetch only.")
     else:
         logger.info("GTFS-RT polling disabled — GTFS_RT_API_KEY not set.")
 
@@ -199,7 +204,8 @@ async def health(session: Session = Depends(get_session)) -> dict[str, Any]:
             "last_seeded_at": last_seeded_at,
         },
         "gtfs_rt": {
-            "polling_active": GTFS_RT_API_KEY != "" and scheduler.running,
+            "polling_active": GTFS_RT_API_KEY != "" and GTFS_RT_POLL_SECONDS > 0 and scheduler.running,
+            "startup_fetch_only": GTFS_RT_API_KEY != "" and GTFS_RT_POLL_SECONDS == 0,
         },
     }
 

@@ -69,7 +69,7 @@ async def _fetch_feed(url: str) -> gtfs_realtime_pb2.FeedMessage | None:
     params = {"key": GTFS_RT_API_KEY} if GTFS_RT_API_KEY else {}
     try:
         async with httpx.AsyncClient(timeout=15) as client:
-            response = await client.get(url, params=params)
+            response = await client.get(url, params=params, headers={"Accept": "application/x-protobuf"})
             response.raise_for_status()
         feed = gtfs_realtime_pb2.FeedMessage()
         feed.ParseFromString(response.content)
