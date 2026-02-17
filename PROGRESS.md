@@ -38,7 +38,7 @@ GTFS-RT (30–60s)     ──► ingestion/gtfs_realtime.py        │
 | `db/models.py`                  | Complete    | SQLAlchemy models for GTFS + reliability                           |
 | `db/session.py`                 | Complete    | Engine, SessionLocal, get_session                                  |
 | `ingestion/gtfs_static.py`      | Complete    | Download, parse, store all GTFS CSVs                               |
-| `ingestion/gtfs_realtime.py`    | **Blocked** | Code complete; awaiting Metrolinx API key                          |
+| `ingestion/gtfs_realtime.py`    | Complete    | Live — Metrolinx API key obtained 2026-02-16; correct endpoint URLs and protobuf Accept header confirmed |
 | `graph/builder.py`              | Complete    | MultiDiGraph; one edge per (stop-pair, route_id); single SQL join  |
 | `routing/engine.py`             | Complete    | Yen's k-shortest paths on projected DiGraph; MAX_CANDIDATES cap    |
 | `reliability/historical.py`     | Complete    | Rolling-window score per route/stop/bucket                         |
@@ -46,25 +46,35 @@ GTFS-RT (30–60s)     ──► ingestion/gtfs_realtime.py        │
 | `llm/explainer.py`              | Complete    | Local Ollama explanation layer (scoped); graceful fallback if server unreachable |
 | `api/main.py`                   | Complete    | /routes, /stops, /health, /ingest/gtfs-static endpoints            |
 
-**Blocked:**
-- GTFS-RT live feeds blocked on Metrolinx API key — registration submitted.
-  Static GTFS feed does not require a key.
-
 ---
 
-## End-to-end test results (2026-02-11)
+## End-to-end test results (2026-02-17)
 
-Verified against real GO Transit GTFS data:
+Verified against real GO Transit GTFS data with live GTFS-RT feeds active:
 
 - **904 stops**, 43 routes, 125 245 trips, 2 081 547 stop times ingested
 - **Graph**: 904 nodes, 4 017 edges (1 867 trip + 2 150 walk)
 - **Routes confirmed working**: `GET /routes?origin=UN&destination=GL` returns
-  5 scored routes in < 2 s
-- **Sample result** (Route 1):
-  Union Station → Bramalea → Brampton → Mount Pleasant → Georgetown → Acton → **Guelph Central** — 1h 21m, risk = Low (0.2)
-- **Risk scoring**: historical prior (0.8 neutral) + live modifiers applied per
-  leg; late-evening departures correctly flagged
+  scored routes in < 2 s
+- **Sample result** (Route 1, 08:00 departure):
+  Union Station → Bramalea → Brampton → Mount Pleasant → Georgetown → Acton → **Guelph Central** — 1h 31m, risk = Low (0.133)
+- **Risk scoring**: 5 439 reliability records seeded; per-bucket priors now
+  differentiated (off-peak ~0.13, PM peak ~0.2)
+- **GTFS-RT**: all three feeds (TripUpdates, VehiclePosition, Alerts) polling
+  live at 30 s intervals; 113 trip update entities parsed on first poll
 - **LLM endpoint**: `?explain=true` wired and callable (requires local Ollama; returns graceful fallback message if not running)
+
+### GTFS-RT endpoint URLs (Metrolinx Open API)
+
+Base: `https://api.openmetrolinx.com/OpenDataAPI/api/V1/Gtfs/Feed/`
+
+| Feed             | Path suffix       | Rate limit     |
+|------------------|-------------------|----------------|
+| Trip Updates     | `TripUpdates`     | 300 req/s      |
+| Vehicle Position | `VehiclePosition` | 300 req/s      |
+| Service Alerts   | `Alerts`          | 300 req/s      |
+
+API key appended as `?key=<value>`. Protobuf format requires `Accept: application/x-protobuf` header (JSON is the default).
 
 ---
 
@@ -155,8 +165,8 @@ minimum travel time across all trips on that route. This means:
 
 ## Open Questions
 
-- [ ] Metrolinx GTFS-RT API key — registration submitted ~2026-02-11, expected ~10 days
-- [ ] Should route risk = max leg risk, or a weighted sum? Revisit once real RT data flows in.
+- [x] Metrolinx GTFS-RT API key — obtained 2026-02-16; feeds live
+- [ ] Should route risk = max leg risk, or a weighted sum? Revisit once real RT data accumulates.
 
 ---
 
@@ -166,7 +176,7 @@ minimum travel time across all trips on that route. This means:
 - [x] GTFS static ingestion
 - [x] Graph construction
 - [x] Routing engine (Yen's k-shortest paths, departure-time aware)
-- [x] GTFS-RT polling (code complete; blocked on API key)
+- [x] GTFS-RT polling (live 2026-02-16 — Metrolinx API key obtained)
 - [x] Historical reliability tracking
 - [x] Live risk modifiers
 - [x] LLM explanation layer → **switched to local Ollama** (2026-02-11)
@@ -189,7 +199,7 @@ Priority tiers based on impact and dependency on GTFS-RT.
 
 - [x] **Daily GTFS static refresh scheduler** — `_daily_gtfs_refresh()` APScheduler interval job (every `GTFS_REFRESH_HOURS`, default 24h); calls `refresh_static_data` + `build_graph` + `seed_from_static(fill_gaps_only=False)`; scheduler now starts unconditionally (2026-02-11)
 - [x] **Chain reliability reseed into static ingest** — `POST /ingest/gtfs-static` now calls `seed_from_static(fill_gaps_only=False)` after rebuilding the graph; `fill_gaps_only=True` mode added for post-GTFS-RT use (2026-02-11)
-- [ ] **Enhanced `/health` endpoint** — include GTFS data age, graph node/edge counts, reliability record count, and last-seeded timestamp; currently just returns `{"status": "ok"}`
+- [x] **Enhanced `/health` endpoint** — includes GTFS data age, graph node/edge counts, reliability record count, last-seeded timestamp, RT polling status (2026-02-11)
 
 ### Tier 2 — Quality / developer experience
 
@@ -204,10 +214,10 @@ Priority tiers based on impact and dependency on GTFS-RT.
 - [ ] **Response caching for `/routes`** — same origin/dest/date/time → skip Yen's; useful once traffic grows
 - [ ] **Spatial index for walk edges** — replace O(n²) stop comparison in `graph/builder._add_walk_edges` with an R-tree or k-d tree; not needed at 904 stops but required if scope expands to full GTA
 
-### Blocked on GTFS-RT API key
+### Unblocked by GTFS-RT API key (2026-02-16)
 
-- [ ] **Live risk modifiers in production** — cancellations, vehicle positions, service alerts; code complete in `reliability/live.py` and `ingestion/gtfs_realtime.py`
-- [ ] **Real reliability data accumulation** — `record_observed_departure()` called from RT replay to replace synthetic priors with actual observations
+- [x] **Live risk modifiers in production** — cancellations, vehicle positions, service alerts flowing via `reliability/live.py` and `ingestion/gtfs_realtime.py`
+- [ ] **Real reliability data accumulation** — `record_observed_departure()` to be called from an RT observation loop to replace synthetic priors with real observations over time
 
 ---
 
