@@ -87,7 +87,7 @@ API key appended as `?key=<value>`. Protobuf format requires `Accept: applicatio
 |---|---|
 | `routing/engine.py` | ~~Incoherent departure times~~ — fixed: `_schedule_path` queries real trips per segment; ~~transfer wait-time stubbed~~ — now enforced in `_passes_filters` |
 | `routing/engine.py` | ~~Routes 4–5 use local street stops~~ — ~~fixed: `_passes_filters` now rejects any route containing a zero-second trip leg~~ — **filter removed 2026-02-18**: GTFS 1-minute resolution legitimately produces same-minute consecutive stops on multi-stop corridors; the filter was a false positive; see ADR-009 |
-| `routing/engine.py` | **PERF: `/routes` latency ~50 s** — root cause: `MAX_CANDIDATES = max_routes × 40 = 200` candidate paths × up to 3 segments each × 2 DB queries per segment (`_find_trip_legs` does a trip-select + a StopTime batch query) = up to ~1 200 round-trips per call; `_fill_later_departures` repeats the same pattern for additional departure slots. Fix options: (1) bulk-prefetch all `(trip_id, stop_id)` rows needed by the full candidate set in a single query and cache in a dict for the duration of the call; (2) add an in-call memo dict keyed by `(route_id, frozenset(stops), date, not_before)` to avoid re-querying the same segment; (3) lower `MAX_CANDIDATES` and measure the impact on result quality. See "Performance" section in PROGRESS.md for more detail. |
+| `routing/engine.py` | ~~**PERF: `/routes` latency ~50 s**~~ — **fixed 2026-02-18**: added `_RouteQueryCache` (per-call memo) + lowered `MAX_CANDIDATES` from 40× to 15×; see Tier 3 backlog. Next step if still slow: bulk-prefetch all candidate trip-select rows in one SQL query before the Yen's loop. |
 | `reliability/historical.py` `record_observed_departure()` | Called by `seed_from_static` (synthetic priors) and `observe_departures()` in `ingestion/gtfs_realtime.py` (real RT observations) |
 | `api/main.py` `POST /ingest/gtfs-static` | ~~No auth~~ — optional `INGEST_API_KEY` guard added; open when unset |
 | `graph/builder.py` `_add_walk_edges()` | O(n²) stop comparison — fine for GO Transit stop count, but add spatial indexing if expanded to full GTA |
@@ -104,8 +104,9 @@ minimum travel time across all trips on that route. This means:
 - Transfer counting must use **route_id changes**, not trip_id changes (adjacent
   edges on the same route may carry different trip_ids from independent min-time
   selection)
-- A `MAX_CANDIDATES = max_routes * 40` cap prevents Yen's from hanging when
-  walk edges create high-branching alternative paths
+- `MAX_CANDIDATES = max_routes * 15` cap prevents Yen's from hanging when
+  walk edges create high-branching alternative paths (lowered from 40× after
+  profiling showed most candidates beyond ~50 fail `_passes_filters` immediately)
 
 ### Known routing pitfalls (2026-02-18)
 
@@ -281,6 +282,9 @@ Priority tiers based on impact and dependency on GTFS-RT.
 - [x] **`GET /stops` — include routes served** — `routes_served: list[str]` added to `StopResult`; fetched via a single `stop_times → trips` join across all matched stops (2026-02-16)
 - [x] **Response caching for `/routes`** — module-level dict in `api/main.py`, keyed by `(origin, destination, YYYY-MM-DD, HH:MM)`; caches raw `find_routes()` output only (risk scoring stays fresh); 1-hour TTL + explicit clear on daily refresh and manual ingest; 139 tests passing (2026-02-17)
 - [x] **Spatial index for walk edges** — latitude-sorted index + binary search (stdlib `bisect`, no new deps); O(n·k) vs O(n²); Δlon pre-filter gates haversine; `test_matches_brute_force` verifies identical edge sets; ~200× fewer haversine calls at 10 000 stops (2026-02-17)
+- [x] **`/routes` latency optimisation** — `_RouteQueryCache` per-call memo in `routing/engine.py`; two levels: (1) trip-select keyed by `(route_id, first_stop, last_stop, date, not_before_sec)` avoids re-running the 4-table JOIN for repeated first segments; (2) stop_times keyed by `trip_id` fetches all stop times for a trip once and filters in Python on subsequent calls; `MAX_CANDIDATES` lowered from 40× to 15×; estimated DB round-trips reduced from ~1 200 to ~50–150 (2026-02-18)
+- [x] **`total_travel_seconds` corrected to wall-clock time** — was summing leg durations (hiding multi-hour transfer waits); now `last_trip_arrival − first_trip_departure`; regression test added (2026-02-18)
+- [x] **LLM explanation quality** — `_build_llm_payload()` collapses same-trip_id legs, strips IDs, caps at 3 routes; `_normalise_explanation()` injects blank lines between sections; system prompt with numbered rules prevents risk-label overrides and data-format tangents (2026-02-18)
 
 ### Tier 4 — Infrastructure / scalability
 
