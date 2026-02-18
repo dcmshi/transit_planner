@@ -95,19 +95,34 @@ class TestTotalTravelSeconds:
         assert total_travel_seconds(legs) == 3600
 
     def test_walk_only(self):
-        assert total_travel_seconds([_walk(300)]) == 300
+        # No trip legs — wall-clock can't be measured from transit times
+        assert total_travel_seconds([_walk(300)]) == 0
 
     def test_trip_plus_walk(self):
+        # Trailing walk excluded: wall-clock = last trip arrival − first trip departure
         legs = [_trip("R1", "08:00:00", "09:00:00", 3600), _walk(300)]
-        assert total_travel_seconds(legs) == 3900
+        assert total_travel_seconds(legs) == 3600
 
     def test_trip_walk_trip(self):
+        # Transfer wait (09:00→09:15) IS included — that's time the commuter spends
         legs = [
             _trip("R1", "08:00:00", "09:00:00", 3600),
             _walk(300),
             _trip("R2", "09:15:00", "10:00:00", 2700),
         ]
-        assert total_travel_seconds(legs) == 3600 + 300 + 2700
+        assert total_travel_seconds(legs) == 7200  # 08:00→10:00 wall-clock
+
+    def test_long_transfer_wait_counted(self):
+        # Regression: a route with a 5-hour wait should show true door-to-door time,
+        # not just active travel time — the bug that caused bad LLM recommendations
+        legs = [
+            _trip("R1", "09:07:00", "09:50:00", 2580),
+            _walk(240),
+            _trip("R1", "15:20:00", "15:46:00", 1560),
+            _trip("R2", "16:51:00", "17:50:00", 3540),
+        ]
+        # 09:07 → 17:50 = 8h 43m = 31 380 s  (not 2580+240+1560+3540 = 7920 s)
+        assert total_travel_seconds(legs) == 31_380
 
 
 # ---------------------------------------------------------------------------

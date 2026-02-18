@@ -431,14 +431,17 @@ def _route_signature(legs: Route) -> tuple[str, ...]:
 
 
 def total_travel_seconds(legs: Route) -> int:
-    """Sum of all leg durations in seconds (trip travel + walk time)."""
-    total = 0
-    for leg in legs:
-        if leg["kind"] == "trip":
-            total += leg.get("travel_seconds", 0)
-        else:
-            total += leg.get("walk_seconds", 0)
-    return total
+    """
+    Wall-clock journey duration in seconds: last trip arrival minus first trip
+    departure.  This includes transfer wait times, giving the true door-to-door
+    experience rather than the sum of in-vehicle and walking time only.
+    """
+    trip_legs = [l for l in legs if l["kind"] == "trip"]
+    if not trip_legs:
+        return 0
+    first_dep = _hms_to_seconds(trip_legs[0]["departure_time"])
+    last_arr = _hms_to_seconds(trip_legs[-1]["arrival_time"])
+    return max(0, last_arr - first_dep)
 
 
 def count_transfers(legs: Route) -> int:
