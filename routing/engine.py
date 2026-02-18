@@ -135,6 +135,50 @@ def find_routes(
 # Timetable-aware path scheduling
 # ---------------------------------------------------------------------------
 
+def _pick_longest_route(G: nx.MultiDiGraph, node_path: list[str], start: int) -> str:
+    """
+    Among all trip-edge routes on the first stop pair of a segment, return the
+    route_id that has edges covering the most consecutive stops in node_path.
+
+    This breaks ties that arise when multiple routes share the same corridor
+    with identical (often zero-second) edge weights.  Without look-ahead, the
+    arbitrary dict ordering of min() can select a short-haul route that
+    terminates before the intended transfer point, causing _find_trip_legs to
+    return None for the full segment.
+    """
+    u, v = node_path[start], node_path[start + 1]
+    edges = G.get_edge_data(u, v) or {}
+    min_weight = min(
+        (e.get("weight", float("inf")) for e in edges.values()),
+        default=float("inf"),
+    )
+    candidates = {
+        e["route_id"]
+        for e in edges.values()
+        if e.get("kind") == "trip" and e.get("weight", float("inf")) == min_weight
+    }
+    if len(candidates) == 1:
+        return next(iter(candidates))
+
+    best_route = next(iter(candidates))
+    best_count = 0
+    for route_id in candidates:
+        count = 0
+        for j in range(start, len(node_path) - 1):
+            a, b = node_path[j], node_path[j + 1]
+            ab_edges = G.get_edge_data(a, b) or {}
+            if not any(
+                e.get("kind") == "trip" and e.get("route_id") == route_id
+                for e in ab_edges.values()
+            ):
+                break
+            count += 1
+        if count > best_count:
+            best_count = count
+            best_route = route_id
+    return best_route
+
+
 def _schedule_path(
     session: Session,
     G: nx.MultiDiGraph,
@@ -180,8 +224,11 @@ def _schedule_path(
             i += 1
             continue
 
-        # Trip edge — extend the segment as far as the same route_id continues.
-        route_id = best["route_id"]
+        # Trip edge — choose the route_id that covers the most consecutive stops
+        # in the node path (longest-run tie-breaking).  This prevents zero-weight
+        # ties from selecting a short-haul route when a long-haul route on the
+        # same corridor serves all remaining stops.
+        route_id = _pick_longest_route(G, node_path, i)
         segment: list[str] = [u]
         j = i
         while j < len(node_path) - 1:
@@ -189,8 +236,11 @@ def _schedule_path(
             ab_edges = G.get_edge_data(a, b)
             if not ab_edges:
                 break
-            best_ab = min(ab_edges.values(), key=lambda e: e.get("weight", float("inf")))
-            if best_ab["kind"] != "trip" or best_ab["route_id"] != route_id:
+            has_route = any(
+                e.get("kind") == "trip" and e.get("route_id") == route_id
+                for e in ab_edges.values()
+            )
+            if not has_route:
                 break
             segment.append(b)
             j += 1
@@ -311,10 +361,6 @@ def _passes_filters(legs: Route) -> bool:
 
     Filters:
       - Must contain at least one "trip" leg (not walking-only).
-      - No trip leg may have travel_seconds == 0.  GO GTFS uses 1-minute
-        resolution; zero-second legs are street-stop artifacts that appear on
-        local bus routes where consecutive stops share the same scheduled
-        minute.
       - Number of route_id changes must not exceed MAX_TRANSFERS.
       - Each transfer must have at least MIN_TRANSFER_MINUTES of wait time
         between the arriving trip's last arrival and the connecting trip's
@@ -322,10 +368,6 @@ def _passes_filters(legs: Route) -> bool:
     """
     trip_legs = [l for l in legs if l["kind"] == "trip"]
     if not trip_legs:
-        return False
-
-    # Reject any route that contains a zero-second trip leg.
-    if any(l.get("travel_seconds", 0) == 0 for l in trip_legs):
         return False
 
     # Count transfers = number of times the route_id changes between consecutive

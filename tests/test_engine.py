@@ -123,11 +123,12 @@ class TestPassesFilters:
     def test_walk_only_fails(self):
         assert _passes_filters([_walk()]) is False
 
-    # --- zero-second leg filter ---
+    # --- zero-second legs are allowed (GTFS 1-minute rounding artifact) ---
 
-    def test_zero_second_leg_fails(self):
+    def test_zero_second_leg_passes(self):
+        # Two stops sharing the same scheduled minute is valid GTFS data.
         legs = [_trip("R1", "08:00:00", "08:00:00", 0)]
-        assert _passes_filters(legs) is False
+        assert _passes_filters(legs) is True
 
     def test_nonzero_leg_passes(self):
         legs = [_trip("R1", "08:00:00", "09:00:00", 3600)]

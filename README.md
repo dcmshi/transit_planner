@@ -32,30 +32,98 @@ via [Ollama](https://ollama.com) — no API key or cloud account required.
 
 ## Quickstart
 
+### Docker (recommended)
+
+Requires [Docker Desktop](https://www.docker.com/products/docker-desktop/) and [uv](https://docs.astral.sh/uv/).
+
+```bash
+# 1. Configure environment
+cp .env.example .env
+# Edit .env — minimum required: GTFS_RT_API_KEY (Metrolinx Open Data)
+
+# 2. Start the full stack (PostgreSQL + API)
+docker compose up -d --build
+
+# 3. Load GTFS data on first boot (~60 s)
+curl -X POST http://localhost:8000/ingest/gtfs-static
+
+# 4. Query routes
+curl "http://localhost:8000/routes?origin=UN&destination=GL"
+```
+
+Watch startup logs: `docker compose logs -f app`
+
+#### AI explanation (`?explain=true`) with Docker
+
+The app container cannot reach `localhost` on the host — `OLLAMA_BASE_URL=http://localhost:11434`
+(the default) points to the container's own loopback, where nothing is listening.
+
+Two steps are needed:
+
+**1. Start Ollama bound to all interfaces** (not just loopback):
+```bash
+# Windows
+set OLLAMA_HOST=0.0.0.0
+ollama serve
+
+# macOS / Linux
+OLLAMA_HOST=0.0.0.0 ollama serve
+```
+
+Confirm it is reachable:
+```bash
+curl http://localhost:11434/api/tags
+```
+
+**2. Point `.env` at the host machine:**
+```
+OLLAMA_BASE_URL=http://host.docker.internal:11434
+OLLAMA_MODEL=llama3.2
+```
+`host.docker.internal` is a DNS name Docker Desktop provides that resolves
+to the host from inside any container (available on Windows and macOS by default;
+on Linux add `--add-host=host.docker.internal:host-gateway` to the compose file).
+
+Then pull the model and restart the app:
+```bash
+ollama pull llama3.2
+docker compose restart app
+```
+
+Test:
+```bash
+curl "http://localhost:8000/routes?origin=UN&destination=GL&explain=true"
+```
+
+If `explanation` in the response is a fallback message, check the app logs:
+```bash
+docker compose logs app | grep -i ollama
+```
+
+---
+
+### Local (no Docker)
+
 ```bash
 # 1. Install dependencies
 uv sync
 
 # 2. Configure environment
 cp .env.example .env
-# Edit .env: fill in GTFS_RT_API_KEY once Metrolinx approves registration (optional)
-# OLLAMA_BASE_URL and OLLAMA_MODEL have sensible defaults — no API key needed
 
 # 3. (Optional) Set up local LLM for ?explain=true
 #    Install Ollama from https://ollama.com, then:
 ollama pull llama3.2
+ollama serve   # OLLAMA_BASE_URL default (localhost:11434) works fine outside Docker
 
-# 4. Start the API
+# 4. Start the API (SQLite — no database setup needed)
 uv run uvicorn api.main:app --port 8000
 
-# 5. Load GTFS data (first run only; ~30s)
+# 5. Load GTFS data (first run only; ~30 s)
 curl -X POST http://localhost:8000/ingest/gtfs-static
 
 # 6. Query routes
 curl "http://localhost:8000/routes?origin=UN&destination=GL"
-
-# 7. Query with explanation (requires Ollama running)
-curl "http://localhost:8000/routes?origin=UN&destination=GL&explain=true"
 ```
 
 ---
@@ -273,7 +341,7 @@ transit_planner/
 │   ├── historical.py        Rolling-window reliability stats
 │   └── live.py              Live GTFS-RT risk modifiers
 ├── llm/
-│   └── explainer.py         Claude explanation layer
+│   └── explainer.py         Local Ollama explanation layer
 ├── routing/
 │   └── engine.py            Yen's k-shortest paths + risk filters
 ├── config.py                All env-backed configuration
@@ -284,11 +352,11 @@ transit_planner/
 ---
 
 ## Known limitations (v1)
-- **GTFS-RT blocked** — awaiting Metrolinx API key approval. All risk
-  scores currently use historical priors only.
 - **Stop-level routing only** — no within-stop platform logic.
 - **GO buses only** — TTC, Brampton Transit, etc. are excluded from routing
   but their stops may appear in the graph via walk edges.
+- **Single uvicorn worker** — APScheduler runs in-process; scaling to multiple
+  workers would require moving the scheduler to a separate process.
 
 ---
 

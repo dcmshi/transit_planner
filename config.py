@@ -34,6 +34,14 @@ OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "llama3.2")
 # Leave blank to keep the endpoint open (safe for local development).
 INGEST_API_KEY: str = os.getenv("INGEST_API_KEY", "")
 
+# CORS — comma-separated allowed frontend origins.
+# Dev default: CRA at localhost:3000. Restrict in production.
+CORS_ORIGINS: list[str] = [
+    o.strip()
+    for o in os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
+    if o.strip()
+]
+
 # API
 API_HOST: str = os.getenv("API_HOST", "0.0.0.0")
 API_PORT: int = int(os.getenv("API_PORT", "8000"))

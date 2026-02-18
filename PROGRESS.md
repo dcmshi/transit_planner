@@ -86,7 +86,7 @@ API key appended as `?key=<value>`. Protobuf format requires `Accept: applicatio
 | Location | Issue |
 |---|---|
 | `routing/engine.py` | ~~Incoherent departure times~~ — fixed: `_schedule_path` queries real trips per segment; ~~transfer wait-time stubbed~~ — now enforced in `_passes_filters` |
-| `routing/engine.py` | ~~Routes 4–5 use local street stops~~ — fixed: `_passes_filters` now rejects any route containing a zero-second trip leg |
+| `routing/engine.py` | ~~Routes 4–5 use local street stops~~ — ~~fixed: `_passes_filters` now rejects any route containing a zero-second trip leg~~ — **filter removed 2026-02-18**: GTFS 1-minute resolution legitimately produces same-minute consecutive stops on multi-stop corridors; the filter was a false positive; see ADR-009 |
 | `reliability/historical.py` `record_observed_departure()` | Called by `seed_from_static` (synthetic priors) and `observe_departures()` in `ingestion/gtfs_realtime.py` (real RT observations) |
 | `api/main.py` `POST /ingest/gtfs-static` | ~~No auth~~ — optional `INGEST_API_KEY` guard added; open when unset |
 | `graph/builder.py` `_add_walk_edges()` | O(n²) stop comparison — fine for GO Transit stop count, but add spatial indexing if expanded to full GTA |
@@ -103,8 +103,32 @@ minimum travel time across all trips on that route. This means:
 - Transfer counting must use **route_id changes**, not trip_id changes (adjacent
   edges on the same route may carry different trip_ids from independent min-time
   selection)
-- A `MAX_CANDIDATES = max_routes * 20` cap prevents Yen's from hanging when
+- A `MAX_CANDIDATES = max_routes * 40` cap prevents Yen's from hanging when
   walk edges create high-branching alternative paths
+
+### Known routing pitfalls (2026-02-18)
+
+**Corridor tie-breaking bug (fixed):** When multiple routes share a stop pair
+with identical minimum edge weights (common on shared-corridor stops, e.g. routes
+19, 27, 94, and 96 all at `weight=0` for `Yonge @ Poyntz → Yonge @ Florence`),
+Python's `min()` could pick a short-haul route (94/96) instead of the long-haul
+route (27) that continues to the transfer point. `_schedule_path` would then call
+`_find_trip_legs` with the wrong route_id, find no matching trip, and return None
+for a valid path.
+
+**Fix:** `_pick_longest_route(G, node_path, start)` helper in `routing/engine.py`
+scans forward through the node path and counts how many consecutive stops each
+tied candidate route covers. The route with the longest run wins. The segment
+extension loop was also updated to check `any(e["route_id"] == route_id ...)` on
+the MultiDiGraph rather than relying on the min-weight edge's route_id at each step.
+
+**Zero-second leg filter (removed):** `_passes_filters` originally rejected any
+route containing a `travel_seconds == 0` leg, intended to block graph artifacts.
+However, GTFS uses 1-minute resolution and legitimate trips on dense urban
+corridors (e.g. two consecutive Aquitaine Ave stops both scheduled at `10:06:00`)
+produce zero-second legs in the assembled output. Removing the filter allows these
+valid routes through. The graph-level `max(0, ...)` guard in `builder.py` still
+prevents negative weights.
 
 ---
 
@@ -149,6 +173,11 @@ minimum travel time across all trips on that route. This means:
 - **Decision:** Count a transfer whenever `route_id` changes between consecutive trip legs, not when `trip_id` changes.
 - **Rationale:** The graph picks the minimum-travel-time trip independently per edge, so consecutive edges on the same route may carry different trip_ids. Counting trip_id changes would falsely produce 10+ transfers on a direct ride.
 - **Date:** 2026-02-11
+
+### ADR-009: Remove zero-second leg filter; add longest-route tie-breaking
+- **Decision:** Remove the `travel_seconds == 0` filter from `_passes_filters`. Add `_pick_longest_route()` to break ties when multiple routes share identical minimum edge weights on a corridor.
+- **Rationale:** Two separate bugs were found when testing `origin=02821` (Yonge @ Poyntz) → `destination=00201` (University of Guelph): (1) the min-weight tie between routes 19/27/94/96 on shared Yonge corridor stops caused the engine to pick a short-haul route that doesn't reach the transfer point; (2) after fixing (1), the zero-second filter rejected the route because GTFS 1-minute resolution produces same-minute stop pairs on dense urban segments — a legitimate data characteristic, not an artifact. Both filters were over-eager for real-world multi-stop corridors.
+- **Date:** 2026-02-18
 
 ---
 

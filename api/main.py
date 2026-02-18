@@ -25,6 +25,7 @@ from typing import Any
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import Depends, FastAPI, HTTPException, Query, Security
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import APIKeyHeader
 from sqlalchemy.orm import Session
 
@@ -35,7 +36,7 @@ from api.schemas import (
     SeedResponse,
     StopResult,
 )
-from config import GTFS_REFRESH_HOURS, GTFS_RT_API_KEY, GTFS_RT_POLL_SECONDS, INGEST_API_KEY, MAX_ROUTES
+from config import CORS_ORIGINS, GTFS_REFRESH_HOURS, GTFS_RT_API_KEY, GTFS_RT_POLL_SECONDS, INGEST_API_KEY, MAX_ROUTES
 from db.session import SessionLocal, get_session, init_db
 from graph.builder import build_graph, get_graph, get_last_built_at
 from ingestion.gtfs_realtime import poll_all
@@ -196,6 +197,13 @@ app = FastAPI(
     description="Reliability-first routing for GO bus routes (Toronto ↔ Guelph).",
     version="0.1.0",
     lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ORIGINS,
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
 )
 
 
