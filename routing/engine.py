@@ -94,6 +94,17 @@ def find_routes(
     # Hard cap on total candidate paths examined — prevents hanging on graphs
     # with many walk edges.  Raised vs the old value because cheap dedup now
     # discards same-trip duplicates quickly, so we can afford to look further.
+    #
+    # PERF TODO: each _schedule_path call issues 2 DB queries per route segment
+    # (trip-select + StopTime batch).  With MAX_CANDIDATES=200 and 2–3 segments
+    # per path that is ~1 200 round-trips per /routes call, causing ~50 s latency.
+    # Fix options:
+    #   1. Bulk-prefetch all (trip_id, stop_id) rows for the candidate set once
+    #      and pass a cache dict into _find_trip_legs.
+    #   2. Memo-dict keyed by (route_id, frozenset(stops), date, not_before_sec)
+    #      inside _find_trip_legs to skip duplicate segment queries.
+    #   3. Profile and lower MAX_CANDIDATES — many candidates are walk-heavy paths
+    #      that fail _passes_filters immediately; a tighter cap may be harmless.
     MAX_CANDIDATES = max_routes * 40
 
     raw_paths = nx.shortest_simple_paths(H, origin_stop_id, destination_stop_id, weight="weight")
