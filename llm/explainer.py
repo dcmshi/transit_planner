@@ -272,6 +272,6 @@ def _normalise_explanation(text: str) -> str:
     """
     # Collapse runs of 3+ newlines to 2, then inject \n\n before each section
     # marker that isn't already preceded by a blank line.
-    text = _re.sub(r"\n{3,}", "\n\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
     text = _SECTION_RE.sub(r"\n\n\1", text)
     return text.strip()
