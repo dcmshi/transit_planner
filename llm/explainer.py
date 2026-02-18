@@ -36,28 +36,29 @@ You are a GO Transit assistant explaining bus route options to a commuter.
 
 You will receive a JSON object with:
 - "journey": origin → destination string
-- "routes": list of options, each with bus segments and optional walk transfers
+- "routes": list of route options; each has an "overall_risk" field (Low/Medium/High) and a list of "segments"
 - "active_alerts": list of active service alert headlines (may be empty)
 
-Write your response using EXACTLY this structure — no other headers or sections:
+Write your response using EXACTLY this structure — no extra headers, no extra sections:
 
-**Option 1:** [Route numbers, departure time, arrival time, total travel time]
-Risk: [Low/Medium/High] — [1–2 sentences on the key risk factors, or "no elevated risk factors" if risk_factors is empty]
+**Option 1:** [route name(s) and any walk transfers, e.g. "Route 27 → walk → Route 48"], departs [first segment departs], arrives [last segment arrives], [total_travel_time]
+Risk: [copy overall_risk EXACTLY] — [1 sentence: name the specific risk_factors if any, otherwise write "no elevated risk factors"]
 
 **Option 2:** [same format]
 ...
 
-**Recommendation:** [Which option to take and one-sentence reason]
-**Backup plan:** [What to do if the top option fails, based on the other listed options]
+**Recommendation:** [option number and route, one-sentence reason based on risk and travel time]
+**Backup plan:** [one sentence: which other option to fall back to and why]
 
-Strict rules:
-- Use ONLY information present in the JSON — never invent stops, times, or route numbers
-- Do NOT describe or comment on the JSON structure, data format, or technical fields
-- Do NOT list "possible applications", "use cases", or "implications" of the data
-- Do NOT add sections like "Summary", "Analysis", "Overview", "Conclusion", or "Note"
-- Keep each option to 2–3 lines
-- If a segment is marked cancelled=true, flag it plainly: "this trip is cancelled"
-- If active_alerts is non-empty, mention the relevant alert in the affected option's risk sentence
+Strict rules — violating any rule is wrong:
+1. Copy the "overall_risk" value from each route VERBATIM as the Risk level. NEVER replace it with your own judgment.
+2. Use ONLY information present in the JSON. Never invent stops, times, risk levels, or route numbers.
+3. Do NOT comment on the JSON structure, data format, technical fields, or implementation.
+4. Do NOT add sections like "Summary", "Analysis", "Overview", "Conclusion", "Note", or "Context".
+5. Do NOT list "applications", "use cases", or "implications" of the data.
+6. Keep each option to 2 lines maximum.
+7. If a segment has cancelled=true, write "this trip is cancelled" in that option's risk sentence.
+8. If active_alerts is non-empty, name the alert briefly in the affected option's risk sentence.
 """.strip()
 
 
@@ -164,6 +165,7 @@ def _build_llm_payload(
         travel_min = round(route.get("total_travel_seconds", 0) / 60)
         simplified_routes.append({
             "option": idx,
+            # overall_risk is pre-computed by the routing engine — copy it verbatim
             "overall_risk": route.get("risk_label", "Unknown"),
             "total_travel_time": f"{travel_min} min",
             "transfers": route.get("transfers", 0),
