@@ -21,6 +21,7 @@ STRICT SCOPE (per CLAUDE.md / design principles):
 
 import json
 import logging
+import re
 from typing import Any
 
 import httpx
@@ -255,5 +256,22 @@ async def explain_routes(
         return f"Explanation unavailable: Ollama returned HTTP {exc.response.status_code}."
 
     explanation: str = resp.json()["message"]["content"]
+    explanation = _normalise_explanation(explanation)
     logger.debug("Ollama explanation generated (%d chars).", len(explanation))
     return explanation
+
+
+_SECTION_RE = re.compile(r"(?<!\n\n)(\*\*(?:Option \d+|Recommendation|Backup plan):)")
+
+
+def _normalise_explanation(text: str) -> str:
+    """
+    Ensure a blank line precedes each **Option N:**, **Recommendation:**, and
+    **Backup plan:** heading.  Small models frequently omit the blank line,
+    collapsing the entire explanation onto one line in the rendered output.
+    """
+    # Collapse runs of 3+ newlines to 2, then inject \n\n before each section
+    # marker that isn't already preceded by a blank line.
+    text = _re.sub(r"\n{3,}", "\n\n", text)
+    text = _SECTION_RE.sub(r"\n\n\1", text)
+    return text.strip()
