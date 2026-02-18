@@ -386,7 +386,7 @@ class TestFillLaterDepartures:
         later_legs = self._make_route("T2", "10:00:00", "11:00:00")
 
         call_count = {"n": 0}
-        def fake_schedule(session, G, node_path, dt):
+        def fake_schedule(session, G, node_path, dt, cache=None):
             call_count["n"] += 1
             if dt.hour >= 10:
                 return None  # exhausted after T2

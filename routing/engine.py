@@ -49,6 +49,32 @@ logger = logging.getLogger(__name__)
 Route = list[dict[str, Any]]
 
 
+class _RouteQueryCache:
+    """
+    Per-call memo cache that eliminates redundant DB queries inside a single
+    find_routes() invocation.
+
+    trip_select: (route_id, first_stop, last_stop, service_date, not_before_sec)
+                 → trip_id | None
+        Many candidate paths share the same first/last stop on the same route
+        at the same not_before time (especially paths from the Yen's main loop
+        which all start at departure_dt). Cache hit avoids re-running the four-
+        table JOIN every time.
+
+    stop_times: trip_id → {stop_id: StopTime}
+        Once a trip_id is resolved, all of its stop times are fetched once and
+        cached. Subsequent calls for different stop subsets on the same trip
+        (common in _fill_later_departures) filter the dict in Python rather
+        than re-issuing a DB query.
+    """
+
+    __slots__ = ("trip_select", "stop_times")
+
+    def __init__(self) -> None:
+        self.trip_select: dict[tuple[str, str, str, str, int], str | None] = {}
+        self.stop_times: dict[str, dict[str, StopTime]] = {}
+
+
 def find_routes(
     origin_stop_id: str,
     destination_stop_id: str,
@@ -92,22 +118,15 @@ def find_routes(
             H.add_edge(u, v, weight=w)
 
     # Hard cap on total candidate paths examined — prevents hanging on graphs
-    # with many walk edges.  Raised vs the old value because cheap dedup now
-    # discards same-trip duplicates quickly, so we can afford to look further.
-    #
-    # PERF TODO: each _schedule_path call issues 2 DB queries per route segment
-    # (trip-select + StopTime batch).  With MAX_CANDIDATES=200 and 2–3 segments
-    # per path that is ~1 200 round-trips per /routes call, causing ~50 s latency.
-    # Fix options:
-    #   1. Bulk-prefetch all (trip_id, stop_id) rows for the candidate set once
-    #      and pass a cache dict into _find_trip_legs.
-    #   2. Memo-dict keyed by (route_id, frozenset(stops), date, not_before_sec)
-    #      inside _find_trip_legs to skip duplicate segment queries.
-    #   3. Profile and lower MAX_CANDIDATES — many candidates are walk-heavy paths
-    #      that fail _passes_filters immediately; a tighter cap may be harmless.
-    MAX_CANDIDATES = max_routes * 40
+    # with many walk edges.  15× gives a good balance: enough candidates to
+    # find max_routes distinct results while keeping Yen's iterations (and the
+    # DB queries each path triggers) well under the old 40× ceiling.
+    MAX_CANDIDATES = max_routes * 15
 
     raw_paths = nx.shortest_simple_paths(H, origin_stop_id, destination_stop_id, weight="weight")
+
+    # Per-call cache eliminates redundant DB queries across candidate paths.
+    cache = _RouteQueryCache()
 
     seen_signatures: set[tuple[str, ...]] = set()
     routes: list[Route] = []
@@ -115,7 +134,7 @@ def find_routes(
     for examined, node_path in enumerate(raw_paths):
         if examined >= MAX_CANDIDATES:
             break
-        legs = _schedule_path(session, G, node_path, departure_dt)
+        legs = _schedule_path(session, G, node_path, departure_dt, cache)
         if legs is None:
             continue
         if not _passes_filters(legs):
@@ -133,7 +152,7 @@ def find_routes(
     if len(routes) < max_routes and candidate_paths:
         routes = _fill_later_departures(
             session, G, routes, candidate_paths, seen_signatures,
-            departure_dt, max_routes,
+            departure_dt, max_routes, cache,
         )
 
     logger.info(
@@ -195,6 +214,7 @@ def _schedule_path(
     G: nx.MultiDiGraph,
     node_path: list[str],
     departure_dt: datetime,
+    cache: _RouteQueryCache | None = None,
 ) -> Route | None:
     """
     Convert a graph node-path into time-coherent legs.
@@ -257,7 +277,7 @@ def _schedule_path(
             j += 1
 
         trip_legs = _find_trip_legs(
-            session, G, route_id, segment, not_before_sec, service_date
+            session, G, route_id, segment, not_before_sec, service_date, cache
         )
         if trip_legs is None:
             return None
@@ -279,6 +299,7 @@ def _find_trip_legs(
     stops: list[str],
     not_before_sec: int,
     service_date: str,
+    cache: _RouteQueryCache | None = None,
 ) -> Route | None:
     """
     Find the earliest trip on route_id / service_date that:
@@ -290,49 +311,67 @@ def _find_trip_legs(
 
     Returns None if no such trip exists or if the trip does not serve every
     stop in the list.
-    """
-    row = session.execute(
-        text("""
-            SELECT st_first.trip_id
-            FROM stop_times st_first
-            JOIN trips t ON t.trip_id = st_first.trip_id
-            JOIN stop_times st_last
-              ON st_last.trip_id  = st_first.trip_id
-             AND st_last.stop_id  = :last_stop
-             AND st_last.stop_sequence > st_first.stop_sequence
-            WHERE st_first.stop_id  = :first_stop
-              AND t.route_id        = :route_id
-              AND t.service_id      = :service_date
-              AND (
-                    CAST(substr(st_first.departure_time, 1, 2) AS INT) * 3600
-                  + CAST(substr(st_first.departure_time, 4, 2) AS INT) * 60
-                  + CAST(substr(st_first.departure_time, 7, 2) AS INT)
-                ) >= :not_before
-            ORDER BY st_first.departure_time ASC
-            LIMIT 1
-        """),
-        {
-            "first_stop":   stops[0],
-            "last_stop":    stops[-1],
-            "route_id":     route_id,
-            "service_date": service_date,
-            "not_before":   not_before_sec,
-        },
-    ).fetchone()
 
-    if row is None:
+    The optional cache avoids redundant DB round-trips across multiple calls
+    within a single find_routes() invocation:
+      - trip_select: keyed by (route_id, first, last, date, not_before)
+      - stop_times:  keyed by trip_id → full {stop_id: StopTime} dict
+    """
+    trip_key = (route_id, stops[0], stops[-1], service_date, not_before_sec)
+
+    if cache is not None and trip_key in cache.trip_select:
+        trip_id = cache.trip_select[trip_key]
+    else:
+        row = session.execute(
+            text("""
+                SELECT st_first.trip_id
+                FROM stop_times st_first
+                JOIN trips t ON t.trip_id = st_first.trip_id
+                JOIN stop_times st_last
+                  ON st_last.trip_id  = st_first.trip_id
+                 AND st_last.stop_id  = :last_stop
+                 AND st_last.stop_sequence > st_first.stop_sequence
+                WHERE st_first.stop_id  = :first_stop
+                  AND t.route_id        = :route_id
+                  AND t.service_id      = :service_date
+                  AND (
+                        CAST(substr(st_first.departure_time, 1, 2) AS INT) * 3600
+                      + CAST(substr(st_first.departure_time, 4, 2) AS INT) * 60
+                      + CAST(substr(st_first.departure_time, 7, 2) AS INT)
+                    ) >= :not_before
+                ORDER BY st_first.departure_time ASC
+                LIMIT 1
+            """),
+            {
+                "first_stop":   stops[0],
+                "last_stop":    stops[-1],
+                "route_id":     route_id,
+                "service_date": service_date,
+                "not_before":   not_before_sec,
+            },
+        ).fetchone()
+        trip_id = row[0] if row else None
+        if cache is not None:
+            cache.trip_select[trip_key] = trip_id
+
+    if trip_id is None:
         return None
 
-    trip_id = row[0]
+    # Fetch all stop times for this trip once; cache by trip_id.
+    if cache is not None and trip_id in cache.stop_times:
+        full_stop_map = cache.stop_times[trip_id]
+    else:
+        stop_rows = (
+            session.query(StopTime)
+            .filter(StopTime.trip_id == trip_id)
+            .order_by(StopTime.stop_sequence)
+            .all()
+        )
+        full_stop_map = {st.stop_id: st for st in stop_rows}
+        if cache is not None:
+            cache.stop_times[trip_id] = full_stop_map
 
-    # Fetch actual stop times for every stop in the segment from this trip.
-    stop_rows = (
-        session.query(StopTime)
-        .filter(StopTime.trip_id == trip_id, StopTime.stop_id.in_(stops))
-        .order_by(StopTime.stop_sequence)
-        .all()
-    )
-    stop_map: dict[str, StopTime] = {st.stop_id: st for st in stop_rows}
+    stop_map: dict[str, StopTime] = {s: full_stop_map[s] for s in stops if s in full_stop_map}
 
     # Verify every stop in our segment is covered by this trip.
     if any(stop not in stop_map for stop in stops):
@@ -472,6 +511,7 @@ def _fill_later_departures(
     seen_signatures: set[tuple[str, ...]],
     departure_dt: datetime,
     max_routes: int,
+    cache: _RouteQueryCache | None = None,
 ) -> list[Route]:
     """
     Fill remaining route slots with later departures on already-found paths.
@@ -515,7 +555,7 @@ def _fill_later_departures(
             any_active = True
             h, m, s = nb // 3600, (nb % 3600) // 60, nb % 60
             next_dt = datetime(travel_day.year, travel_day.month, travel_day.day, h, m, s)
-            legs = _schedule_path(session, G, node_path, next_dt)
+            legs = _schedule_path(session, G, node_path, next_dt, cache)
             if legs is None or not _passes_filters(legs):
                 path_not_before[i] = None
                 continue
