@@ -19,10 +19,17 @@ import httpx
 import pandas as pd
 from sqlalchemy.orm import Session
 
-from config import DATA_DIR, GTFS_STATIC_URL
+from config import DATA_DIR, DATABASE_URL, GTFS_STATIC_URL
 from db.models import (
     Route, ServiceCalendar, ServiceCalendarDate, Stop, StopTime, Trip,
 )
+
+try:
+    from geoalchemy2.shape import from_shape
+    from shapely.geometry import Point
+    _HAS_POSTGIS = DATABASE_URL.startswith("postgresql")
+except ImportError:
+    _HAS_POSTGIS = False
 
 logger = logging.getLogger(__name__)
 
@@ -72,13 +79,18 @@ def parse_and_store(zip_bytes: bytes, session: Session) -> None:
 def _parse_stops(df: pd.DataFrame, session: Session) -> None:
     session.query(Stop).delete()
     for _, row in df.iterrows():
-        session.add(Stop(
+        lat = float(row["stop_lat"])
+        lon = float(row["stop_lon"])
+        stop = Stop(
             stop_id=row["stop_id"],
             stop_name=row["stop_name"],
-            stop_lat=float(row["stop_lat"]),
-            stop_lon=float(row["stop_lon"]),
+            stop_lat=lat,
+            stop_lon=lon,
             stop_code=row.get("stop_code", ""),
-        ))
+        )
+        if _HAS_POSTGIS:
+            stop.geog = from_shape(Point(lon, lat), srid=4326)
+        session.add(stop)
     logger.info("Loaded %d stops.", len(df))
 
 
@@ -96,7 +108,13 @@ def _parse_routes(df: pd.DataFrame, session: Session) -> None:
 
 def _parse_trips(df: pd.DataFrame, session: Session) -> None:
     session.query(Trip).delete()
+    session.flush()  # ensure route rows from _parse_routes are visible
+    valid_routes = {r[0] for r in session.query(Route.route_id).all()}
+    skipped = 0
     for _, row in df.iterrows():
+        if row["route_id"] not in valid_routes:
+            skipped += 1
+            continue
         session.add(Trip(
             trip_id=row["trip_id"],
             route_id=row["route_id"],
@@ -105,23 +123,36 @@ def _parse_trips(df: pd.DataFrame, session: Session) -> None:
             direction_id=int(row["direction_id"]) if row.get("direction_id") else 0,
             shape_id=row.get("shape_id", ""),
         ))
-    logger.info("Loaded %d trips.", len(df))
+    if skipped:
+        logger.warning("Skipped %d trips with invalid route_id.", skipped)
+    logger.info("Loaded %d trips.", len(df) - skipped)
 
 
 def _parse_stop_times(df: pd.DataFrame, session: Session) -> None:
     session.query(StopTime).delete()
-    records = [
-        StopTime(
+    session.flush()  # ensure trip/stop rows from prior parsers are visible
+    # Filter to only valid (trip_id, stop_id) pairs — the GTFS feed occasionally
+    # contains stop_times that reference trips or stops not present in the feed.
+    # SQLite silently ignores FK violations; PostgreSQL raises immediately.
+    valid_trips = {r[0] for r in session.query(Trip.trip_id).all()}
+    valid_stops = {r[0] for r in session.query(Stop.stop_id).all()}
+    records = []
+    skipped = 0
+    for _, row in df.iterrows():
+        if row["trip_id"] not in valid_trips or row["stop_id"] not in valid_stops:
+            skipped += 1
+            continue
+        records.append(StopTime(
             trip_id=row["trip_id"],
             arrival_time=row["arrival_time"],
             departure_time=row["departure_time"],
             stop_id=row["stop_id"],
             stop_sequence=int(row["stop_sequence"]),
-        )
-        for _, row in df.iterrows()
-    ]
+        ))
+    if skipped:
+        logger.warning("Skipped %d stop_times with invalid trip_id or stop_id.", skipped)
     session.bulk_save_objects(records)
-    logger.info("Loaded %d stop times.", len(df))
+    logger.info("Loaded %d stop times.", len(records))
 
 
 def _parse_calendar(df: pd.DataFrame, session: Session) -> None:

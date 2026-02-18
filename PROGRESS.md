@@ -252,6 +252,10 @@ Priority tiers based on impact and dependency on GTFS-RT.
 - [x] **Response caching for `/routes`** — module-level dict in `api/main.py`, keyed by `(origin, destination, YYYY-MM-DD, HH:MM)`; caches raw `find_routes()` output only (risk scoring stays fresh); 1-hour TTL + explicit clear on daily refresh and manual ingest; 139 tests passing (2026-02-17)
 - [x] **Spatial index for walk edges** — latitude-sorted index + binary search (stdlib `bisect`, no new deps); O(n·k) vs O(n²); Δlon pre-filter gates haversine; `test_matches_brute_force` verifies identical edge sets; ~200× fewer haversine calls at 10 000 stops (2026-02-17)
 
+### Tier 4 — Infrastructure / scalability
+
+- [x] **Migrate to PostgreSQL + PostGIS** — completed 2026-02-18. `postgis/postgis:16-3.4-alpine` via Docker Compose; `stops.geog` Geography column (auto-GIST indexed by GeoAlchemy2); `_add_walk_edges` dispatches to `_add_walk_edges_postgis` (ST_DWithin) on PostgreSQL and falls back to `_add_walk_edges_bisect` on SQLite/tests; FK-safe ingestion with `session.flush()` + orphan filtering; 3 PostGIS integration tests in `tests/integration/`; 145 unit tests still pass on SQLite; verified 904 stops / 106 996 trips / 4 017 edges against live PostgreSQL (2026-02-18)
+
 ### Unblocked by GTFS-RT API key (2026-02-16)
 
 - [x] **Live risk modifiers in production** — cancellations, vehicle positions, service alerts flowing via `reliability/live.py` and `ingestion/gtfs_realtime.py`

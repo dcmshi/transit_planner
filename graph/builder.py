@@ -21,10 +21,10 @@ from datetime import datetime
 from typing import Optional
 
 import networkx as nx
-from sqlalchemy import select as sa_select
+from sqlalchemy import select as sa_select, text
 from sqlalchemy.orm import Session
 
-from config import MAX_WALK_METRES, WALK_SPEED_KPH
+from config import DATABASE_URL, MAX_WALK_METRES, WALK_SPEED_KPH
 from db.models import Stop, StopTime, Trip
 
 logger = logging.getLogger(__name__)
@@ -57,7 +57,7 @@ def build_graph(session: Session) -> nx.MultiDiGraph:
     stops = session.query(Stop).all()
     _add_stop_nodes(G, stops)
     _add_trip_edges(G, session)
-    _add_walk_edges(G, stops)
+    _add_walk_edges(G, session, stops)
 
     _graph = G
     _last_built_at = datetime.utcnow()
@@ -145,10 +145,55 @@ def _add_trip_edges(G: nx.MultiDiGraph, session: Session) -> None:
     logger.info("Added %d trip edges (%d unique route/stop-pair combinations).", len(best), len(best))
 
 
-def _add_walk_edges(G: nx.MultiDiGraph, stops: list[Stop]) -> None:
+def _add_walk_edges(
+    G: nx.MultiDiGraph, session: Session, stops: list[Stop]
+) -> None:
     """
     Add bidirectional walking edges between stops within MAX_WALK_METRES.
-    Walk time (seconds) = distance / walk speed.
+
+    Strategy:
+    - PostgreSQL + PostGIS: uses ST_DWithin on the stops.geog geography column
+      with a GIST index — O(n·log n), exact spherical distances, scales to
+      large networks (TTC etc.) without Python loops.
+    - SQLite (tests / fallback): latitude-sorted bisect index with haversine
+      verification — O(n·k), k ≈ average stops in the lat/lon bounding box.
+    """
+    if DATABASE_URL.startswith("postgresql"):
+        _add_walk_edges_postgis(G, session)
+    else:
+        _add_walk_edges_bisect(G, stops)
+
+
+def _add_walk_edges_postgis(G: nx.MultiDiGraph, session: Session) -> None:
+    """PostGIS ST_DWithin walk edges — requires stops.geog + GIST index."""
+    walk_speed_ms = WALK_SPEED_KPH * 1000 / 3600
+
+    rows = session.execute(text("""
+        SELECT
+            a.stop_id  AS from_id,
+            b.stop_id  AS to_id,
+            ST_Distance(a.geog, b.geog) AS distance_m
+        FROM stops a
+        JOIN stops b
+          ON a.stop_id <> b.stop_id
+         AND ST_DWithin(a.geog, b.geog, :max_walk)
+    """), {"max_walk": MAX_WALK_METRES}).fetchall()
+
+    for row in rows:
+        walk_sec = int(row.distance_m / walk_speed_ms)
+        G.add_edge(
+            row.from_id, row.to_id,
+            distance_m=row.distance_m,
+            walk_seconds=walk_sec,
+            weight=walk_sec,
+            kind="walk",
+        )
+    logger.info("Added %d walk edges via PostGIS ST_DWithin.", len(rows))
+
+
+def _add_walk_edges_bisect(G: nx.MultiDiGraph, stops: list[Stop]) -> None:
+    """
+    Bisect-based walk edges for SQLite / test environments.
 
     Uses a latitude-sorted index with binary search to reduce comparisons
     from O(n²) to O(n·k) where k is the average number of stops inside the
@@ -158,34 +203,25 @@ def _add_walk_edges(G: nx.MultiDiGraph, stops: list[Stop]) -> None:
     Δlat is constant globally (1° ≈ 111 320 m).
     Δlon is computed per-stop because it shrinks toward the poles:
       Δlon = MAX_WALK_METRES / (111 320 · cos(lat)).
-
-    For Toronto (~43 °N), with MAX_WALK_METRES = 500 m and 10 000 stops
-    spread over ~100 km × 60 km, each lat band contains ~50 candidates
-    on average — a ~200× reduction vs the brute-force O(n²) approach.
     """
     if not stops:
         return
 
-    walk_speed_ms = WALK_SPEED_KPH * 1000 / 3600  # metres per second
-    # 1 degree of latitude is the same distance everywhere.
+    walk_speed_ms = WALK_SPEED_KPH * 1000 / 3600
     delta_lat = MAX_WALK_METRES / 111_320
 
-    # Build a lat-sorted parallel list for binary-search range lookups.
     by_lat = sorted(stops, key=lambda s: s.stop_lat)
     lat_values = [s.stop_lat for s in by_lat]
 
+    count = 0
     for a in stops:
-        # Longitude delta shrinks toward the poles.
         delta_lon = MAX_WALK_METRES / (111_320 * math.cos(math.radians(a.stop_lat)))
-
-        # Binary search: narrow candidates to the latitude band [a.lat ± delta_lat].
         lo = bisect.bisect_left(lat_values, a.stop_lat - delta_lat)
         hi = bisect.bisect_right(lat_values, a.stop_lat + delta_lat)
 
         for b in by_lat[lo:hi]:
             if a.stop_id == b.stop_id:
                 continue
-            # Cheap longitude pre-filter before the haversine call.
             if abs(b.stop_lon - a.stop_lon) > delta_lon:
                 continue
             dist = _haversine_metres(a.stop_lat, a.stop_lon, b.stop_lat, b.stop_lon)
@@ -199,6 +235,8 @@ def _add_walk_edges(G: nx.MultiDiGraph, stops: list[Stop]) -> None:
                     weight=walk_sec,
                     kind="walk",
                 )
+                count += 1
+    logger.info("Added %d walk edges via bisect index.", count)
 
 
 def _haversine_metres(lat1: float, lon1: float, lat2: float, lon2: float) -> float:

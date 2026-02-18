@@ -14,6 +14,8 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 def init_db() -> None:
     """Create all tables if they don't exist."""
     Base.metadata.create_all(bind=engine)
+    # GeoAlchemy2 automatically creates a GIST index (idx_stops_geog) on
+    # stops.geog when the Geography column is created — no manual index needed.
 
 
 def get_session() -> Session:

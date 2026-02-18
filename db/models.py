@@ -11,6 +11,14 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import declarative_base, relationship
 
+from config import DATABASE_URL
+
+try:
+    from geoalchemy2 import Geography as _Geography
+    _HAS_POSTGIS = DATABASE_URL.startswith("postgresql")
+except ImportError:
+    _HAS_POSTGIS = False
+
 Base = declarative_base()
 
 
@@ -22,6 +30,12 @@ class Stop(Base):
     stop_lat = Column(Float, nullable=False)
     stop_lon = Column(Float, nullable=False)
     stop_code = Column(String, nullable=True)
+    # PostGIS geography column — populated during ingestion when using PostgreSQL.
+    # On SQLite (tests/dev) the column is a plain String and is not used.
+    geog = Column(
+        _Geography(geometry_type="POINT", srid=4326) if _HAS_POSTGIS else String,
+        nullable=True,
+    )
 
     stop_times = relationship("StopTime", back_populates="stop")
 
