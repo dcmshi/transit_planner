@@ -60,6 +60,7 @@ Strict rules — violating any rule is wrong:
 6. Keep each option to 2 lines maximum.
 7. If a segment has cancelled=true, write "this trip is cancelled" in that option's risk sentence.
 8. If active_alerts is non-empty, name the alert briefly in the affected option's risk sentence.
+9. Recommendation priority: lowest overall_risk wins; break ties by shortest total_travel_time. NEVER recommend a slower option over a faster one with equal or lower risk.
 """.strip()
 
 
@@ -91,9 +92,11 @@ def _build_llm_payload(
     - Risk modifiers across merged legs are de-duplicated and combined.
     - Service alerts are reduced to header text only.
     """
+    # Cap at 3 routes — llama3.2 loses coherence beyond that and starts
+    # referencing option numbers it never described.
     simplified_routes = []
 
-    for idx, route in enumerate(routes_with_scores, 1):
+    for idx, route in enumerate(routes_with_scores[:3], 1):
         segments: list[dict[str, Any]] = []
         legs = route.get("legs", [])
         i = 0
