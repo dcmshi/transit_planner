@@ -272,6 +272,24 @@ class TestExplainOllama:
 
         assert "HTTP 500" in result
 
+    @pytest.mark.anyio
+    async def test_unexpected_response_structure_returns_fallback(self):
+        """Ollama returns 200 but with an unexpected JSON shape — should not KeyError."""
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"unexpected": "shape"}
+        mock_resp.raise_for_status = MagicMock()
+
+        with patch("llm.explainer.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_resp)
+            mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            result = await explain_routes([], [], "Origin", "Dest")
+
+        assert "Explanation unavailable" in result
+        assert "unexpected" in result.lower() or "Ollama" in result
+
 
 # ---------------------------------------------------------------------------
 # _explain_gemini (via explain_routes with LLM_PROVIDER=gemini)
@@ -404,3 +422,23 @@ class TestExplainGemini:
         sent_payload = mock_client.post.call_args[1]["json"]
         assert "systemInstruction" in sent_payload
         assert sent_payload["systemInstruction"]["parts"][0]["text"] == explainer_mod.SYSTEM_PROMPT
+
+    @pytest.mark.anyio
+    async def test_unexpected_response_structure_returns_fallback(self):
+        """Gemini returns 200 but candidate has unexpected nested shape — should not KeyError."""
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "candidates": [{"no_content_key": True}]
+        }
+        mock_resp.raise_for_status = MagicMock()
+
+        with patch("llm.explainer.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_resp)
+            mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            result = await explain_routes([], [], "Origin", "Dest")
+
+        assert "Explanation unavailable" in result
+        assert "unexpected" in result.lower() or "Gemini" in result

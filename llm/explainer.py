@@ -241,7 +241,14 @@ async def _explain_ollama(llm_input: dict[str, Any]) -> str:
         )
         return f"Explanation unavailable: Ollama returned HTTP {exc.response.status_code}."
 
-    explanation: str = resp.json()["message"]["content"]
+    try:
+        data = resp.json()
+        explanation: str = data.get("message", {}).get("content") or ""
+    except (ValueError, AttributeError):
+        explanation = ""
+    if not explanation:
+        logger.warning("Ollama returned an unexpected response structure — explanation skipped.")
+        return "Explanation unavailable: unexpected response format from Ollama."
     explanation = _normalise_explanation(explanation)
     logger.debug("Ollama explanation generated (%d chars).", len(explanation))
     return explanation
@@ -293,7 +300,13 @@ async def _explain_gemini(llm_input: dict[str, Any]) -> str:
         logger.warning("Gemini API returned no candidates — explanation skipped.")
         return "Explanation unavailable: Gemini API returned an empty response."
 
-    explanation: str = candidates[0]["content"]["parts"][0]["text"]
+    try:
+        explanation: str = candidates[0].get("content", {}).get("parts", [{}])[0].get("text") or ""
+    except (IndexError, AttributeError, TypeError):
+        explanation = ""
+    if not explanation:
+        logger.warning("Gemini API returned an unexpected response structure — explanation skipped.")
+        return "Explanation unavailable: unexpected response format from Gemini API."
     explanation = _normalise_explanation(explanation)
     logger.debug("Gemini explanation generated (%d chars).", len(explanation))
     return explanation
