@@ -297,6 +297,21 @@ Findings from a full codebase scan. Ordered by priority.
 - [x] **`.env.example` updated** — `LLM_PROVIDER`, `GEMINI_API_KEY`, `GEMINI_MODEL` entries added with comments (2026-03-02)
 - [x] **31 new tests in `tests/test_explainer.py`** — covers `_route_number`, `_hhmm`, `_build_llm_payload` (9 cases), `_normalise_explanation`, Ollama backend (happy/connect-error/HTTP-error), Gemini backend (happy/URL check/missing-key/connect-error/HTTP-error/empty-candidates/systemInstruction); 202 total tests passing (2026-03-02)
 
+## Fourth-Pass Audit Backlog (2026-03-02)
+
+Findings from a fourth full codebase scan. Ordered by priority.
+
+### Bugs
+
+- [x] **`origin == destination` not validated — returns 500 instead of 422** — `api/main.py`; added guard before routing that raises HTTP 422 "Origin and destination must be different stops."; test added to `test_api.py` (2026-03-02)
+- [x] **`date.today()` in `ingestion/gtfs_realtime.py:280`** — `_recorded_today` dedup key replaced with `datetime.now(timezone.utc).date().strftime("%Y%m%d")` for UTC consistency on Docker servers (2026-03-02)
+- [x] **`date.today()` in `ingestion/seed_reliability.py:109`** — `window_start` calculation replaced `date.today()` with `datetime.now(timezone.utc).date()` (2026-03-02)
+
+### Tech debt / minor issues
+
+- [x] **`/stops` query param missing `max_length`** — `api/main.py:303`; added `max_length=128` to the stop-name search `query` param (2026-03-02)
+- [x] **`except Exception` too broad in `routing/engine.py` `_hms_to_seconds`** — narrowed to `except (ValueError, IndexError, AttributeError)` (2026-03-02)
+
 ## Third-Pass Audit Backlog (2026-03-02)
 
 Findings from a third full codebase scan. Ordered by priority.

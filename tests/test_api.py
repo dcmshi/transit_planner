@@ -360,6 +360,15 @@ class TestGetRoutes:
         )
         assert resp.status_code == 422
 
+    def test_origin_equals_destination_returns_422(self, client):
+        """Same stop for origin and destination should return 422 before routing."""
+        resp = client.get(
+            "/routes?origin=UN&destination=UN"
+            "&travel_date=2026-02-11&departure_time=08:00"
+        )
+        assert resp.status_code == 422
+        assert "different" in resp.json()["detail"].lower()
+
     def test_unexpected_routing_exception_returns_500(self, client):
         """A non-ValueError exception from find_routes should return 500."""
         import api.main as main_mod

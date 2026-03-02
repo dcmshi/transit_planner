@@ -277,7 +277,7 @@ def observe_departures(session: Session) -> int:
     """
     global _recorded_today, _recorded_date
 
-    today = date.today().strftime("%Y%m%d")
+    today = datetime.now(timezone.utc).date().strftime("%Y%m%d")
     if today != _recorded_date:
         _recorded_today = set()
         _recorded_date = today

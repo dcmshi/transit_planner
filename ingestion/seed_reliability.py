@@ -106,7 +106,8 @@ def seed_from_static(
         ) from exc
 
     # Start from today if it falls within the feed; otherwise use the feed start.
-    window_start = max(db_min, date.today()) if date.today() <= db_max else db_min
+    today = datetime.now(timezone.utc).date()
+    window_start = max(db_min, today) if today <= db_max else db_min
     window_end = min(window_start + timedelta(days=window_days - 1), db_max)
 
     start_str = window_start.strftime("%Y%m%d")

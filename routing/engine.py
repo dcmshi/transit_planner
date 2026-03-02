@@ -590,6 +590,6 @@ def _hms_to_seconds(hms: str) -> int:
     try:
         parts = hms.strip().split(":")
         return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
-    except Exception:
+    except (ValueError, IndexError, AttributeError):
         logger.warning("_hms_to_seconds: could not parse %r, defaulting to 0", hms)
         return 0

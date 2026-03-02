@@ -300,7 +300,7 @@ async def health(session: Session = Depends(get_session)) -> HealthResponse:
 
 @app.get("/stops", response_model=list[StopResult])
 async def search_stops(
-    query: str = Query(..., min_length=2, description="Stop name substring to search"),
+    query: str = Query(..., min_length=2, max_length=128, description="Stop name substring to search"),
     session: Session = Depends(get_session),
 ) -> list[StopResult]:
     """Search stops by name substring."""
@@ -362,6 +362,12 @@ async def get_routes(
     Routes have real scheduled departure/arrival times for the requested date
     and time.  Optionally include an LLM-generated explanation of tradeoffs.
     """
+    if origin == destination:
+        raise HTTPException(
+            status_code=422,
+            detail="Origin and destination must be different stops.",
+        )
+
     # Parse departure datetime, defaulting to now.
     try:
         base_date = Date.fromisoformat(travel_date) if travel_date else datetime.now().date()
