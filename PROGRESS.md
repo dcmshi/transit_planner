@@ -65,7 +65,7 @@ Verified against real GO Transit GTFS data with live GTFS-RT feeds active:
   live at 30 s intervals; 113 trip update entities parsed on first poll
 - **RT observation**: `observe_departures()` called after every poll; real cancellations and delays accumulate into `ReliabilityRecord`; `/health` `reliability.records` grows beyond initial 5 439 seed as observations are written
 - **LLM endpoint**: `?explain=true` wired and callable (requires local Ollama; returns graceful fallback message if not running)
-- **Test suite**: 273 tests, all passing (as of 2026-03-02)
+- **Test suite**: 275 tests, all passing (as of 2026-03-02)
 
 ### GTFS-RT endpoint URLs (Metrolinx Open API)
 
@@ -217,7 +217,7 @@ prevents negative weights.
 - [x] End-to-end test with real GTFS data (2026-02-11)
 - [x] Route-type filter — zero-second leg filter (2026-02-11)
 - [x] Departure-time aware routing (2026-02-11)
-- [x] Unit + integration tests — 273 tests (2026-03-02)
+- [x] Unit + integration tests — 275 tests (2026-03-02)
 - [x] Reliability data seeding from static schedule (2026-02-11)
 - [x] Optional auth on ingest endpoints (2026-02-11)
 - [x] Route deduplication by trip_id signature (2026-02-11)
@@ -264,7 +264,7 @@ Priority tiers based on impact and dependency on GTFS-RT.
 
 ## Post-v1 Hardening (2026-03-02)
 
-Four codebase audit passes + targeted coverage-gap analysis. All items complete.
+Five codebase audit passes + targeted coverage-gap analysis. All items complete.
 
 ### Bugs Fixed
 
@@ -280,6 +280,8 @@ Four codebase audit passes + targeted coverage-gap analysis. All items complete.
 - [x] **`origin == destination` returns 500 instead of 422** — `api/main.py`; guard added before routing; returns HTTP 422 "Origin and destination must be different stops." (2026-03-02)
 - [x] **`date.today()` in `gtfs_realtime.py` and `seed_reliability.py`** — replaced with `datetime.now(timezone.utc).date()` for UTC consistency in Docker (2026-03-02)
 - [x] **`record_observed_departure()` TypeError on new record** — new `ReliabilityRecord` integer fields were `None` before DB flush; `+= 1` raised `TypeError`; fixed by initialising `scheduled_departures`, `observed_departures`, `total_delay_seconds`, `cancellation_count` to 0 in the constructor (2026-03-02)
+- [x] **Unguarded key access in Ollama response** — `resp.json()["message"]["content"]` raised `KeyError` on unexpected 2xx body shape; replaced with `.get()` chain + empty-string guard returning the standard fallback string (2026-03-02)
+- [x] **Unguarded key access in Gemini response** — `candidates[0]["content"]["parts"][0]["text"]` raised `KeyError`/`IndexError` when candidate had unexpected structure or `parts` was an empty list; replaced with explicit `parts = ...; parts[0].get("text") if parts else ""` guarded by `except (IndexError, AttributeError, TypeError)` (2026-03-02)
 
 ### Testing Gaps Filled
 
@@ -293,6 +295,7 @@ Four codebase audit passes + targeted coverage-gap analysis. All items complete.
 - [x] **`graph/builder.py`** — 8 tests: `get_graph`/`get_projected_graph` before-build RuntimeError, `build_graph` nodes/names/trip edges/walk edges/caching/deduplication (2026-03-02)
 - [x] **`ingestion/gtfs_realtime.py` polling** — 14 tests: `poll_trip_updates`, `poll_service_alerts`, `poll_vehicle_positions`, `poll_all` (no-key skip, backoff skip, failure counter, partial-success reset, backoff doubling) (2026-03-02)
 - [x] **Remaining fix coverage** — `/stops` max_length → 422, `_hms_to_seconds(None)` → 0, `origin == destination` → 422 (3 tests) (2026-03-02)
+- [x] **LLM bad-structure response paths** — 2 tests in `tests/test_explainer.py`: Ollama and Gemini each return 200 with unexpected JSON shape → fallback string returned, no exception (2026-03-02)
 
 ### Tech Debt Resolved
 
