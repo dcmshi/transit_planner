@@ -43,7 +43,7 @@ GTFS-RT (30–60s)     ──► ingestion/gtfs_realtime.py        │
 | `routing/engine.py`             | Complete    | Yen's k-shortest paths on projected DiGraph; MAX_CANDIDATES cap    |
 | `reliability/historical.py`     | Complete    | Rolling-window score per route/stop/bucket                         |
 | `reliability/live.py`           | Complete    | Live GTFS-RT risk modifiers                                        |
-| `llm/explainer.py`              | Complete    | Local Ollama explanation layer (scoped); graceful fallback if server unreachable |
+| `llm/explainer.py`              | Complete    | Multi-provider: Ollama (default) or Gemini, selected via `LLM_PROVIDER` env var; graceful fallback on any error |
 | `api/schemas.py`                | Complete    | Pydantic response models for all 5 endpoints; discriminated union on `kind` for `TripLeg`/`WalkLeg`; `Literal` types for `risk_label`, `status`, `kind` |
 | `api/main.py`                   | Complete    | /routes, /stops, /health, /ingest/gtfs-static endpoints; `response_model=` on all 5 decorators; `_rt_poll_and_observe()` wraps poll + DB observation; daily refresh uses `fill_gaps_only=True` |
 
@@ -288,6 +288,14 @@ Findings from a full codebase scan. Ordered by priority.
 - [x] **GTFS-RT polling has no backoff** — `ingestion/gtfs_realtime.py`; added exponential backoff: 60s base doubling up to 30 min cap; all-feed failure tracked via `_consecutive_poll_failures` / `_backoff_until`; single success resets (2026-03-02)
 - [x] **Graph DiGraph projection recomputed on every route query** — projection now computed once in `build_graph()` and cached as `_digraph`; `get_projected_graph()` added to `graph/builder.py`; `find_routes()` uses cached projection (2026-03-02)
 - [x] **Config not validated on startup** — lifespan in `api/main.py` now logs warnings at startup if `GTFS_STATIC_URL` is unset or if RT key is set without all RT feed URLs (2026-03-02)
+
+## Feature: Multi-LLM Provider Support (2026-03-02)
+
+- [x] **`LLM_PROVIDER` env var** — `config.py`; `"ollama"` (default) or `"gemini"`; also `GEMINI_API_KEY` and `GEMINI_MODEL` (default `gemini-2.5-flash`) (2026-03-02)
+- [x] **Gemini REST backend** — `llm/explainer.py`; `_explain_gemini()` calls `generativelanguage.googleapis.com/v1beta` via httpx; uses `systemInstruction` + `generationConfig`; graceful fallback on missing key, connect error, HTTP error, or empty candidates (2026-03-02)
+- [x] **Ollama backend extracted** — `_explain_ollama()` contains prior Ollama logic; `explain_routes()` dispatches to either backend; public interface unchanged (2026-03-02)
+- [x] **`.env.example` updated** — `LLM_PROVIDER`, `GEMINI_API_KEY`, `GEMINI_MODEL` entries added with comments (2026-03-02)
+- [x] **31 new tests in `tests/test_explainer.py`** — covers `_route_number`, `_hhmm`, `_build_llm_payload` (9 cases), `_normalise_explanation`, Ollama backend (happy/connect-error/HTTP-error), Gemini backend (happy/URL check/missing-key/connect-error/HTTP-error/empty-candidates/systemInstruction); 202 total tests passing (2026-03-02)
 
 ## Second-Pass Audit Backlog (2026-03-02)
 

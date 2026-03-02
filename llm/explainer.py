@@ -1,14 +1,15 @@
 """
-LLM explanation layer — local Ollama backend.
+LLM explanation layer — multi-provider (Ollama or Gemini).
 
-Uses a locally-running Ollama server to generate plain-language summaries
-of scored route options.  No API key or cloud account required; Ollama
-must be running at OLLAMA_BASE_URL (default: http://localhost:11434).
+Dispatches to the backend chosen by LLM_PROVIDER env var:
+  - "ollama" (default): local Ollama server, no API key required.
+                        Requires `ollama serve` + `ollama pull <model>`.
+  - "gemini": Google Gemini REST API, requires GEMINI_API_KEY.
 
-Quick setup:
-    # Install Ollama: https://ollama.com
-    ollama pull llama3.2          # fast, ~2 GB — good enough for explanation
-    ollama pull llama3.1:8b       # better quality, ~4.5 GB (optional)
+Both backends share the same SYSTEM_PROMPT and _build_llm_payload()
+pre-processing step.  explain_routes() returns a human-readable fallback
+string (rather than raising) if the selected backend is unreachable or
+misconfigured.
 
 STRICT SCOPE (per CLAUDE.md / design principles):
   - LLM receives structured route + risk JSON as input only.
@@ -26,9 +27,17 @@ from typing import Any
 
 import httpx
 
-from config import OLLAMA_BASE_URL, OLLAMA_MODEL
+from config import (
+    GEMINI_API_KEY,
+    GEMINI_MODEL,
+    LLM_PROVIDER,
+    OLLAMA_BASE_URL,
+    OLLAMA_MODEL,
+)
 
 logger = logging.getLogger(__name__)
+
+_GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 
 # Strict prompt that locks small models onto the explanation task.
 # Explicit format + explicit forbiddens prevent data-analysis tangents.
@@ -196,34 +205,8 @@ def _build_llm_payload(
     }
 
 
-async def explain_routes(
-    routes_with_scores: list[dict[str, Any]],
-    active_alerts: list[dict[str, Any]],
-    origin_name: str,
-    destination_name: str,
-) -> str:
-    """
-    Generate a plain-language explanation of scored route options.
-
-    Sends a pre-processed (collapsed, stripped) route summary to the local
-    Ollama server and returns the model's plain-language response.  Returns a
-    human-readable fallback message (rather than raising) if Ollama is
-    unreachable or returns an error — the rest of the API response is still
-    valid in that case.
-
-    Args:
-        routes_with_scores: Scored route dicts from the routing engine.
-        active_alerts:      Active service alert dicts.
-        origin_name:        Human-readable origin stop name.
-        destination_name:   Human-readable destination stop name.
-
-    Returns:
-        Plain-language explanation string from the local model.
-    """
-    llm_input = _build_llm_payload(
-        routes_with_scores, active_alerts, origin_name, destination_name
-    )
-
+async def _explain_ollama(llm_input: dict[str, Any]) -> str:
+    """Send the pre-processed route summary to the local Ollama server."""
     payload = {
         "model": OLLAMA_MODEL,
         "stream": False,
@@ -262,6 +245,89 @@ async def explain_routes(
     explanation = _normalise_explanation(explanation)
     logger.debug("Ollama explanation generated (%d chars).", len(explanation))
     return explanation
+
+
+async def _explain_gemini(llm_input: dict[str, Any]) -> str:
+    """Send the pre-processed route summary to the Google Gemini REST API."""
+    if not GEMINI_API_KEY:
+        logger.warning(
+            "LLM_PROVIDER=gemini but GEMINI_API_KEY is not set — explanation skipped."
+        )
+        return (
+            "Explanation unavailable: GEMINI_API_KEY is not configured. "
+            "Set it in your .env file to enable Gemini explanations."
+        )
+
+    url = f"{_GEMINI_BASE}/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+    payload = {
+        "systemInstruction": {
+            "parts": [{"text": SYSTEM_PROMPT}],
+        },
+        "contents": [
+            {
+                "role": "user",
+                "parts": [{"text": json.dumps(llm_input, indent=2)}],
+            }
+        ],
+        "generationConfig": {
+            "temperature": 0.2,
+            "maxOutputTokens": 1024,
+        },
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(url, json=payload)
+            resp.raise_for_status()
+    except httpx.ConnectError:
+        logger.warning("Gemini API unreachable — explanation skipped.")
+        return "Explanation unavailable: could not reach the Gemini API."
+    except httpx.HTTPStatusError as exc:
+        logger.warning(
+            "Gemini API returned HTTP %d — explanation skipped.", exc.response.status_code
+        )
+        return f"Explanation unavailable: Gemini API returned HTTP {exc.response.status_code}."
+
+    candidates = resp.json().get("candidates", [])
+    if not candidates:
+        logger.warning("Gemini API returned no candidates — explanation skipped.")
+        return "Explanation unavailable: Gemini API returned an empty response."
+
+    explanation: str = candidates[0]["content"]["parts"][0]["text"]
+    explanation = _normalise_explanation(explanation)
+    logger.debug("Gemini explanation generated (%d chars).", len(explanation))
+    return explanation
+
+
+async def explain_routes(
+    routes_with_scores: list[dict[str, Any]],
+    active_alerts: list[dict[str, Any]],
+    origin_name: str,
+    destination_name: str,
+) -> str:
+    """
+    Generate a plain-language explanation of scored route options.
+
+    Dispatches to the backend chosen by LLM_PROVIDER ("ollama" or "gemini").
+    Returns a human-readable fallback string (rather than raising) if the
+    selected backend is unreachable or misconfigured.
+
+    Args:
+        routes_with_scores: Scored route dicts from the routing engine.
+        active_alerts:      Active service alert dicts.
+        origin_name:        Human-readable origin stop name.
+        destination_name:   Human-readable destination stop name.
+
+    Returns:
+        Plain-language explanation string from the selected model.
+    """
+    llm_input = _build_llm_payload(
+        routes_with_scores, active_alerts, origin_name, destination_name
+    )
+
+    if LLM_PROVIDER == "gemini":
+        return await _explain_gemini(llm_input)
+    return await _explain_ollama(llm_input)
 
 
 _SECTION_RE = re.compile(r"(?<!\n\n)(\*\*(?:Option \d+|Recommendation|Backup plan):)")

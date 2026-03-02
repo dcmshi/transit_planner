@@ -25,9 +25,16 @@ GTFS_RT_ALERTS_URL: str = os.getenv("GTFS_RT_ALERTS_URL", "")
 GTFS_RT_API_KEY: str = os.getenv("GTFS_RT_API_KEY", "")  # appended as ?key= on each RT request
 GTFS_RT_POLL_SECONDS: int = int(os.getenv("GTFS_RT_POLL_SECONDS", "30"))
 
-# LLM (local Ollama — https://ollama.com)
+# LLM provider — "ollama" (default, local) or "gemini" (Google Generative AI)
+LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "ollama")
+
+# Local Ollama — https://ollama.com
 OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "llama3.2")
+
+# Google Gemini — required when LLM_PROVIDER=gemini
+GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
+GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
 # Ingest auth (optional)
 # If set, POST /ingest/gtfs-static requires X-API-Key: <value> header.
