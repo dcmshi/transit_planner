@@ -65,7 +65,7 @@ Verified against real GO Transit GTFS data with live GTFS-RT feeds active:
   live at 30 s intervals; 113 trip update entities parsed on first poll
 - **RT observation**: `observe_departures()` called after every poll; real cancellations and delays accumulate into `ReliabilityRecord`; `/health` `reliability.records` grows beyond initial 5 439 seed as observations are written
 - **LLM endpoint**: `?explain=true` wired and callable (requires local Ollama; returns graceful fallback message if not running)
-- **Test suite**: 117 tests, all passing
+- **Test suite**: 273 tests, all passing (as of 2026-03-02)
 
 ### GTFS-RT endpoint URLs (Metrolinx Open API)
 
@@ -88,9 +88,8 @@ API key appended as `?key=<value>`. Protobuf format requires `Accept: applicatio
 | `routing/engine.py` | ~~Incoherent departure times~~ — fixed: `_schedule_path` queries real trips per segment; ~~transfer wait-time stubbed~~ — now enforced in `_passes_filters` |
 | `routing/engine.py` | ~~Routes 4–5 use local street stops~~ — ~~fixed: `_passes_filters` now rejects any route containing a zero-second trip leg~~ — **filter removed 2026-02-18**: GTFS 1-minute resolution legitimately produces same-minute consecutive stops on multi-stop corridors; the filter was a false positive; see ADR-009 |
 | `routing/engine.py` | ~~**PERF: `/routes` latency ~50 s**~~ — **fixed 2026-02-18**: added `_RouteQueryCache` (per-call memo) + lowered `MAX_CANDIDATES` from 40× to 15×; see Tier 3 backlog. Next step if still slow: bulk-prefetch all candidate trip-select rows in one SQL query before the Yen's loop. |
-| `reliability/historical.py` `record_observed_departure()` | Called by `seed_from_static` (synthetic priors) and `observe_departures()` in `ingestion/gtfs_realtime.py` (real RT observations) |
 | `api/main.py` `POST /ingest/gtfs-static` | ~~No auth~~ — optional `INGEST_API_KEY` guard added; open when unset |
-| `graph/builder.py` `_add_walk_edges()` | O(n²) stop comparison — fine for GO Transit stop count, but add spatial indexing if expanded to full GTA |
+| `graph/builder.py` `_add_walk_edges()` | ~~O(n²) stop comparison~~ — replaced with bisect spatial index (SQLite) and PostGIS ST_DWithin (PostgreSQL); see Tier 3 backlog |
 
 ---
 
@@ -218,7 +217,7 @@ prevents negative weights.
 - [x] End-to-end test with real GTFS data (2026-02-11)
 - [x] Route-type filter — zero-second leg filter (2026-02-11)
 - [x] Departure-time aware routing (2026-02-11)
-- [x] Unit + integration tests — 117 tests (2026-02-16)
+- [x] Unit + integration tests — 273 tests (2026-03-02)
 - [x] Reliability data seeding from static schedule (2026-02-11)
 - [x] Optional auth on ingest endpoints (2026-02-11)
 - [x] Route deduplication by trip_id signature (2026-02-11)
@@ -263,92 +262,62 @@ Priority tiers based on impact and dependency on GTFS-RT.
 
 ---
 
-## Post-v1 Audit Backlog (2026-03-02)
+## Post-v1 Hardening (2026-03-02)
 
-Findings from a full codebase scan. Ordered by priority.
+Four codebase audit passes + targeted coverage-gap analysis. All items complete.
 
-### Bugs
+### Bugs Fixed
 
-- [x] **Walk duration key mismatch in LLM explainer** — `llm/explainer.py:157` uses `leg.get("duration_s", 0)` but the key from `routing/engine.py` is `"walk_seconds"`; all walk legs show as "1 min" in explanations regardless of actual distance (2026-03-02)
-- [x] **Route deduplication too aggressive** — `_route_signature()` in `routing/engine.py` keys only on trip IDs; two paths with identical trips but different walk segments share a signature and the second is silently dropped; walk legs now included in signature (2026-03-02)
-- [x] **Service calendar exceptions not checked in routing** — `routing/engine.py` matches trips by `service_id == YYYYMMDD` but never consults `ServiceCalendarDate`; added `NOT EXISTS` subquery for `exception_type = 2` (2026-03-02)
-- [x] **`_hms_to_seconds()` silently returns 0 on parse error** — `routing/engine.py`; now logs a warning before returning the 0 fallback (2026-03-02)
+- [x] **Walk duration key mismatch in LLM explainer** — `llm/explainer.py` used `leg.get("duration_s", 0)` instead of `"walk_seconds"`; walk legs always showed as "1 min" in explanations (2026-03-02)
+- [x] **Route deduplication too aggressive** — `_route_signature()` keyed only on trip IDs; two paths with identical trips but different walk segments shared a signature; walk legs now included (2026-03-02)
+- [x] **Service calendar exceptions not checked** — `routing/engine.py` matched trips by `service_id == YYYYMMDD` without consulting `ServiceCalendarDate`; added `NOT EXISTS` subquery for `exception_type = 2` (2026-03-02)
+- [x] **IndexError on empty trip legs** — `_find_trip_legs()` can return `[]`, not only `None`; `if trip_legs is None` changed to `if not trip_legs` (2026-03-02)
+- [x] **`nullable=False` missing on critical columns** — `StopTime.arrival_time`, `StopTime.departure_time`, `ServiceCalendar.start_date/end_date` now `nullable=False`; previously null values silently produced 0 via `_hms_to_seconds()` (2026-03-02)
+- [x] **Mixed `datetime.now()` / `datetime.utcnow()` throughout** — standardised on `datetime.now(timezone.utc)` across `api/main.py`, `graph/builder.py`, `ingestion/gtfs_realtime.py`, `ingestion/seed_reliability.py`, `reliability/historical.py`; all deprecation warnings eliminated (2026-03-02)
+- [x] **`_add_walk_edges_bisect()` crashes on null coordinates** — stops with null `stop_lat`/`stop_lon` now filtered before sorting with a warning log (2026-03-02)
+- [x] **`_pick_longest_route()` unguarded on empty candidates** — added explicit `if not candidates: raise RuntimeError(...)` guard before `next(iter(candidates))` (2026-03-02)
+- [x] **`_parse_routes` crashes on empty `route_type`** — `int(row.get("route_type", 3))` crashed on `""` from pandas `fillna("")`; fixed to `int(row["route_type"]) if row.get("route_type") else 3` (2026-03-02)
+- [x] **`origin == destination` returns 500 instead of 422** — `api/main.py`; guard added before routing; returns HTTP 422 "Origin and destination must be different stops." (2026-03-02)
+- [x] **`date.today()` in `gtfs_realtime.py` and `seed_reliability.py`** — replaced with `datetime.now(timezone.utc).date()` for UTC consistency in Docker (2026-03-02)
+- [x] **`record_observed_departure()` TypeError on new record** — new `ReliabilityRecord` integer fields were `None` before DB flush; `+= 1` raised `TypeError`; fixed by initialising `scheduled_departures`, `observed_departures`, `total_delay_seconds`, `cancellation_count` to 0 in the constructor (2026-03-02)
 
-### Testing gaps
+### Testing Gaps Filled
 
-- [x] **Unit tests for `_find_trip_legs()`** — 7 direct tests added covering: happy path, not_before filter, wrong service date, missing stop, ServiceCalendarDate exception_type=2, exception_type=1 passthrough, cache hit (2026-03-02)
-- [x] **Unit tests for `_pick_longest_route()`** — 5 direct tests added covering: single candidate, longer-route wins, tie resolution, non-zero start, min-weight-only candidates (2026-03-02)
-- [x] **`get_routes` error path tests** — added: out-of-range hour/minute returns 422, unexpected routing exception returns 500 (2026-03-02)
-- [x] **`observe_departures()` edge cases** — 7 tests added in `tests/test_gtfs_realtime.py`: cancelled trip, deduplication, missing static schedule, partial RT data, future stops skipped, date rollover (2026-03-02)
+- [x] **`_find_trip_legs()` direct tests** — 7 tests: happy path, not_before filter, wrong service date, missing stop, ServiceCalendarDate exception_type=2, type=1 passthrough, cache hit (2026-03-02)
+- [x] **`_pick_longest_route()` direct tests** — 5 tests: single candidate, longer route wins, tie resolution, non-zero start, min-weight-only candidates (2026-03-02)
+- [x] **`get_routes` error paths** — out-of-range hour/minute → 422, unexpected exception → 500 (2026-03-02)
+- [x] **`observe_departures()` edge cases** — 7 tests: cancelled trip, deduplication, missing schedule, partial RT data, future stops skipped, date rollover (2026-03-02)
+- [x] **`_schedule_path` empty-legs guard** — `test_single_stop_segment_returns_none` and `test_schedule_path_treats_empty_legs_as_no_route` via monkeypatch (2026-03-02)
+- [x] **`ingestion/gtfs_static.py`** — 33 tests: `_parse_stops`, `_parse_routes`, `_parse_trips` (FK orphan filtering), `_parse_stop_times`, `_parse_calendar`, `_parse_calendar_dates`, `parse_and_store()` end-to-end, `download_gtfs_zip()` error paths (2026-03-02)
+- [x] **`reliability/historical.py`** — 13 tests: `get_historical_reliability` (neutral prior, zero departures, perfect record, cancellations, bucket mismatch, delay penalty) and `record_observed_departure` (create/update, cancellation flag, time-bucket assignment, separate buckets, window dates) (2026-03-02)
+- [x] **`graph/builder.py`** — 8 tests: `get_graph`/`get_projected_graph` before-build RuntimeError, `build_graph` nodes/names/trip edges/walk edges/caching/deduplication (2026-03-02)
+- [x] **`ingestion/gtfs_realtime.py` polling** — 14 tests: `poll_trip_updates`, `poll_service_alerts`, `poll_vehicle_positions`, `poll_all` (no-key skip, backoff skip, failure counter, partial-success reset, backoff doubling) (2026-03-02)
+- [x] **Remaining fix coverage** — `/stops` max_length → 422, `_hms_to_seconds(None)` → 0, `origin == destination` → 422 (3 tests) (2026-03-02)
 
-### Tech debt / minor issues
+### Tech Debt Resolved
 
-- [x] **Remove stale TODO in `reliability/historical.py`** — updated docstring to reflect that `observe_departures()` already handles this (2026-03-02)
-- [x] **Downgrade high-volume logs from INFO to DEBUG** — `routing/engine.py` route query log and `ingestion/gtfs_realtime.py` poll-complete log both downgraded to DEBUG (2026-03-02)
-- [x] **GTFS-RT polling has no backoff** — `ingestion/gtfs_realtime.py`; added exponential backoff: 60s base doubling up to 30 min cap; all-feed failure tracked via `_consecutive_poll_failures` / `_backoff_until`; single success resets (2026-03-02)
-- [x] **Graph DiGraph projection recomputed on every route query** — projection now computed once in `build_graph()` and cached as `_digraph`; `get_projected_graph()` added to `graph/builder.py`; `find_routes()` uses cached projection (2026-03-02)
-- [x] **Config not validated on startup** — lifespan in `api/main.py` now logs warnings at startup if `GTFS_STATIC_URL` is unset or if RT key is set without all RT feed URLs (2026-03-02)
+- [x] **Remove stale TODO in `reliability/historical.py`** — docstring updated; `observe_departures()` already handles the case (2026-03-02)
+- [x] **Downgrade high-volume logs** — route query log and RT poll-complete log downgraded from INFO to DEBUG (2026-03-02)
+- [x] **GTFS-RT polling backoff** — exponential backoff: 60 s base, doubles to 30 min cap; `_consecutive_poll_failures` / `_backoff_until` module-level state; single success resets (2026-03-02)
+- [x] **Graph DiGraph projection cached** — computed once in `build_graph()`, stored as `_digraph`; `get_projected_graph()` accessor added; `find_routes()` uses cached projection (2026-03-02)
+- [x] **Config validated on startup** — lifespan warns if `GTFS_STATIC_URL` is unset or RT key is set without all RT feed URLs (2026-03-02)
+- [x] **`/stops` query param missing `max_length`** — added `max_length=128` (2026-03-02)
+- [x] **`except Exception` too broad in `_hms_to_seconds`** — narrowed to `except (ValueError, IndexError, AttributeError)` (2026-03-02)
+- [x] **Route cache not thread-safe** — `threading.Lock` added around all cache reads, writes, and clears (2026-03-02)
+- [x] **Graph node name validation** — `build_graph()` logs a warning for any node missing a `name` attribute (2026-03-02)
 
-## Feature: Multi-LLM Provider Support (2026-03-02)
+### API / Schema Improvements
 
-- [x] **`LLM_PROVIDER` env var** — `config.py`; `"ollama"` (default) or `"gemini"`; also `GEMINI_API_KEY` and `GEMINI_MODEL` (default `gemini-2.5-flash`) (2026-03-02)
-- [x] **Gemini REST backend** — `llm/explainer.py`; `_explain_gemini()` calls `generativelanguage.googleapis.com/v1beta` via httpx; uses `systemInstruction` + `generationConfig`; graceful fallback on missing key, connect error, HTTP error, or empty candidates (2026-03-02)
-- [x] **Ollama backend extracted** — `_explain_ollama()` contains prior Ollama logic; `explain_routes()` dispatches to either backend; public interface unchanged (2026-03-02)
-- [x] **`.env.example` updated** — `LLM_PROVIDER`, `GEMINI_API_KEY`, `GEMINI_MODEL` entries added with comments (2026-03-02)
-- [x] **31 new tests in `tests/test_explainer.py`** — covers `_route_number`, `_hhmm`, `_build_llm_payload` (9 cases), `_normalise_explanation`, Ollama backend (happy/connect-error/HTTP-error), Gemini backend (happy/URL check/missing-key/connect-error/HTTP-error/empty-candidates/systemInstruction); 202 total tests passing (2026-03-02)
+- [x] **`risk: null` on walk legs removed** — `WalkLeg` no longer has a `risk` field; cleaner JSON for clients (2026-03-02)
+- [x] **Input length limits on `/routes`** — `origin`/`destination` capped at 64 chars, `departure_time` at 8, `travel_date` at 10; FastAPI returns 422 on violation (2026-03-02)
 
-## Fourth-Pass Audit Backlog (2026-03-02)
+### Feature: Multi-LLM Provider Support
 
-Findings from a fourth full codebase scan. Ordered by priority.
-
-### Bugs
-
-- [x] **`origin == destination` not validated — returns 500 instead of 422** — `api/main.py`; added guard before routing that raises HTTP 422 "Origin and destination must be different stops."; test added to `test_api.py` (2026-03-02)
-- [x] **`date.today()` in `ingestion/gtfs_realtime.py:280`** — `_recorded_today` dedup key replaced with `datetime.now(timezone.utc).date().strftime("%Y%m%d")` for UTC consistency on Docker servers (2026-03-02)
-- [x] **`date.today()` in `ingestion/seed_reliability.py:109`** — `window_start` calculation replaced `date.today()` with `datetime.now(timezone.utc).date()` (2026-03-02)
-
-### Tech debt / minor issues
-
-- [x] **`/stops` query param missing `max_length`** — `api/main.py:303`; added `max_length=128` to the stop-name search `query` param (2026-03-02)
-- [x] **`except Exception` too broad in `routing/engine.py` `_hms_to_seconds`** — narrowed to `except (ValueError, IndexError, AttributeError)` (2026-03-02)
-
-## Third-Pass Audit Backlog (2026-03-02)
-
-Findings from a third full codebase scan. Ordered by priority.
-
-### Bugs
-
-- [x] **`datetime.utcnow()` in `reliability/historical.py:123`** — deprecated since Python 3.12, removed in 3.14 (the project's target); `timezone` was also missing from the import. Added `timezone` import and replaced with `datetime.now(timezone.utc).isoformat()` (2026-03-02)
-- [x] **`_pick_longest_route()` unguarded `next(iter(candidates))` on empty set** — `routing/engine.py:189`; added explicit `if not candidates: raise RuntimeError(...)` guard before the loop (2026-03-02)
-
-### Testing gaps
-
-- [x] **`ingestion/gtfs_static.py` has zero test coverage** — created `tests/test_gtfs_static.py`: 33 tests covering `_parse_stops`, `_parse_routes`, `_parse_trips` (FK orphan filtering), `_parse_stop_times` (FK orphan filtering), `_parse_calendar`, `_parse_calendar_dates` (exception_type 1 and 2), `parse_and_store()` end-to-end via in-memory zip, and `download_gtfs_zip()` error paths. Writing the tests also uncovered a latent bug: `_parse_routes` called `int(row.get("route_type", 3))` which crashes on empty string (produced by `fillna("")`) — fixed to `int(row["route_type"]) if row.get("route_type") else 3` (2026-03-02)
-
-## Second-Pass Audit Backlog (2026-03-02)
-
-Findings from a second full codebase scan.
-
-### Bugs
-
-- [x] **IndexError in `_schedule_path` on empty trip legs** — `routing/engine.py:278`; `_find_trip_legs()` can return `[]` (not `None`) for a degenerate single-stop segment; changed `if trip_legs is None` to `if not trip_legs` to guard both cases; regression tests added (2026-03-02)
-- [x] **`nullable=False` missing on critical columns** — `db/models.py`; `StopTime.arrival_time`, `StopTime.departure_time`, `ServiceCalendar.start_date`, `ServiceCalendar.end_date` now declare `nullable=False`; previously null values silently produced 0 via `_hms_to_seconds()` (2026-03-02)
-- [x] **Mixed `datetime.now()` / `datetime.utcnow()` throughout** — standardised on `datetime.now(timezone.utc)` across `api/main.py`, `graph/builder.py`, `ingestion/gtfs_realtime.py`, `ingestion/seed_reliability.py`; `_parse_scheduled_at()` now returns UTC-aware datetimes; `_routes_cache` TTL comparison is now timezone-consistent; all deprecation warnings eliminated (2026-03-02)
-- [x] **`_add_walk_edges_bisect()` crashes on null `stop_lat`/`stop_lon`** — `graph/builder.py`; stops with null coordinates are filtered out before sorting with a warning log (2026-03-02)
-
-### Testing gaps
-
-- [x] **`_schedule_path` empty-legs guard test** — added `test_single_stop_segment_returns_none` and `test_schedule_path_treats_empty_legs_as_no_route` via monkeypatch (2026-03-02)
-
-### API / schema improvements
-
-- [x] **`risk: null` on walk legs removed** — `api/schemas.py`; `WalkLeg` no longer has a `risk` field; `api/main.py` no longer injects `"risk": None` for walk legs; cleaner JSON for clients (2026-03-02)
-- [x] **Input length limits on `/routes` query params** — `origin` and `destination` capped at 64 chars; `departure_time` at 8; `travel_date` at 10; FastAPI returns 422 on violation (2026-03-02)
-
-### Tech debt
-
-- [x] **Route cache not thread-safe** — `api/main.py`; added `threading.Lock` (`_routes_cache_lock`) around all cache reads, writes, and clears (2026-03-02)
-- [x] **Graph node name attribute not validated at build time** — `graph/builder.py`; `build_graph()` now logs a warning after construction for any node missing a `name` attribute (2026-03-02)
+- [x] **`LLM_PROVIDER` env var** — `config.py`; `"ollama"` (default) or `"gemini"`; `GEMINI_API_KEY` and `GEMINI_MODEL` (default `gemini-2.5-flash`) (2026-03-02)
+- [x] **Gemini REST backend** — `llm/explainer.py`; `_explain_gemini()` calls `generativelanguage.googleapis.com/v1beta` via httpx; uses `systemInstruction` + `generationConfig`; graceful fallback on missing key, connect error, or HTTP error (2026-03-02)
+- [x] **Ollama backend extracted** — `_explain_ollama()` contains prior logic; `explain_routes()` dispatches to either backend; public interface unchanged (2026-03-02)
+- [x] **`.env.example` updated** — `LLM_PROVIDER`, `GEMINI_API_KEY`, `GEMINI_MODEL` entries with comments (2026-03-02)
+- [x] **Tests** — `tests/test_explainer.py`: `_route_number`, `_hhmm`, `_build_llm_payload` (9 cases), `_normalise_explanation`, Ollama/Gemini backends (happy path, connect error, HTTP error, missing key, systemInstruction check) — 31 tests (2026-03-02)
 
 ---
 
