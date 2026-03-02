@@ -109,6 +109,10 @@ def record_observed_departure(
             stop_id=stop_id,
             time_bucket=bucket,
             window_start_date=date_str,
+            scheduled_departures=0,
+            observed_departures=0,
+            total_delay_seconds=0,
+            cancellation_count=0,
         )
         session.add(record)
 

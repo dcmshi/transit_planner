@@ -173,6 +173,10 @@ class TestStopsSearch:
         resp = client.get("/stops?query=G")
         assert resp.status_code == 422
 
+    def test_query_too_long_returns_422(self, client):
+        resp = client.get(f"/stops?query={'x' * 129}")
+        assert resp.status_code == 422
+
     def test_missing_query_param_returns_422(self, client):
         resp = client.get("/stops")
         assert resp.status_code == 422

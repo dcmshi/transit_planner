@@ -7,10 +7,19 @@ reliability.live       — compute_live_risk, which reads module-level
 """
 
 import pytest
-from datetime import datetime
+from datetime import datetime, timezone
 from unittest.mock import patch
 
-from reliability.historical import classify_time_bucket
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+
+from db.models import Base, ReliabilityRecord
+from reliability.historical import (
+    classify_time_bucket,
+    get_historical_reliability,
+    record_observed_departure,
+)
 from reliability.live import (
     ALERT_RISK_BUMP,
     CANCELLATION_RISK_BUMP,
@@ -238,3 +247,184 @@ class TestComputeLiveRisk:
         assert low["risk_label"] == "Low"
         assert mid["risk_label"] == "Medium"
         assert high["risk_label"] == "High"
+
+
+# ---------------------------------------------------------------------------
+# Shared DB fixture for historical functions
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def hist_db():
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    session = Session()
+    yield session
+    session.close()
+    engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# get_historical_reliability
+# ---------------------------------------------------------------------------
+
+class TestGetHistoricalReliability:
+
+    def test_returns_neutral_prior_when_no_data(self, hist_db):
+        score = get_historical_reliability("R1", "S1", "weekday_am_peak", hist_db)
+        assert score == pytest.approx(0.8)
+
+    def test_returns_neutral_prior_when_zero_scheduled(self, hist_db):
+        hist_db.add(ReliabilityRecord(
+            route_id="R1", stop_id="S1", time_bucket="weekday_am_peak",
+            scheduled_departures=0, observed_departures=0,
+            cancellation_count=0, total_delay_seconds=0,
+        ))
+        hist_db.commit()
+        score = get_historical_reliability("R1", "S1", "weekday_am_peak", hist_db)
+        assert score == pytest.approx(0.8)
+
+    def test_perfect_record_returns_high_score(self, hist_db):
+        hist_db.add(ReliabilityRecord(
+            route_id="R1", stop_id="S1", time_bucket="weekday_am_peak",
+            scheduled_departures=100, observed_departures=100,
+            cancellation_count=0, total_delay_seconds=0,
+        ))
+        hist_db.commit()
+        score = get_historical_reliability("R1", "S1", "weekday_am_peak", hist_db)
+        assert score == pytest.approx(1.0)
+
+    def test_all_cancelled_returns_low_score(self, hist_db):
+        hist_db.add(ReliabilityRecord(
+            route_id="R1", stop_id="S1", time_bucket="weekday_offpeak",
+            scheduled_departures=10, observed_departures=0,
+            cancellation_count=10, total_delay_seconds=0,
+        ))
+        hist_db.commit()
+        score = get_historical_reliability("R1", "S1", "weekday_offpeak", hist_db)
+        assert score == pytest.approx(0.0)
+
+    def test_bucket_mismatch_returns_neutral_prior(self, hist_db):
+        hist_db.add(ReliabilityRecord(
+            route_id="R1", stop_id="S1", time_bucket="weekday_am_peak",
+            scheduled_departures=50, observed_departures=50,
+            cancellation_count=0, total_delay_seconds=0,
+        ))
+        hist_db.commit()
+        # Different bucket — no data → neutral prior
+        score = get_historical_reliability("R1", "S1", "weekend", hist_db)
+        assert score == pytest.approx(0.8)
+
+    def test_delay_reduces_score(self, hist_db):
+        # 30-min average delay applies maximum delay penalty (0.2)
+        hist_db.add(ReliabilityRecord(
+            route_id="R1", stop_id="S1", time_bucket="weekday_pm_peak",
+            scheduled_departures=10, observed_departures=10,
+            cancellation_count=0, total_delay_seconds=10 * 30 * 60,  # 30-min avg
+        ))
+        hist_db.commit()
+        score = get_historical_reliability("R1", "S1", "weekday_pm_peak", hist_db)
+        # observed_rate=1.0, cancel_rate=0.0, delay_penalty=0.2 → 0.8
+        assert score == pytest.approx(0.8, abs=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# record_observed_departure
+# ---------------------------------------------------------------------------
+
+class TestRecordObservedDeparture:
+
+    _AM_DT = datetime(2026, 2, 9, 8, 0, tzinfo=timezone.utc)   # weekday AM peak
+    _PM_DT = datetime(2026, 2, 9, 16, 0, tzinfo=timezone.utc)  # weekday PM peak
+
+    def test_creates_new_record_when_none_exists(self, hist_db):
+        record_observed_departure(
+            "R1", "S1", self._AM_DT, delay_seconds=0,
+            was_cancelled=False, session=hist_db,
+        )
+        rec = hist_db.query(ReliabilityRecord).filter_by(
+            route_id="R1", stop_id="S1", time_bucket="weekday_am_peak"
+        ).first()
+        assert rec is not None
+        assert rec.scheduled_departures == 1
+        assert rec.observed_departures == 1
+
+    def test_updates_existing_record(self, hist_db):
+        # Seed one record
+        record_observed_departure(
+            "R1", "S1", self._AM_DT, delay_seconds=0,
+            was_cancelled=False, session=hist_db,
+        )
+        # Second observation
+        record_observed_departure(
+            "R1", "S1", self._AM_DT, delay_seconds=120,
+            was_cancelled=False, session=hist_db,
+        )
+        rec = hist_db.query(ReliabilityRecord).filter_by(
+            route_id="R1", stop_id="S1"
+        ).first()
+        assert rec.scheduled_departures == 2
+        assert rec.observed_departures == 2
+        assert rec.total_delay_seconds == 120
+
+    def test_cancellation_increments_cancellation_count(self, hist_db):
+        record_observed_departure(
+            "R1", "S1", self._AM_DT, delay_seconds=0,
+            was_cancelled=True, session=hist_db,
+        )
+        rec = hist_db.query(ReliabilityRecord).filter_by(
+            route_id="R1", stop_id="S1"
+        ).first()
+        assert rec.cancellation_count == 1
+        assert rec.observed_departures == 0  # not a successful departure
+
+    def test_normal_departure_does_not_increment_cancellation(self, hist_db):
+        record_observed_departure(
+            "R1", "S1", self._AM_DT, delay_seconds=60,
+            was_cancelled=False, session=hist_db,
+        )
+        rec = hist_db.query(ReliabilityRecord).filter_by(
+            route_id="R1", stop_id="S1"
+        ).first()
+        assert rec.cancellation_count == 0
+        assert rec.total_delay_seconds == 60
+
+    def test_assigns_correct_time_bucket_from_scheduled_at(self, hist_db):
+        record_observed_departure(
+            "R1", "S1", self._PM_DT, delay_seconds=0,
+            was_cancelled=False, session=hist_db,
+        )
+        rec = hist_db.query(ReliabilityRecord).filter_by(
+            route_id="R1", stop_id="S1"
+        ).first()
+        assert rec.time_bucket == "weekday_pm_peak"
+
+    def test_separate_buckets_kept_separate(self, hist_db):
+        record_observed_departure(
+            "R1", "S1", self._AM_DT, delay_seconds=0,
+            was_cancelled=False, session=hist_db,
+        )
+        record_observed_departure(
+            "R1", "S1", self._PM_DT, delay_seconds=0,
+            was_cancelled=False, session=hist_db,
+        )
+        records = hist_db.query(ReliabilityRecord).filter_by(
+            route_id="R1", stop_id="S1"
+        ).all()
+        assert len(records) == 2
+        buckets = {r.time_bucket for r in records}
+        assert buckets == {"weekday_am_peak", "weekday_pm_peak"}
+
+    def test_window_end_date_updated(self, hist_db):
+        record_observed_departure(
+            "R1", "S1", self._AM_DT, delay_seconds=0,
+            was_cancelled=False, session=hist_db,
+        )
+        rec = hist_db.query(ReliabilityRecord).filter_by(
+            route_id="R1", stop_id="S1"
+        ).first()
+        assert rec.window_end_date == "20260209"

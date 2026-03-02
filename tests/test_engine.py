@@ -90,6 +90,10 @@ class TestHmsToSeconds:
     def test_partial_string_returns_zero(self):
         assert _hms_to_seconds("08:30") == 0
 
+    def test_none_returns_zero(self):
+        # None triggers AttributeError on .strip() — now caught explicitly
+        assert _hms_to_seconds(None) == 0
+
 
 # ---------------------------------------------------------------------------
 # total_travel_seconds

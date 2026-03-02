@@ -7,7 +7,20 @@ tested directly since they encapsulate meaningful logic.
 
 import pytest
 import networkx as nx
-from graph.builder import _haversine_metres, _add_walk_edges_bisect, _hms_to_seconds
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+
+from db.models import Base, Route, Stop, StopTime, Trip
+from graph.builder import (
+    _haversine_metres,
+    _add_walk_edges_bisect,
+    _hms_to_seconds,
+    build_graph,
+    get_graph,
+    get_projected_graph,
+)
+import graph.builder as builder_mod
 from config import MAX_WALK_METRES
 
 
@@ -168,3 +181,102 @@ class TestAddWalkEdges:
         bf_edges = {(u, v) for u, v in G_bf.edges()}
 
         assert idx_edges == bf_edges
+
+
+# ---------------------------------------------------------------------------
+# build_graph / get_graph / get_projected_graph
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def graph_db():
+    """In-memory SQLite with a minimal two-stop, one-trip GTFS dataset."""
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    session = Session()
+
+    session.add(Stop(stop_id="S1", stop_name="Stop One", stop_lat=43.6453, stop_lon=-79.3806))
+    session.add(Stop(stop_id="S2", stop_name="Stop Two", stop_lat=43.6483, stop_lon=-79.3806))
+    session.add(Route(route_id="R1", route_short_name="1", route_long_name="Test", route_type=3))
+    session.add(Trip(trip_id="T1", route_id="R1", service_id="20260209",
+                     trip_headsign="Test", direction_id=0))
+    session.add(StopTime(trip_id="T1", stop_id="S1", stop_sequence=1,
+                         departure_time="08:00:00", arrival_time="08:00:00"))
+    session.add(StopTime(trip_id="T1", stop_id="S2", stop_sequence=2,
+                         departure_time="08:30:00", arrival_time="08:30:00"))
+    session.commit()
+    yield session
+    session.close()
+    engine.dispose()
+
+
+class TestGetGraphBeforeBuild:
+
+    def test_get_graph_raises_before_build(self):
+        builder_mod._graph = None
+        with pytest.raises(RuntimeError, match="not been built"):
+            get_graph()
+
+    def test_get_projected_graph_raises_before_build(self):
+        builder_mod._digraph = None
+        with pytest.raises(RuntimeError, match="not been built"):
+            get_projected_graph()
+
+
+class TestBuildGraph:
+
+    def test_nodes_created_for_all_stops(self, graph_db):
+        G = build_graph(graph_db)
+        assert "S1" in G.nodes
+        assert "S2" in G.nodes
+
+    def test_node_has_name_attribute(self, graph_db):
+        G = build_graph(graph_db)
+        assert G.nodes["S1"]["name"] == "Stop One"
+        assert G.nodes["S2"]["name"] == "Stop Two"
+
+    def test_trip_edge_created(self, graph_db):
+        G = build_graph(graph_db)
+        assert G.has_edge("S1", "S2")
+        edge = next(iter(G.get_edge_data("S1", "S2").values()))
+        assert edge["kind"] == "trip"
+        assert edge["route_id"] == "R1"
+
+    def test_walk_edges_created_for_nearby_stops(self, graph_db):
+        # S1 and S2 are ~333 m apart — within MAX_WALK_METRES (500 m)
+        G = build_graph(graph_db)
+        walk_edges = [
+            d for _, _, d in G.edges(data=True)
+            if d.get("kind") == "walk"
+        ]
+        assert len(walk_edges) > 0
+
+    def test_projected_digraph_cached(self, graph_db):
+        build_graph(graph_db)
+        H = get_projected_graph()
+        assert H is not None
+        assert H.has_edge("S1", "S2")
+
+    def test_trip_edge_deduplication_keeps_min_travel_time(self, graph_db):
+        """Two trips on same route between same stops: only min travel time kept."""
+        # Add a slower second trip on the same route
+        graph_db.add(Trip(trip_id="T2", route_id="R1", service_id="20260209",
+                          trip_headsign="Test", direction_id=0))
+        graph_db.add(StopTime(trip_id="T2", stop_id="S1", stop_sequence=1,
+                              departure_time="09:00:00", arrival_time="09:00:00"))
+        graph_db.add(StopTime(trip_id="T2", stop_id="S2", stop_sequence=2,
+                              departure_time="10:00:00", arrival_time="10:00:00"))  # 60-min trip
+        graph_db.commit()
+
+        G = build_graph(graph_db)
+        trip_edges = [
+            d for _, _, d in G.edges("S1", data=True)
+            if d.get("kind") == "trip" and d.get("route_id") == "R1"
+        ]
+        # Only one edge per (from_stop, to_stop, route_id) — the 30-min one
+        assert len(trip_edges) == 1
+        assert trip_edges[0]["travel_seconds"] == 30 * 60
