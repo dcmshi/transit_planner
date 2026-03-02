@@ -17,7 +17,7 @@ in memory. It must be rebuilt after each daily GTFS refresh.
 import bisect
 import logging
 import math
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 import networkx as nx
@@ -81,7 +81,17 @@ def build_graph(session: Session) -> nx.MultiDiGraph:
 
     _graph = G
     _digraph = H
-    _last_built_at = datetime.utcnow()
+    _last_built_at = datetime.now(timezone.utc)
+
+    missing_names = [n for n, d in G.nodes(data=True) if not d.get("name")]
+    if missing_names:
+        logger.warning(
+            "%d graph node(s) are missing a name attribute and will fall back "
+            "to stop_id in leg descriptions: %s",
+            len(missing_names),
+            missing_names[:10],  # log first 10 to avoid log flooding
+        )
+
     logger.info(
         "Graph built: %d nodes, %d edges (%d trip, %d walk).",
         G.number_of_nodes(),
@@ -227,6 +237,14 @@ def _add_walk_edges_bisect(G: nx.MultiDiGraph, stops: list[Stop]) -> None:
     """
     if not stops:
         return
+
+    valid_stops = [s for s in stops if s.stop_lat is not None and s.stop_lon is not None]
+    if len(valid_stops) < len(stops):
+        logger.warning(
+            "%d stop(s) skipped in walk-edge calculation due to null coordinates.",
+            len(stops) - len(valid_stops),
+        )
+    stops = valid_stops
 
     walk_speed_ms = WALK_SPEED_KPH * 1000 / 3600
     delta_lat = MAX_WALK_METRES / 111_320

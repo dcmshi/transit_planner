@@ -14,7 +14,7 @@ import asyncio
 import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -40,7 +40,7 @@ class TripUpdateState:
     delay_seconds: int = 0            # positive = late, negative = early
     is_cancelled: bool = False
     stop_time_overrides: dict[str, int] = field(default_factory=dict)  # stop_id → delay
-    fetched_at: datetime = field(default_factory=datetime.utcnow)
+    fetched_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 @dataclass
@@ -50,7 +50,7 @@ class ServiceAlertState:
     description: str
     affected_route_ids: list[str] = field(default_factory=list)
     affected_stop_ids: list[str] = field(default_factory=list)
-    fetched_at: datetime = field(default_factory=datetime.utcnow)
+    fetched_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 # Module-level live state — read by the reliability layer
@@ -221,7 +221,7 @@ async def poll_all() -> None:
         )
         return
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     if _backoff_until is not None and now < _backoff_until:
         logger.debug(
             "GTFS-RT poll skipped — backing off until %s (%d consecutive failures).",
@@ -239,13 +239,13 @@ async def poll_all() -> None:
         # At least one feed succeeded — reset backoff
         _consecutive_poll_failures = 0
         _backoff_until = None
-        _last_fetched = datetime.utcnow()
+        _last_fetched = datetime.now(timezone.utc)
         logger.debug("GTFS-RT poll complete at %s", _last_fetched.isoformat())
     else:
         # All three feeds failed
         _consecutive_poll_failures += 1
         backoff_secs = min(60 * (2 ** (_consecutive_poll_failures - 1)), _MAX_BACKOFF_SECONDS)
-        _backoff_until = datetime.utcnow() + timedelta(seconds=backoff_secs)
+        _backoff_until = datetime.now(timezone.utc) + timedelta(seconds=backoff_secs)
         logger.warning(
             "All GTFS-RT feeds failed (failure #%d). Next poll not before %s.",
             _consecutive_poll_failures, _backoff_until.isoformat(),
@@ -259,7 +259,7 @@ def _parse_scheduled_at(departure_time_str: str, service_id: str) -> datetime | 
     """
     try:
         h, m, s = (int(x) for x in departure_time_str.split(":"))
-        base = datetime.strptime(service_id, "%Y%m%d")
+        base = datetime.strptime(service_id, "%Y%m%d").replace(tzinfo=timezone.utc)
         return base + timedelta(hours=h, minutes=m, seconds=s)
     except (ValueError, AttributeError):
         return None
@@ -301,7 +301,7 @@ def observe_departures(session: Session) -> int:
     for trip_id, stop_id, dep_time, service_id in rows:
         stops_by_trip[trip_id].append((stop_id, dep_time, service_id))
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     recorded = 0
 
     for trip_id, state in unrecorded.items():

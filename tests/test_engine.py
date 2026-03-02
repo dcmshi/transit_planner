@@ -659,3 +659,25 @@ class TestFindTripLegs:
         assert legs2 is not None
         # Both calls should produce identical legs since cache replays trip_id
         assert [l["trip_id"] for l in legs1] == [l["trip_id"] for l in legs2]
+
+    def test_single_stop_segment_returns_none(self, trip_db):
+        # When stops has one element, first_stop == last_stop. The SQL requires
+        # st_last.stop_sequence > st_first.stop_sequence for the same stop_id,
+        # which a non-circular trip cannot satisfy, so the result is None.
+        G = _make_trip_graph()
+        legs = _find_trip_legs(trip_db, G, "R1", ["S1"], 0, "20260302")
+        assert legs is None
+
+    def test_schedule_path_treats_empty_legs_as_no_route(self, trip_db):
+        # _find_trip_legs can theoretically return [] (empty, not None) for a
+        # degenerate single-stop segment on a circular trip. _schedule_path must
+        # handle this without raising IndexError on trip_legs[-1].
+        import routing.engine as eng
+        from unittest.mock import patch
+        from datetime import datetime
+
+        G = _make_trip_graph()
+
+        with patch.object(eng, "_find_trip_legs", return_value=[]):
+            result = eng._schedule_path(trip_db, G, ["S1", "S2"], datetime(2026, 3, 2, 8, 0, 0))
+        assert result is None

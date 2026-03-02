@@ -6,7 +6,7 @@ directly so no real HTTP calls or scheduler are needed.
 """
 
 import pytest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from sqlalchemy import create_engine
@@ -39,13 +39,13 @@ def obs_db():
     session.add(Route(route_id="R1", route_short_name="1", route_long_name="Test", route_type=3))
 
     # Trip that ran yesterday at 08:00 and 08:30 (service_id = yesterday's date)
-    yesterday = (datetime.utcnow() - timedelta(days=1)).strftime("%Y%m%d")
+    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y%m%d")
     session.add(Trip(trip_id="T_past", route_id="R1", service_id=yesterday, trip_headsign="GL", direction_id=0))
     session.add(StopTime(trip_id="T_past", stop_id="S1", stop_sequence=1, departure_time="08:00:00", arrival_time="08:00:00"))
     session.add(StopTime(trip_id="T_past", stop_id="S2", stop_sequence=2, departure_time="08:30:00", arrival_time="08:30:00"))
 
     # Trip scheduled far in the future (tomorrow at 23:00)
-    tomorrow = (datetime.utcnow() + timedelta(days=1)).strftime("%Y%m%d")
+    tomorrow = (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%Y%m%d")
     session.add(Trip(trip_id="T_future", route_id="R1", service_id=tomorrow, trip_headsign="GL", direction_id=0))
     session.add(StopTime(trip_id="T_future", stop_id="S1", stop_sequence=1, departure_time="23:00:00", arrival_time="23:00:00"))
     session.add(StopTime(trip_id="T_future", stop_id="S2", stop_sequence=2, departure_time="23:30:00", arrival_time="23:30:00"))
@@ -74,7 +74,7 @@ def reset_rt_state():
 
 class TestObserveDepartures:
     def test_cancelled_trip_records_all_stops(self, obs_db):
-        yesterday = (datetime.utcnow() - timedelta(days=1)).strftime("%Y%m%d")
+        yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y%m%d")
         rt_mod.trip_updates["T_past"] = TripUpdateState(
             trip_id="T_past", route_id="R1", is_cancelled=True
         )
@@ -96,7 +96,7 @@ class TestObserveDepartures:
         assert "T_past" in rt_mod._recorded_today
 
     def test_already_recorded_trip_is_skipped(self, obs_db):
-        today = datetime.utcnow().strftime("%Y%m%d")
+        today = datetime.now(timezone.utc).strftime("%Y%m%d")
         rt_mod._recorded_today = {"T_past"}
         rt_mod._recorded_date = today
         rt_mod.trip_updates["T_past"] = TripUpdateState(
@@ -121,7 +121,7 @@ class TestObserveDepartures:
     def test_delayed_trip_only_records_past_stops(self, obs_db):
         # T_past has S1 at 08:00 (past) and S2 at 08:30 (past).
         # Override only S1 with delay data — S2 has no RT override and should be skipped.
-        yesterday = (datetime.utcnow() - timedelta(days=1)).strftime("%Y%m%d")
+        yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y%m%d")
         rt_mod.trip_updates["T_past"] = TripUpdateState(
             trip_id="T_past",
             route_id="R1",

@@ -289,6 +289,31 @@ Findings from a full codebase scan. Ordered by priority.
 - [x] **Graph DiGraph projection recomputed on every route query** — projection now computed once in `build_graph()` and cached as `_digraph`; `get_projected_graph()` added to `graph/builder.py`; `find_routes()` uses cached projection (2026-03-02)
 - [x] **Config not validated on startup** — lifespan in `api/main.py` now logs warnings at startup if `GTFS_STATIC_URL` is unset or if RT key is set without all RT feed URLs (2026-03-02)
 
+## Second-Pass Audit Backlog (2026-03-02)
+
+Findings from a second full codebase scan.
+
+### Bugs
+
+- [x] **IndexError in `_schedule_path` on empty trip legs** — `routing/engine.py:278`; `_find_trip_legs()` can return `[]` (not `None`) for a degenerate single-stop segment; changed `if trip_legs is None` to `if not trip_legs` to guard both cases; regression tests added (2026-03-02)
+- [x] **`nullable=False` missing on critical columns** — `db/models.py`; `StopTime.arrival_time`, `StopTime.departure_time`, `ServiceCalendar.start_date`, `ServiceCalendar.end_date` now declare `nullable=False`; previously null values silently produced 0 via `_hms_to_seconds()` (2026-03-02)
+- [x] **Mixed `datetime.now()` / `datetime.utcnow()` throughout** — standardised on `datetime.now(timezone.utc)` across `api/main.py`, `graph/builder.py`, `ingestion/gtfs_realtime.py`, `ingestion/seed_reliability.py`; `_parse_scheduled_at()` now returns UTC-aware datetimes; `_routes_cache` TTL comparison is now timezone-consistent; all deprecation warnings eliminated (2026-03-02)
+- [x] **`_add_walk_edges_bisect()` crashes on null `stop_lat`/`stop_lon`** — `graph/builder.py`; stops with null coordinates are filtered out before sorting with a warning log (2026-03-02)
+
+### Testing gaps
+
+- [x] **`_schedule_path` empty-legs guard test** — added `test_single_stop_segment_returns_none` and `test_schedule_path_treats_empty_legs_as_no_route` via monkeypatch (2026-03-02)
+
+### API / schema improvements
+
+- [x] **`risk: null` on walk legs removed** — `api/schemas.py`; `WalkLeg` no longer has a `risk` field; `api/main.py` no longer injects `"risk": None` for walk legs; cleaner JSON for clients (2026-03-02)
+- [x] **Input length limits on `/routes` query params** — `origin` and `destination` capped at 64 chars; `departure_time` at 8; `travel_date` at 10; FastAPI returns 422 on violation (2026-03-02)
+
+### Tech debt
+
+- [x] **Route cache not thread-safe** — `api/main.py`; added `threading.Lock` (`_routes_cache_lock`) around all cache reads, writes, and clears (2026-03-02)
+- [x] **Graph node name attribute not validated at build time** — `graph/builder.py`; `build_graph()` now logs a warning after construction for any node missing a `name` attribute (2026-03-02)
+
 ---
 
 ## Environment Setup

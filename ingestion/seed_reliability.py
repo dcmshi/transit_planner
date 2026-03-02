@@ -22,7 +22,7 @@ Default synthetic rates (tunable via _PRIORS):
 
 import logging
 from collections import defaultdict
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -182,7 +182,7 @@ def seed_from_static(
         record.cancellation_count = cancelled
         record.total_delay_seconds = total_delay
         record.window_end_date = end_str
-        record.updated_at = datetime.utcnow().isoformat()
+        record.updated_at = datetime.now(timezone.utc).isoformat()
         written += 1
 
     session.commit()

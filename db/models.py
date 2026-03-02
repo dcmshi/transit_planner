@@ -70,8 +70,8 @@ class StopTime(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     trip_id = Column(String, ForeignKey("trips.trip_id"), index=True)
-    arrival_time = Column(String)    # HH:MM:SS (may exceed 24:00:00)
-    departure_time = Column(String)  # HH:MM:SS (may exceed 24:00:00)
+    arrival_time = Column(String, nullable=False)    # HH:MM:SS (may exceed 24:00:00)
+    departure_time = Column(String, nullable=False)  # HH:MM:SS (may exceed 24:00:00)
     stop_id = Column(String, ForeignKey("stops.stop_id"), index=True)
     stop_sequence = Column(Integer)
 
@@ -90,8 +90,8 @@ class ServiceCalendar(Base):
     friday = Column(Boolean)
     saturday = Column(Boolean)
     sunday = Column(Boolean)
-    start_date = Column(String)  # YYYYMMDD
-    end_date = Column(String)    # YYYYMMDD
+    start_date = Column(String, nullable=False)  # YYYYMMDD
+    end_date = Column(String, nullable=False)    # YYYYMMDD
 
 
 class ServiceCalendarDate(Base):

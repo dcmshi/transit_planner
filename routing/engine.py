@@ -275,7 +275,7 @@ def _schedule_path(
         trip_legs = _find_trip_legs(
             session, G, route_id, segment, not_before_sec, service_date, cache
         )
-        if trip_legs is None:
+        if not trip_legs:  # None (no trip found) or [] (degenerate single-stop segment)
             return None
 
         legs.extend(trip_legs)

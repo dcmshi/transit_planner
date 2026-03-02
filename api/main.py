@@ -19,8 +19,9 @@ Endpoints (v1):
 """
 
 import logging
+import threading
 from contextlib import asynccontextmanager
-from datetime import datetime, date as Date, timedelta
+from datetime import datetime, date as Date, timedelta, timezone
 from typing import Any
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -74,8 +75,10 @@ scheduler = AsyncIOScheduler()
 # ---------------------------------------------------------------------------
 # Route cache — keyed by (origin, destination, YYYY-MM-DD, HH:MM)
 # Caches raw find_routes() output (legs only); risk scoring is always fresh.
+# Protected by a lock so concurrent requests don't duplicate find_routes() work.
 # ---------------------------------------------------------------------------
 _routes_cache: dict[tuple[str, str, str, str], tuple[list, datetime]] = {}
+_routes_cache_lock = threading.Lock()
 _ROUTES_CACHE_TTL = timedelta(hours=1)
 
 
@@ -85,22 +88,25 @@ def _routes_cache_key(origin: str, destination: str, departure_dt: datetime) -> 
 
 
 def _get_cached_routes(key: tuple[str, str, str, str]) -> list | None:
-    entry = _routes_cache.get(key)
-    if entry is None:
-        return None
-    cached_routes, cached_at = entry
-    if datetime.now() - cached_at > _ROUTES_CACHE_TTL:
-        del _routes_cache[key]
-        return None
-    return cached_routes
+    with _routes_cache_lock:
+        entry = _routes_cache.get(key)
+        if entry is None:
+            return None
+        cached_routes, cached_at = entry
+        if datetime.now(timezone.utc) - cached_at > _ROUTES_CACHE_TTL:
+            del _routes_cache[key]
+            return None
+        return cached_routes
 
 
 def _store_cached_routes(key: tuple[str, str, str, str], routes: list) -> None:
-    _routes_cache[key] = (routes, datetime.now())
+    with _routes_cache_lock:
+        _routes_cache[key] = (routes, datetime.now(timezone.utc))
 
 
 def _clear_routes_cache() -> None:
-    _routes_cache.clear()
+    with _routes_cache_lock:
+        _routes_cache.clear()
     logger.info("Route cache cleared.")
 
 
@@ -270,7 +276,7 @@ async def health(session: Session = Depends(get_session)) -> HealthResponse:
 
     return {
         "status": "ok",
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "gtfs": {
             "stops": stop_count,
             "trips": trip_count,
@@ -335,14 +341,16 @@ async def search_stops(
 
 @app.get("/routes", response_model=RoutesResponse)
 async def get_routes(
-    origin: str = Query(..., description="Origin stop_id"),
-    destination: str = Query(..., description="Destination stop_id"),
+    origin: str = Query(..., max_length=64, description="Origin stop_id"),
+    destination: str = Query(..., max_length=64, description="Destination stop_id"),
     departure_time: str | None = Query(
         None,
+        max_length=8,
         description="Earliest departure time as HH:MM or HH:MM:SS. Defaults to current time.",
     ),
     travel_date: str | None = Query(
         None,
+        max_length=10,
         description="Travel date as YYYY-MM-DD. Defaults to today.",
     ),
     explain: bool = Query(False, description="Include LLM plain-language explanation"),
@@ -398,7 +406,7 @@ async def get_routes(
 
         for leg in route_legs:
             if leg["kind"] != "trip":
-                scored_legs.append({**leg, "risk": None})
+                scored_legs.append(leg)
                 continue
 
             hist = get_historical_reliability(

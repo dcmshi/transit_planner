@@ -49,7 +49,6 @@ class WalkLeg(BaseModel):
     to_stop_name: str
     distance_m: float
     walk_seconds: int
-    risk: None = None
 
 
 Leg = Annotated[TripLeg | WalkLeg, Field(discriminator="kind")]
