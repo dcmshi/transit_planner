@@ -301,7 +301,8 @@ async def _explain_gemini(llm_input: dict[str, Any]) -> str:
         return "Explanation unavailable: Gemini API returned an empty response."
 
     try:
-        explanation: str = candidates[0].get("content", {}).get("parts", [{}])[0].get("text") or ""
+        parts = candidates[0].get("content", {}).get("parts", [])
+        explanation: str = (parts[0].get("text") if parts else "") or ""
     except (IndexError, AttributeError, TypeError):
         explanation = ""
     if not explanation:
