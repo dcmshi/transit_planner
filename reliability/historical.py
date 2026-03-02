@@ -17,7 +17,7 @@ Reliability score (0–1, higher = more reliable) is derived from:
 """
 
 import logging
-from datetime import datetime, time
+from datetime import datetime, time, timezone
 
 from sqlalchemy.orm import Session
 
@@ -120,5 +120,5 @@ def record_observed_departure(
         record.total_delay_seconds += delay_seconds
 
     record.window_end_date = date_str
-    record.updated_at = datetime.utcnow().isoformat()
+    record.updated_at = datetime.now(timezone.utc).isoformat()
     session.commit()

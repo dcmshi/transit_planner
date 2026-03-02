@@ -183,6 +183,10 @@ def _pick_longest_route(G: nx.MultiDiGraph, node_path: list[str], start: int) ->
         for e in edges.values()
         if e.get("kind") == "trip" and e.get("weight", float("inf")) == min_weight
     }
+    if not candidates:
+        raise RuntimeError(
+            f"_pick_longest_route: no trip edges between {u!r} and {v!r} in node path"
+        )
     if len(candidates) == 1:
         return next(iter(candidates))
 

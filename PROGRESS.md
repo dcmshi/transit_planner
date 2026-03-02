@@ -297,6 +297,19 @@ Findings from a full codebase scan. Ordered by priority.
 - [x] **`.env.example` updated** — `LLM_PROVIDER`, `GEMINI_API_KEY`, `GEMINI_MODEL` entries added with comments (2026-03-02)
 - [x] **31 new tests in `tests/test_explainer.py`** — covers `_route_number`, `_hhmm`, `_build_llm_payload` (9 cases), `_normalise_explanation`, Ollama backend (happy/connect-error/HTTP-error), Gemini backend (happy/URL check/missing-key/connect-error/HTTP-error/empty-candidates/systemInstruction); 202 total tests passing (2026-03-02)
 
+## Third-Pass Audit Backlog (2026-03-02)
+
+Findings from a third full codebase scan. Ordered by priority.
+
+### Bugs
+
+- [x] **`datetime.utcnow()` in `reliability/historical.py:123`** — deprecated since Python 3.12, removed in 3.14 (the project's target); `timezone` was also missing from the import. Added `timezone` import and replaced with `datetime.now(timezone.utc).isoformat()` (2026-03-02)
+- [x] **`_pick_longest_route()` unguarded `next(iter(candidates))` on empty set** — `routing/engine.py:189`; added explicit `if not candidates: raise RuntimeError(...)` guard before the loop (2026-03-02)
+
+### Testing gaps
+
+- [x] **`ingestion/gtfs_static.py` has zero test coverage** — created `tests/test_gtfs_static.py`: 33 tests covering `_parse_stops`, `_parse_routes`, `_parse_trips` (FK orphan filtering), `_parse_stop_times` (FK orphan filtering), `_parse_calendar`, `_parse_calendar_dates` (exception_type 1 and 2), `parse_and_store()` end-to-end via in-memory zip, and `download_gtfs_zip()` error paths. Writing the tests also uncovered a latent bug: `_parse_routes` called `int(row.get("route_type", 3))` which crashes on empty string (produced by `fillna("")`) — fixed to `int(row["route_type"]) if row.get("route_type") else 3` (2026-03-02)
+
 ## Second-Pass Audit Backlog (2026-03-02)
 
 Findings from a second full codebase scan.

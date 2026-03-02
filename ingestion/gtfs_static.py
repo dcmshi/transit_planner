@@ -101,7 +101,7 @@ def _parse_routes(df: pd.DataFrame, session: Session) -> None:
             route_id=row["route_id"],
             route_short_name=row.get("route_short_name", ""),
             route_long_name=row.get("route_long_name", ""),
-            route_type=int(row.get("route_type", 3)),
+            route_type=int(row["route_type"]) if row.get("route_type") else 3,
         ))
     logger.info("Loaded %d routes.", len(df))
 
