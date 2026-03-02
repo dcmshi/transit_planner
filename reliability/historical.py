@@ -93,7 +93,7 @@ def record_observed_departure(
 ) -> None:
     """
     Record one observed (or cancelled) departure and update reliability stats.
-    TODO: Call this from a background job that processes historical GTFS-RT data.
+    Called by ingestion.gtfs_realtime.observe_departures() after every RT poll.
     """
     bucket = classify_time_bucket(scheduled_at)
     date_str = scheduled_at.strftime("%Y%m%d")

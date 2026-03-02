@@ -36,7 +36,11 @@ from api.schemas import (
     SeedResponse,
     StopResult,
 )
-from config import CORS_ORIGINS, GTFS_REFRESH_HOURS, GTFS_RT_API_KEY, GTFS_RT_POLL_SECONDS, INGEST_API_KEY, MAX_ROUTES
+from config import (
+    CORS_ORIGINS, GTFS_REFRESH_HOURS, GTFS_RT_ALERTS_URL, GTFS_RT_API_KEY,
+    GTFS_RT_POLL_SECONDS, GTFS_RT_TRIP_UPDATES_URL, GTFS_RT_VEHICLE_POSITIONS_URL,
+    GTFS_STATIC_URL, INGEST_API_KEY, MAX_ROUTES,
+)
 from db.session import SessionLocal, get_session, init_db
 from graph.builder import build_graph, get_graph, get_last_built_at
 from ingestion.gtfs_realtime import poll_all
@@ -144,7 +148,19 @@ async def _rt_poll_and_observe() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
+    # Startup — validate required config early so problems surface immediately.
+    if not GTFS_STATIC_URL:
+        logger.warning(
+            "GTFS_STATIC_URL is not set. POST /ingest/gtfs-static will fail. "
+            "Set it in .env to a Metrolinx GTFS ZIP URL before ingesting."
+        )
+    if GTFS_RT_API_KEY and not all([GTFS_RT_TRIP_UPDATES_URL, GTFS_RT_VEHICLE_POSITIONS_URL, GTFS_RT_ALERTS_URL]):
+        logger.warning(
+            "GTFS_RT_API_KEY is set but one or more RT feed URLs are missing "
+            "(GTFS_RT_TRIP_UPDATES_URL, GTFS_RT_VEHICLE_POSITIONS_URL, GTFS_RT_ALERTS_URL). "
+            "RT polling will be skipped for unconfigured feeds."
+        )
+
     init_db()
     logger.info("Database initialised.")
 

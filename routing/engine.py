@@ -42,7 +42,7 @@ from sqlalchemy.orm import Session
 
 from config import MAX_ROUTES, MAX_TRANSFERS, MIN_TRANSFER_MINUTES
 from db.models import StopTime
-from graph.builder import get_graph
+from graph.builder import get_graph, get_projected_graph
 
 logger = logging.getLogger(__name__)
 
@@ -108,14 +108,10 @@ def find_routes(
     if destination_stop_id not in G:
         raise ValueError(f"Destination stop '{destination_stop_id}' not found in graph.")
 
-    # shortest_simple_paths (Yen's algorithm) does not support MultiDiGraph, so
-    # first project to a DiGraph keeping only the min-weight edge per (u, v) pair.
-    H = nx.DiGraph()
-    H.add_nodes_from(G.nodes(data=True))
-    for u, v, edge_data in G.edges(data=True):
-        w = edge_data.get("weight", float("inf"))
-        if not H.has_edge(u, v) or H[u][v]["weight"] > w:
-            H.add_edge(u, v, weight=w)
+    # shortest_simple_paths (Yen's algorithm) does not support MultiDiGraph.
+    # Use the pre-computed DiGraph projection (min-weight edge per u→v pair)
+    # built and cached by build_graph() to avoid O(E) work on every call.
+    H = get_projected_graph()
 
     # Hard cap on total candidate paths examined — prevents hanging on graphs
     # with many walk edges.  15× gives a good balance: enough candidates to
@@ -155,7 +151,7 @@ def find_routes(
             departure_dt, max_routes, cache,
         )
 
-    logger.info(
+    logger.debug(
         "Found %d routes from %s to %s.", len(routes), origin_stop_id, destination_stop_id
     )
     return routes
@@ -334,6 +330,12 @@ def _find_trip_legs(
                 WHERE st_first.stop_id  = :first_stop
                   AND t.route_id        = :route_id
                   AND t.service_id      = :service_date
+                  AND NOT EXISTS (
+                        SELECT 1 FROM service_calendar_dates scd
+                        WHERE scd.service_id   = t.service_id
+                          AND scd.date         = :service_date
+                          AND scd.exception_type = 2
+                      )
                   AND (
                         CAST(substr(st_first.departure_time, 1, 2) AS INT) * 3600
                       + CAST(substr(st_first.departure_time, 4, 2) AS INT) * 60
@@ -453,12 +455,12 @@ def _route_signature(legs: Route) -> tuple[str, ...]:
     Produce a deduplication key for a scheduled route.
 
     Two routes are considered the same physical journey if they ride
-    exactly the same trips in the same order.  Walk legs are ignored;
-    consecutive legs sharing a trip_id are collapsed to one entry.
+    exactly the same trips in the same order via the same walk transfers.
+    Consecutive legs sharing a trip_id are collapsed to one entry.
 
     Example:
-        Trip T1 (A→B), walk (B→B'), Trip T2 (B'→C)  →  ("T1", "T2")
-        Trip T1 (A→C, skipping B)                    →  ("T1",)   ← duplicate of above if T1==T1
+        Trip T1 (A→B), walk (B→B'), Trip T2 (B'→C)  →  ("T1", "walk:B:B'", "T2")
+        Trip T1 (A→B), walk (B→B''), Trip T2 (B''→C) →  ("T1", "walk:B:B''", "T2")  ← distinct
     """
     sig: list[str] = []
     for leg in legs:
@@ -466,6 +468,8 @@ def _route_signature(legs: Route) -> tuple[str, ...]:
             trip_id = leg["trip_id"]
             if not sig or sig[-1] != trip_id:
                 sig.append(trip_id)
+        elif leg["kind"] == "walk":
+            sig.append(f"walk:{leg['from_stop_id']}:{leg['to_stop_id']}")
     return tuple(sig)
 
 
@@ -583,4 +587,5 @@ def _hms_to_seconds(hms: str) -> int:
         parts = hms.strip().split(":")
         return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
     except Exception:
+        logger.warning("_hms_to_seconds: could not parse %r, defaulting to 0", hms)
         return 0

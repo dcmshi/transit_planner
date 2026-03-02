@@ -154,7 +154,7 @@ def _build_llm_payload(
                 i = j
 
             elif leg.get("kind") == "walk":
-                minutes = max(1, round(leg.get("duration_s", 0) / 60))
+                minutes = max(1, round(leg.get("walk_seconds", 0) / 60))
                 metres = round(leg.get("distance_m", 0))
                 segments.append({
                     "type": "walk_transfer",

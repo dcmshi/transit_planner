@@ -7,11 +7,20 @@ logic that lives entirely inside routing/engine.py.
 
 import pytest
 
+import networkx as nx
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+
 from config import MAX_TRANSFERS, MIN_TRANSFER_MINUTES
+from db.models import Base, Route, ServiceCalendarDate, Stop, StopTime, Trip
 from routing.engine import (
+    _RouteQueryCache,
     _fill_later_departures,
+    _find_trip_legs,
     _hms_to_seconds,
     _passes_filters,
+    _pick_longest_route,
     _route_signature,
     count_transfers,
     total_travel_seconds,
@@ -248,16 +257,41 @@ class TestRouteSignature:
         ]
         assert _route_signature(legs) == ("T1", "T2")
 
-    def test_walk_legs_excluded(self):
+    def test_walk_legs_included_in_signature(self):
+        # Walk legs are included so routes with same trips but different transfers are distinct
         legs = [
             _trip("R1", "08:00:00", "09:00:00", 3600, trip_id="T1"),
             _walk(300),
             _trip("R2", "09:30:00", "10:30:00", 3600, trip_id="T2"),
         ]
-        assert _route_signature(legs) == ("T1", "T2")
+        assert _route_signature(legs) == ("T1", "walk:A:B", "T2")
 
-    def test_walk_only_is_empty(self):
-        assert _route_signature([_walk(300)]) == ()
+    def test_walk_only_signature(self):
+        assert _route_signature([_walk(300)]) == ("walk:A:B",)
+
+    def test_different_walk_stops_produce_different_signatures(self):
+        def _walk_custom(from_id: str, to_id: str) -> dict:
+            return {
+                "kind": "walk",
+                "from_stop_id": from_id,
+                "to_stop_id": to_id,
+                "from_stop_name": from_id,
+                "to_stop_name": to_id,
+                "distance_m": 250.0,
+                "walk_seconds": 300,
+            }
+
+        legs_a = [
+            _trip("R1", "08:00:00", "09:00:00", 3600, trip_id="T1"),
+            _walk_custom("B", "B1"),
+            _trip("R2", "09:30:00", "10:30:00", 3600, trip_id="T2"),
+        ]
+        legs_b = [
+            _trip("R1", "08:00:00", "09:00:00", 3600, trip_id="T1"),
+            _walk_custom("B", "B2"),
+            _trip("R2", "09:30:00", "10:30:00", 3600, trip_id="T2"),
+        ]
+        assert _route_signature(legs_a) != _route_signature(legs_b)
 
     def test_same_trip_ids_are_duplicates(self):
         # Two routes riding the same trips are equal even if stops differ
@@ -444,3 +478,184 @@ class TestFillLaterDepartures:
             seen, datetime(2026, 2, 17, 8, 0, 0), max_routes=3,
         )
         assert len(result) == 1
+
+
+# ---------------------------------------------------------------------------
+# _pick_longest_route
+# ---------------------------------------------------------------------------
+
+def _make_graph_with_routes(stop_pairs: list[tuple[str, str, str, float]]) -> nx.MultiDiGraph:
+    """
+    Build a MultiDiGraph from (u, v, route_id, weight) tuples.
+    Each edge has kind="trip".
+    """
+    G = nx.MultiDiGraph()
+    for u, v, route_id, weight in stop_pairs:
+        for node in (u, v):
+            if node not in G:
+                G.add_node(node, name=f"Stop {node}")
+        G.add_edge(u, v, route_id=route_id, weight=weight, kind="trip")
+    return G
+
+
+class TestPickLongestRoute:
+    def test_single_candidate_returned_immediately(self):
+        G = _make_graph_with_routes([("A", "B", "R1", 0)])
+        assert _pick_longest_route(G, ["A", "B"], 0) == "R1"
+
+    def test_longer_route_wins_over_shorter(self):
+        # R1 covers A→B→C→D (3 hops), R2 covers only A→B (1 hop)
+        edges = [
+            ("A", "B", "R1", 0),
+            ("B", "C", "R1", 0),
+            ("C", "D", "R1", 0),
+            ("A", "B", "R2", 0),  # same weight, but stops at B
+        ]
+        G = _make_graph_with_routes(edges)
+        result = _pick_longest_route(G, ["A", "B", "C", "D"], 0)
+        assert result == "R1"
+
+    def test_tie_returns_one_of_the_candidates(self):
+        # R1 and R2 both cover exactly A→B (same coverage)
+        edges = [
+            ("A", "B", "R1", 0),
+            ("A", "B", "R2", 0),
+        ]
+        G = _make_graph_with_routes(edges)
+        result = _pick_longest_route(G, ["A", "B"], 0)
+        assert result in {"R1", "R2"}
+
+    def test_look_ahead_from_non_zero_start(self):
+        # Path is X→A→B→C→D; start=1 means we start from A→B
+        # R1 covers A→B→C→D, R2 covers A→B only
+        edges = [
+            ("X", "A", "Rx", 0),
+            ("A", "B", "R1", 0),
+            ("B", "C", "R1", 0),
+            ("C", "D", "R1", 0),
+            ("A", "B", "R2", 0),
+        ]
+        G = _make_graph_with_routes(edges)
+        result = _pick_longest_route(G, ["X", "A", "B", "C", "D"], 1)
+        assert result == "R1"
+
+    def test_only_min_weight_edges_are_candidates(self):
+        # R1 has weight 10, R2 has weight 0 — only R2 qualifies despite shorter coverage
+        G = nx.MultiDiGraph()
+        for node in ("A", "B", "C"):
+            G.add_node(node, name=f"Stop {node}")
+        G.add_edge("A", "B", route_id="R1", weight=10, kind="trip")
+        G.add_edge("B", "C", route_id="R1", weight=10, kind="trip")
+        G.add_edge("A", "B", route_id="R2", weight=0, kind="trip")
+        result = _pick_longest_route(G, ["A", "B", "C"], 0)
+        assert result == "R2"
+
+
+# ---------------------------------------------------------------------------
+# _find_trip_legs
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def trip_db():
+    """In-memory SQLite with a minimal GO Transit-like schema."""
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    session = Session()
+
+    # Stops
+    for stop_id, name in [("S1", "Stop 1"), ("S2", "Stop 2"), ("S3", "Stop 3")]:
+        session.add(Stop(stop_id=stop_id, stop_name=name, stop_lat=43.0, stop_lon=-79.0))
+
+    # Route
+    session.add(Route(route_id="R1", route_short_name="1", route_long_name="Test Route", route_type=3))
+
+    # Trip running on 20260302
+    session.add(Trip(trip_id="T1", route_id="R1", service_id="20260302", trip_headsign="Guelph", direction_id=0))
+
+    # Stop times: S1 08:00, S2 08:30, S3 09:00
+    session.add(StopTime(trip_id="T1", stop_id="S1", stop_sequence=1, departure_time="08:00:00", arrival_time="08:00:00"))
+    session.add(StopTime(trip_id="T1", stop_id="S2", stop_sequence=2, departure_time="08:30:00", arrival_time="08:30:00"))
+    session.add(StopTime(trip_id="T1", stop_id="S3", stop_sequence=3, departure_time="09:00:00", arrival_time="09:00:00"))
+
+    session.commit()
+    yield session
+    session.close()
+    engine.dispose()
+
+
+def _make_trip_graph() -> nx.MultiDiGraph:
+    G = nx.MultiDiGraph()
+    for stop_id, name in [("S1", "Stop 1"), ("S2", "Stop 2"), ("S3", "Stop 3")]:
+        G.add_node(stop_id, name=name)
+    G.add_edge("S1", "S2", route_id="R1", weight=1800, kind="trip")
+    G.add_edge("S2", "S3", route_id="R1", weight=1800, kind="trip")
+    return G
+
+
+class TestFindTripLegs:
+    def test_happy_path_returns_legs(self, trip_db):
+        G = _make_trip_graph()
+        legs = _find_trip_legs(trip_db, G, "R1", ["S1", "S2", "S3"], 0, "20260302")
+        assert legs is not None
+        assert len(legs) == 2
+        assert legs[0]["departure_time"] == "08:00:00"
+        assert legs[0]["arrival_time"] == "08:30:00"
+        assert legs[1]["departure_time"] == "08:30:00"
+        assert legs[1]["arrival_time"] == "09:00:00"
+        assert all(leg["trip_id"] == "T1" for leg in legs)
+        assert all(leg["route_id"] == "R1" for leg in legs)
+
+    def test_not_before_filters_early_departures(self, trip_db):
+        G = _make_trip_graph()
+        # Require departure at or after 08:30:01 — trip departs 08:00, should not match
+        not_before = 8 * 3600 + 30 * 60 + 1
+        legs = _find_trip_legs(trip_db, G, "R1", ["S1", "S2", "S3"], not_before, "20260302")
+        assert legs is None
+
+    def test_wrong_service_date_returns_none(self, trip_db):
+        G = _make_trip_graph()
+        legs = _find_trip_legs(trip_db, G, "R1", ["S1", "S2", "S3"], 0, "20260303")
+        assert legs is None
+
+    def test_stop_not_served_by_trip_returns_none(self, trip_db):
+        # Add a stop the trip doesn't serve
+        trip_db.add(Stop(stop_id="S9", stop_name="Unknown", stop_lat=43.0, stop_lon=-79.0))
+        trip_db.commit()
+        G = _make_trip_graph()
+        G.add_node("S9", name="Unknown")
+        legs = _find_trip_legs(trip_db, G, "R1", ["S1", "S9"], 0, "20260302")
+        assert legs is None
+
+    def test_service_calendar_exception_type_2_blocks_trip(self, trip_db):
+        # Add a removal exception for the trip's service_id on the travel date
+        trip_db.add(ServiceCalendarDate(service_id="20260302", date="20260302", exception_type=2))
+        trip_db.commit()
+        G = _make_trip_graph()
+        legs = _find_trip_legs(trip_db, G, "R1", ["S1", "S2", "S3"], 0, "20260302")
+        assert legs is None
+
+    def test_service_calendar_exception_type_1_does_not_block(self, trip_db):
+        # exception_type=1 means service added — should still return legs
+        trip_db.add(ServiceCalendarDate(service_id="20260302", date="20260302", exception_type=1))
+        trip_db.commit()
+        G = _make_trip_graph()
+        legs = _find_trip_legs(trip_db, G, "R1", ["S1", "S2", "S3"], 0, "20260302")
+        assert legs is not None
+
+    def test_cache_hit_reuses_trip_id(self, trip_db):
+        G = _make_trip_graph()
+        cache = _RouteQueryCache()
+        # First call populates cache
+        legs1 = _find_trip_legs(trip_db, G, "R1", ["S1", "S2", "S3"], 0, "20260302", cache)
+        # Manually corrupt the DB trip to verify second call uses cache, not DB
+        trip_db.execute(__import__("sqlalchemy").text("UPDATE trips SET route_id='GONE' WHERE trip_id='T1'"))
+        legs2 = _find_trip_legs(trip_db, G, "R1", ["S1", "S2", "S3"], 0, "20260302", cache)
+        assert legs1 is not None
+        assert legs2 is not None
+        # Both calls should produce identical legs since cache replays trip_id
+        assert [l["trip_id"] for l in legs1] == [l["trip_id"] for l in legs2]

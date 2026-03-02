@@ -204,40 +204,6 @@ prevents negative weights.
 
 ---
 
-## Frontend
-
-A web UI is the natural next step.  The backend already exposes a clean,
-OpenAPI-documented HTTP API (FastAPI `/docs`).
-
-**Recommendation: separate repository.**
-
-| Concern | Reason |
-|---|---|
-| Different package manager | Backend uses `uv`; frontend needs npm/bun/yarn |
-| Different CI | Python tests vs lint + Vitest + build + preview deployments |
-| Different deployment target | Python server vs Vercel / Netlify / Cloudflare Pages |
-| Independent release cadence | Frontend iteration shouldn't require a backend deploy and vice versa |
-| Type safety | FastAPI generates an OpenAPI spec at `/openapi.json`; `openapi-typescript` or `hey-api` can generate TypeScript types from it — no shared code needed |
-
-A monorepo (`frontend/` subdirectory) only makes sense if this will never be deployed separately and you want a single place to track everything.  Even then, JS tooling artefacts (`node_modules`, `package.json`, lock files) polluting the Python repo is unpleasant.
-
-**Suggested stack for the frontend repo:**
-
-- **Framework**: Next.js (App Router) or SvelteKit — both have excellent fetch patterns and are trivially deployable on Vercel/Netlify
-- **Type generation**: `openapi-typescript` against `GET /openapi.json`
-- **Map**: Leaflet or MapLibre GL for stop/route visualisation
-- **State**: React Query / TanStack Query for route fetching + caching
-
-**Minimum viable features for a v1 frontend:**
-
-- [ ] Origin / destination stop search (calls `GET /stops?query=`)
-- [ ] Date + departure time picker
-- [ ] Route results list with risk label badges (Low / Medium / High)
-- [ ] Leg-by-leg breakdown with departure/arrival times
-- [ ] Optional LLM explanation toggle (calls `?explain=true`)
-
----
-
 ## Build Order (v1 — completed)
 
 - [x] Project scaffolding + DB models
@@ -294,6 +260,34 @@ Priority tiers based on impact and dependency on GTFS-RT.
 
 - [x] **Live risk modifiers in production** — cancellations, vehicle positions, service alerts flowing via `reliability/live.py` and `ingestion/gtfs_realtime.py`
 - [x] **Real reliability data accumulation** — `observe_departures()` called after every `poll_all()`; cancelled trips recorded at all stops; in-progress trips recorded per-stop once departure time has passed; `_recorded_today` prevents double-counting; daily refresh uses `fill_gaps_only=True` so accumulated data survives schedule refreshes (2026-02-16)
+
+---
+
+## Post-v1 Audit Backlog (2026-03-02)
+
+Findings from a full codebase scan. Ordered by priority.
+
+### Bugs
+
+- [x] **Walk duration key mismatch in LLM explainer** — `llm/explainer.py:157` uses `leg.get("duration_s", 0)` but the key from `routing/engine.py` is `"walk_seconds"`; all walk legs show as "1 min" in explanations regardless of actual distance (2026-03-02)
+- [x] **Route deduplication too aggressive** — `_route_signature()` in `routing/engine.py` keys only on trip IDs; two paths with identical trips but different walk segments share a signature and the second is silently dropped; walk legs now included in signature (2026-03-02)
+- [x] **Service calendar exceptions not checked in routing** — `routing/engine.py` matches trips by `service_id == YYYYMMDD` but never consults `ServiceCalendarDate`; added `NOT EXISTS` subquery for `exception_type = 2` (2026-03-02)
+- [x] **`_hms_to_seconds()` silently returns 0 on parse error** — `routing/engine.py`; now logs a warning before returning the 0 fallback (2026-03-02)
+
+### Testing gaps
+
+- [x] **Unit tests for `_find_trip_legs()`** — 7 direct tests added covering: happy path, not_before filter, wrong service date, missing stop, ServiceCalendarDate exception_type=2, exception_type=1 passthrough, cache hit (2026-03-02)
+- [x] **Unit tests for `_pick_longest_route()`** — 5 direct tests added covering: single candidate, longer-route wins, tie resolution, non-zero start, min-weight-only candidates (2026-03-02)
+- [x] **`get_routes` error path tests** — added: out-of-range hour/minute returns 422, unexpected routing exception returns 500 (2026-03-02)
+- [x] **`observe_departures()` edge cases** — 7 tests added in `tests/test_gtfs_realtime.py`: cancelled trip, deduplication, missing static schedule, partial RT data, future stops skipped, date rollover (2026-03-02)
+
+### Tech debt / minor issues
+
+- [x] **Remove stale TODO in `reliability/historical.py`** — updated docstring to reflect that `observe_departures()` already handles this (2026-03-02)
+- [x] **Downgrade high-volume logs from INFO to DEBUG** — `routing/engine.py` route query log and `ingestion/gtfs_realtime.py` poll-complete log both downgraded to DEBUG (2026-03-02)
+- [x] **GTFS-RT polling has no backoff** — `ingestion/gtfs_realtime.py`; added exponential backoff: 60s base doubling up to 30 min cap; all-feed failure tracked via `_consecutive_poll_failures` / `_backoff_until`; single success resets (2026-03-02)
+- [x] **Graph DiGraph projection recomputed on every route query** — projection now computed once in `build_graph()` and cached as `_digraph`; `get_projected_graph()` added to `graph/builder.py`; `find_routes()` uses cached projection (2026-03-02)
+- [x] **Config not validated on startup** — lifespan in `api/main.py` now logs warnings at startup if `GTFS_STATIC_URL` is unset or if RT key is set without all RT feed URLs (2026-03-02)
 
 ---
 

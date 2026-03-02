@@ -10,6 +10,7 @@ The parsed state is held in-memory in module-level dicts and updated
 every GTFS_RT_POLL_SECONDS seconds by the scheduler started at API boot.
 """
 
+import asyncio
 import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -63,6 +64,11 @@ _last_fetched: datetime | None = None
 _recorded_today: set[str] = set()
 _recorded_date: str = ""   # YYYYMMDD; set resets when date changes
 
+# Exponential backoff for sustained API failures
+_consecutive_poll_failures: int = 0
+_backoff_until: datetime | None = None
+_MAX_BACKOFF_SECONDS: int = 1800  # cap at 30 minutes
+
 
 async def _fetch_feed(url: str) -> gtfs_realtime_pb2.FeedMessage | None:
     """Fetch and parse a GTFS-RT protobuf feed.
@@ -86,11 +92,14 @@ async def _fetch_feed(url: str) -> gtfs_realtime_pb2.FeedMessage | None:
         return None
 
 
-async def poll_trip_updates() -> None:
-    """Fetch trip updates and refresh the in-memory trip_updates dict."""
+async def poll_trip_updates() -> bool:
+    """Fetch trip updates and refresh the in-memory trip_updates dict.
+
+    Returns True on success, False if the feed could not be fetched.
+    """
     feed = await _fetch_feed(GTFS_RT_TRIP_UPDATES_URL)
     if feed is None:
-        return
+        return False
 
     updated: dict[str, TripUpdateState] = {}
     for entity in feed.entity:
@@ -125,13 +134,17 @@ async def poll_trip_updates() -> None:
     trip_updates.clear()
     trip_updates.update(updated)
     logger.debug("Refreshed %d trip updates.", len(trip_updates))
+    return True
 
 
-async def poll_service_alerts() -> None:
-    """Fetch service alerts and refresh the in-memory alerts list."""
+async def poll_service_alerts() -> bool:
+    """Fetch service alerts and refresh the in-memory alerts list.
+
+    Returns True on success, False if the feed could not be fetched.
+    """
     feed = await _fetch_feed(GTFS_RT_ALERTS_URL)
     if feed is None:
-        return
+        return False
 
     alerts: list[ServiceAlertState] = []
     for entity in feed.entity:
@@ -157,13 +170,17 @@ async def poll_service_alerts() -> None:
     service_alerts.clear()
     service_alerts.extend(alerts)
     logger.debug("Refreshed %d service alerts.", len(service_alerts))
+    return True
 
 
-async def poll_vehicle_positions() -> None:
-    """Fetch vehicle positions and refresh the in-memory positions dict."""
+async def poll_vehicle_positions() -> bool:
+    """Fetch vehicle positions and refresh the in-memory positions dict.
+
+    Returns True on success, False if the feed could not be fetched.
+    """
     feed = await _fetch_feed(GTFS_RT_VEHICLE_POSITIONS_URL)
     if feed is None:
-        return
+        return False
 
     updated: dict[str, dict] = {}
     for entity in feed.entity:
@@ -180,6 +197,7 @@ async def poll_vehicle_positions() -> None:
     vehicle_positions.clear()
     vehicle_positions.update(updated)
     logger.debug("Refreshed %d vehicle positions.", len(vehicle_positions))
+    return True
 
 
 async def poll_all() -> None:
@@ -188,19 +206,50 @@ async def poll_all() -> None:
     Skips all polling when GTFS_RT_API_KEY is not yet configured, so the
     rest of the system (static ingest, graph, routing) can run without
     a Metrolinx API key.
+
+    Implements exponential backoff: if all three feeds fail, the next
+    poll is skipped until _backoff_until has elapsed.  Backoff doubles
+    on each consecutive failure, capped at _MAX_BACKOFF_SECONDS (30 min).
+    A single successful poll resets the backoff counter.
     """
-    global _last_fetched
+    global _last_fetched, _consecutive_poll_failures, _backoff_until
+
     if not GTFS_RT_API_KEY:
         logger.info(
             "GTFS-RT polling skipped — GTFS_RT_API_KEY not set. "
             "Static routing and historical scoring still available."
         )
         return
-    await poll_trip_updates()
-    await poll_service_alerts()
-    await poll_vehicle_positions()
-    _last_fetched = datetime.utcnow()
-    logger.info("GTFS-RT poll complete at %s", _last_fetched.isoformat())
+
+    now = datetime.utcnow()
+    if _backoff_until is not None and now < _backoff_until:
+        logger.debug(
+            "GTFS-RT poll skipped — backing off until %s (%d consecutive failures).",
+            _backoff_until.isoformat(), _consecutive_poll_failures,
+        )
+        return
+
+    results = await asyncio.gather(
+        poll_trip_updates(),
+        poll_service_alerts(),
+        poll_vehicle_positions(),
+    )
+
+    if any(results):
+        # At least one feed succeeded — reset backoff
+        _consecutive_poll_failures = 0
+        _backoff_until = None
+        _last_fetched = datetime.utcnow()
+        logger.debug("GTFS-RT poll complete at %s", _last_fetched.isoformat())
+    else:
+        # All three feeds failed
+        _consecutive_poll_failures += 1
+        backoff_secs = min(60 * (2 ** (_consecutive_poll_failures - 1)), _MAX_BACKOFF_SECONDS)
+        _backoff_until = datetime.utcnow() + timedelta(seconds=backoff_secs)
+        logger.warning(
+            "All GTFS-RT feeds failed (failure #%d). Next poll not before %s.",
+            _consecutive_poll_failures, _backoff_until.isoformat(),
+        )
 
 
 def _parse_scheduled_at(departure_time_str: str, service_id: str) -> datetime | None:

@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 
 # Module-level cached graph and build timestamp
 _graph: Optional[nx.MultiDiGraph] = None
+_digraph: Optional[nx.DiGraph] = None       # min-weight DiGraph projection of _graph
 _last_built_at: Optional[datetime] = None
 
 
@@ -39,6 +40,17 @@ def get_graph() -> nx.MultiDiGraph:
     if _graph is None:
         raise RuntimeError("Transit graph has not been built yet. Call build_graph() first.")
     return _graph
+
+
+def get_projected_graph() -> nx.DiGraph:
+    """Return the cached DiGraph projection (min-weight edge per u→v pair).
+
+    Used by the routing engine for Yen's algorithm, which requires a DiGraph.
+    Raises if the graph has not yet been built.
+    """
+    if _digraph is None:
+        raise RuntimeError("Transit graph has not been built yet. Call build_graph() first.")
+    return _digraph
 
 
 def get_last_built_at() -> Optional[datetime]:
@@ -51,7 +63,7 @@ def build_graph(session: Session) -> nx.MultiDiGraph:
     Construct and cache the full transit + walking graph from the database.
     Returns the graph and stores it in the module-level cache.
     """
-    global _graph, _last_built_at
+    global _graph, _digraph, _last_built_at
     G = nx.MultiDiGraph()
 
     stops = session.query(Stop).all()
@@ -59,7 +71,16 @@ def build_graph(session: Session) -> nx.MultiDiGraph:
     _add_trip_edges(G, session)
     _add_walk_edges(G, session, stops)
 
+    # Pre-compute the min-weight DiGraph projection used by Yen's algorithm.
+    H = nx.DiGraph()
+    H.add_nodes_from(G.nodes(data=True))
+    for u, v, edge_data in G.edges(data=True):
+        w = edge_data.get("weight", float("inf"))
+        if not H.has_edge(u, v) or H[u][v]["weight"] > w:
+            H.add_edge(u, v, weight=w)
+
     _graph = G
+    _digraph = H
     _last_built_at = datetime.utcnow()
     logger.info(
         "Graph built: %d nodes, %d edges (%d trip, %d walk).",

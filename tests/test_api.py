@@ -344,6 +344,33 @@ class TestGetRoutes:
             )
         assert resp.status_code == 200
 
+    def test_out_of_range_hour_returns_422(self, client):
+        """departure_time with hour > 23 should return 422."""
+        resp = client.get(
+            "/routes?origin=UN&destination=GL"
+            "&travel_date=2026-02-11&departure_time=25:00"
+        )
+        assert resp.status_code == 422
+
+    def test_out_of_range_minute_returns_422(self, client):
+        """departure_time with minute > 59 should return 422."""
+        resp = client.get(
+            "/routes?origin=UN&destination=GL"
+            "&travel_date=2026-02-11&departure_time=08:99"
+        )
+        assert resp.status_code == 422
+
+    def test_unexpected_routing_exception_returns_500(self, client):
+        """A non-ValueError exception from find_routes should return 500."""
+        import api.main as main_mod
+        main_mod._routes_cache.clear()
+        with patch("api.main.find_routes", side_effect=RuntimeError("graph exploded")):
+            resp = client.get(
+                "/routes?origin=UN&destination=GL"
+                "&travel_date=2026-02-11&departure_time=08:00"
+            )
+        assert resp.status_code == 500
+
 
 # ---------------------------------------------------------------------------
 # POST /ingest/gtfs-static — auth
