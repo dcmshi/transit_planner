@@ -34,71 +34,35 @@ via [Ollama](https://ollama.com) — no API key or cloud account required.
 
 ### Docker (recommended)
 
-Requires [Docker Desktop](https://www.docker.com/products/docker-desktop/) and [uv](https://docs.astral.sh/uv/).
+Requires [Docker Desktop](https://www.docker.com/products/docker-desktop/).
 
 ```bash
 # 1. Configure environment
 cp .env.example .env
 # Edit .env — minimum required: GTFS_RT_API_KEY (Metrolinx Open Data)
 
-# 2. Start the full stack (PostgreSQL + API)
+# 2. Start the full stack (PostgreSQL + Ollama + API)
 docker compose up -d --build
 
-# 3. Load GTFS data on first boot (~60 s)
+# 3. Pull the LLM model — one time only (~2 GB, persisted in a volume)
+docker compose exec ollama ollama pull llama3.2
+
+# 4. Load GTFS data on first boot (~60 s)
 curl -X POST http://localhost:8000/ingest/gtfs-static
 
-# 4. Query routes
+# 5. Query routes
 curl "http://localhost:8000/routes?origin=UN&destination=GL"
+
+# 6. Query with AI explanation
+curl "http://localhost:8000/routes?origin=UN&destination=GL&explain=true"
 ```
 
 Watch startup logs: `docker compose logs -f app`
 
-#### AI explanation (`?explain=true`) with Docker
-
-The app container cannot reach `localhost` on the host — `OLLAMA_BASE_URL=http://localhost:11434`
-(the default) points to the container's own loopback, where nothing is listening.
-
-Two steps are needed:
-
-**1. Start Ollama bound to all interfaces** (not just loopback):
-```bash
-# Windows
-set OLLAMA_HOST=0.0.0.0
-ollama serve
-
-# macOS / Linux
-OLLAMA_HOST=0.0.0.0 ollama serve
-```
-
-Confirm it is reachable:
-```bash
-curl http://localhost:11434/api/tags
-```
-
-**2. Point `.env` at the host machine:**
-```
-OLLAMA_BASE_URL=http://host.docker.internal:11434
-OLLAMA_MODEL=llama3.2
-```
-`host.docker.internal` is a DNS name Docker Desktop provides that resolves
-to the host from inside any container (available on Windows and macOS by default;
-on Linux add `--add-host=host.docker.internal:host-gateway` to the compose file).
-
-Then pull the model and restart the app:
-```bash
-ollama pull llama3.2
-docker compose restart app
-```
-
-Test:
-```bash
-curl "http://localhost:8000/routes?origin=UN&destination=GL&explain=true"
-```
-
-If `explanation` in the response is a fallback message, check the app logs:
-```bash
-docker compose logs app | grep -i ollama
-```
+Ollama runs as a bundled service — no host installation needed. The `ollama pull`
+step is one-time; the model is stored in the `ollama_data` Docker volume and
+survives container restarts. If `explanation` in the response is a fallback
+message, check whether the pull completed: `docker compose exec ollama ollama list`
 
 ---
 
@@ -140,7 +104,7 @@ Return up to N reliability-scored routes between two stops.
 | `destination` | yes | — | GTFS `stop_id` of arrival stop |
 | `departure_time` | no | now | Earliest departure as `HH:MM` or `HH:MM:SS` |
 | `travel_date` | no | today | Travel date as `YYYY-MM-DD` |
-| `explain` | no | `false` | `true` to include local LLM explanation (requires Ollama) |
+| `explain` | no | `false` | `true` to include LLM explanation (Ollama bundled in Docker; set `LLM_PROVIDER` in `.env`) |
 
 **Responses:**
 - `200` — routes found; body contains `routes` array (+ optional `explanation` string)
@@ -314,8 +278,11 @@ All settings are environment variables (see `.env.example`):
 | `DATABASE_URL` | `sqlite:///data/transit.db` | SQLite for dev; set to PostgreSQL for prod |
 | `GTFS_STATIC_URL` | Metrolinx CDN | URL of GO GTFS ZIP |
 | `GTFS_RT_API_KEY` | *(blank)* | Metrolinx Open Data API key; RT polling disabled if unset |
-| `OLLAMA_BASE_URL` | `http://localhost:11434` | Local Ollama server URL; required for `?explain=true` |
-| `OLLAMA_MODEL` | `llama3.2` | Model to use (must be pulled first: `ollama pull <model>`) |
+| `LLM_PROVIDER` | `ollama` | `ollama` (default, bundled in Docker) or `gemini` |
+| `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama URL; auto-set to `http://ollama:11434` inside Docker |
+| `OLLAMA_MODEL` | `llama3.2` | Ollama model (pull once: `docker compose exec ollama ollama pull llama3.2`) |
+| `GEMINI_API_KEY` | *(blank)* | Required when `LLM_PROVIDER=gemini` |
+| `GEMINI_MODEL` | `gemini-2.5-flash` | Gemini model name |
 | `MAX_ROUTES` | `5` | Max candidate routes returned |
 | `MAX_TRANSFERS` | `2` | Hard cap on route changes |
 | `MIN_TRANSFER_MINUTES` | `10` | Minimum transfer buffer |
