@@ -49,10 +49,10 @@ You will receive a JSON object with:
 - "routes": list of route options; each has an "overall_risk" field (Low/Medium/High) and a list of "segments"
 - "active_alerts": list of active service alert headlines (may be empty)
 
-Write your response using EXACTLY this structure — no extra headers, no extra sections:
+Write your response using EXACTLY this structure - no extra headers, no extra sections:
 
-**Option 1:** [route name(s) and any walk transfers, e.g. "Route 27 → walk → Route 48"], departs [first segment departs], arrives [last segment arrives], [total_travel_time]
-Risk: [copy overall_risk EXACTLY] — [1 sentence: name the specific risk_factors if any, otherwise write "no elevated risk factors"]
+**Option 1:** [route name(s) and any walk transfers, e.g. "Route 27 -> walk -> Route 48"], departs [first segment departs], arrives [last segment arrives], [total_travel_time]
+Risk: [copy overall_risk EXACTLY] - [1 sentence: name the specific risk_factors if any, otherwise write "no elevated risk factors"]
 
 **Option 2:** [same format]
 ...

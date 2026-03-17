@@ -16,6 +16,20 @@ services:
       timeout: 5s
       retries: 10
 
+  ollama:
+    image: ollama/ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      start_period: 20s
+      retries: 5
+
   app:
     build: .
     restart: unless-stopped
@@ -23,12 +37,15 @@ services:
       - "${API_PORT:-8000}:8000"
     env_file: .env
     environment:
-      # Always point to the compose-network 'db' hostname — overrides .env value
+      # Always point to the compose-network hostnames — overrides .env values
       DATABASE_URL: postgresql+psycopg://transit:transit@db:5432/transit
+      OLLAMA_BASE_URL: http://ollama:11434
     volumes:
       - transit_data:/app/data
     depends_on:
       db:
+        condition: service_healthy
+      ollama:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c",
@@ -41,3 +58,4 @@ services:
 volumes:
   pgdata:
   transit_data:
+  ollama_data:
