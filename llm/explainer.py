@@ -73,6 +73,18 @@ Strict rules — violating any rule is wrong:
 """.strip()
 
 
+# Alert text is external input (GTFS-RT feed) that ends up inside the LLM
+# prompt — flatten control characters and cap length as defence in depth
+# against prompt injection via crafted alert headers.
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]+")
+_MAX_ALERT_CHARS = 200
+
+
+def _sanitise_alert_header(header: str) -> str:
+    cleaned = _CONTROL_CHARS_RE.sub(" ", header).strip()
+    return cleaned[:_MAX_ALERT_CHARS]
+
+
 def _route_number(route_id: str) -> str:
     """Extract short route number from full route_id (e.g. '01260426-27' → 'Route 27')."""
     suffix = route_id.rsplit("-", 1)[-1].lstrip("0")
@@ -195,14 +207,43 @@ def _build_llm_payload(
             or alert.get("header")
             or (alert.get("alert") or {}).get("header_text")
         )
-        if isinstance(header, str) and header.strip() and header not in alert_headers:
-            alert_headers.append(header.strip())
+        if isinstance(header, str):
+            header = _sanitise_alert_header(header)
+            if header and header not in alert_headers:
+                alert_headers.append(header)
 
     return {
         "journey": f"{origin_name} → {destination_name}",
         "routes": simplified_routes,
         "active_alerts": alert_headers,
     }
+
+
+async def _post_llm_request(
+    url: str,
+    payload: dict[str, Any],
+    provider: str,
+    unreachable_msg: str,
+) -> httpx.Response | str:
+    """
+    POST to an LLM backend with the shared error handling.
+
+    Returns the successful response, or a human-readable fallback string
+    when the backend is unreachable or returns an HTTP error.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(url, json=payload)
+            resp.raise_for_status()
+            return resp
+    except httpx.ConnectError:
+        logger.warning("%s unreachable — explanation skipped. %s", provider, unreachable_msg)
+        return unreachable_msg
+    except httpx.HTTPStatusError as exc:
+        logger.warning(
+            "%s returned HTTP %d — explanation skipped.", provider, exc.response.status_code
+        )
+        return f"Explanation unavailable: {provider} returned HTTP {exc.response.status_code}."
 
 
 async def _explain_ollama(llm_input: dict[str, Any]) -> str:
@@ -216,30 +257,19 @@ async def _explain_ollama(llm_input: dict[str, Any]) -> str:
         ],
     }
 
-    try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.post(
-                f"{OLLAMA_BASE_URL}/api/chat",
-                json=payload,
-            )
-            resp.raise_for_status()
-    except httpx.ConnectError:
-        logger.warning(
-            "Ollama unreachable at %s — explanation skipped. "
-            "Run `ollama serve` and `ollama pull %s` to enable it.",
-            OLLAMA_BASE_URL,
-            OLLAMA_MODEL,
-        )
-        return (
+    result = await _post_llm_request(
+        f"{OLLAMA_BASE_URL}/api/chat",
+        payload,
+        provider="Ollama",
+        unreachable_msg=(
             f"Explanation unavailable: Ollama is not running at {OLLAMA_BASE_URL}. "
             f"Start it with `ollama serve` and pull the model with "
             f"`ollama pull {OLLAMA_MODEL}`."
-        )
-    except httpx.HTTPStatusError as exc:
-        logger.warning(
-            "Ollama returned HTTP %d — explanation skipped.", exc.response.status_code
-        )
-        return f"Explanation unavailable: Ollama returned HTTP {exc.response.status_code}."
+        ),
+    )
+    if isinstance(result, str):
+        return result
+    resp = result
 
     try:
         data = resp.json()
@@ -282,18 +312,15 @@ async def _explain_gemini(llm_input: dict[str, Any]) -> str:
         },
     }
 
-    try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.post(url, json=payload)
-            resp.raise_for_status()
-    except httpx.ConnectError:
-        logger.warning("Gemini API unreachable — explanation skipped.")
-        return "Explanation unavailable: could not reach the Gemini API."
-    except httpx.HTTPStatusError as exc:
-        logger.warning(
-            "Gemini API returned HTTP %d — explanation skipped.", exc.response.status_code
-        )
-        return f"Explanation unavailable: Gemini API returned HTTP {exc.response.status_code}."
+    result = await _post_llm_request(
+        url,
+        payload,
+        provider="Gemini API",
+        unreachable_msg="Explanation unavailable: could not reach the Gemini API.",
+    )
+    if isinstance(result, str):
+        return result
+    resp = result
 
     candidates = resp.json().get("candidates", [])
     if not candidates:
