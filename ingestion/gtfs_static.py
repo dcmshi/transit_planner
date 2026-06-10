@@ -78,7 +78,8 @@ def parse_and_store(zip_bytes: bytes, session: Session) -> None:
 
 def _parse_stops(df: pd.DataFrame, session: Session) -> None:
     session.query(Stop).delete()
-    for _, row in df.iterrows():
+    stops = []
+    for row in df.to_dict("records"):
         lat = float(row["stop_lat"])
         lon = float(row["stop_lon"])
         stop = Stop(
@@ -90,19 +91,23 @@ def _parse_stops(df: pd.DataFrame, session: Session) -> None:
         )
         if _HAS_POSTGIS:
             stop.geog = from_shape(Point(lon, lat), srid=4326)
-        session.add(stop)
+        stops.append(stop)
+    session.bulk_save_objects(stops)
     logger.info("Loaded %d stops.", len(df))
 
 
 def _parse_routes(df: pd.DataFrame, session: Session) -> None:
     session.query(Route).delete()
-    for _, row in df.iterrows():
-        session.add(Route(
+    routes = [
+        Route(
             route_id=row["route_id"],
             route_short_name=row.get("route_short_name", ""),
             route_long_name=row.get("route_long_name", ""),
             route_type=int(row["route_type"]) if row.get("route_type") else 3,
-        ))
+        )
+        for row in df.to_dict("records")
+    ]
+    session.bulk_save_objects(routes)
     logger.info("Loaded %d routes.", len(df))
 
 
@@ -110,12 +115,13 @@ def _parse_trips(df: pd.DataFrame, session: Session) -> None:
     session.query(Trip).delete()
     session.flush()  # ensure route rows from _parse_routes are visible
     valid_routes = {r[0] for r in session.query(Route.route_id).all()}
+    trips = []
     skipped = 0
-    for _, row in df.iterrows():
+    for row in df.to_dict("records"):
         if row["route_id"] not in valid_routes:
             skipped += 1
             continue
-        session.add(Trip(
+        trips.append(Trip(
             trip_id=row["trip_id"],
             route_id=row["route_id"],
             service_id=row["service_id"],
@@ -125,7 +131,8 @@ def _parse_trips(df: pd.DataFrame, session: Session) -> None:
         ))
     if skipped:
         logger.warning("Skipped %d trips with invalid route_id.", skipped)
-    logger.info("Loaded %d trips.", len(df) - skipped)
+    session.bulk_save_objects(trips)
+    logger.info("Loaded %d trips.", len(trips))
 
 
 def _parse_stop_times(df: pd.DataFrame, session: Session) -> None:
@@ -138,7 +145,7 @@ def _parse_stop_times(df: pd.DataFrame, session: Session) -> None:
     valid_stops = {r[0] for r in session.query(Stop.stop_id).all()}
     records = []
     skipped = 0
-    for _, row in df.iterrows():
+    for row in df.to_dict("records"):
         if row["trip_id"] not in valid_trips or row["stop_id"] not in valid_stops:
             skipped += 1
             continue
@@ -157,8 +164,8 @@ def _parse_stop_times(df: pd.DataFrame, session: Session) -> None:
 
 def _parse_calendar(df: pd.DataFrame, session: Session) -> None:
     session.query(ServiceCalendar).delete()
-    for _, row in df.iterrows():
-        session.add(ServiceCalendar(
+    session.bulk_save_objects([
+        ServiceCalendar(
             service_id=row["service_id"],
             monday=row["monday"] == "1",
             tuesday=row["tuesday"] == "1",
@@ -169,18 +176,22 @@ def _parse_calendar(df: pd.DataFrame, session: Session) -> None:
             sunday=row["sunday"] == "1",
             start_date=row["start_date"],
             end_date=row["end_date"],
-        ))
+        )
+        for row in df.to_dict("records")
+    ])
     logger.info("Loaded %d calendar entries.", len(df))
 
 
 def _parse_calendar_dates(df: pd.DataFrame, session: Session) -> None:
     session.query(ServiceCalendarDate).delete()
-    for _, row in df.iterrows():
-        session.add(ServiceCalendarDate(
+    session.bulk_save_objects([
+        ServiceCalendarDate(
             service_id=row["service_id"],
             date=row["date"],
             exception_type=int(row["exception_type"]),
-        ))
+        )
+        for row in df.to_dict("records")
+    ])
     logger.info("Loaded %d calendar date exceptions.", len(df))
 
 

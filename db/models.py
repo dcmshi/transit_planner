@@ -7,7 +7,7 @@ Application code converts to integer seconds-past-midnight when needed.
 """
 
 from sqlalchemy import (
-    Boolean, Column, Float, ForeignKey, Integer, String
+    Boolean, Column, Float, ForeignKey, Index, Integer, String
 )
 from sqlalchemy.orm import declarative_base, relationship
 
@@ -120,12 +120,18 @@ class ObservedTrip(Base):
 class ReliabilityRecord(Base):
     """Rolling-window reliability stats per route / stop / time bucket."""
     __tablename__ = "reliability_records"
+    # All lookups filter on the full (route_id, stop_id, time_bucket) triple;
+    # one composite index serves them (and route_id-prefix queries) better
+    # than three single-column indexes.
+    __table_args__ = (
+        Index("ix_reliability_route_stop_bucket", "route_id", "stop_id", "time_bucket"),
+    )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    route_id = Column(String, index=True)
-    stop_id = Column(String, index=True)
+    route_id = Column(String)
+    stop_id = Column(String)
     # e.g. "weekday_am_peak", "weekday_pm_peak", "weekday_offpeak", "weekend"
-    time_bucket = Column(String, index=True)
+    time_bucket = Column(String)
     observed_departures = Column(Integer, default=0)
     scheduled_departures = Column(Integer, default=0)
     total_delay_seconds = Column(Integer, default=0)
