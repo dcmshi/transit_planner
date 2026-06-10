@@ -57,8 +57,8 @@ Risk: [copy overall_risk EXACTLY] - [1 sentence: name the specific risk_factors 
 **Option 2:** [same format]
 ...
 
-**Recommendation:** [option number and route, one-sentence reason based on risk and travel time]
-**Backup plan:** [one sentence: which other option to fall back to and why]
+**Recommendation:** Option [recommended_option] ([its route name]), [one-sentence reason based on that option's risk and travel time]
+**Backup plan:** Option [backup_option] ([its route name]), [one sentence on when to fall back to it]
 
 Strict rules — violating any rule is wrong:
 1. Copy the "overall_risk" value from each route VERBATIM as the Risk level. NEVER replace it with your own judgment.
@@ -69,7 +69,9 @@ Strict rules — violating any rule is wrong:
 6. Keep each option to 2 lines maximum.
 7. If a segment has cancelled=true, write "this trip is cancelled" in that option's risk sentence.
 8. If active_alerts is non-empty, name the alert briefly in the affected option's risk sentence.
-9. Recommendation priority: lowest overall_risk wins; break ties by shortest total_travel_time. NEVER recommend a slower option over a faster one with equal or lower risk.
+9. The "recommended_option" and "backup_option" numbers are computed by the routing engine. Copy them EXACTLY — NEVER recommend or fall back to a different option number than the ones given.
+10. If "backup_option" is missing from the JSON, write "No backup option available." as the backup plan.
+11. ALWAYS end with the **Recommendation:** and **Backup plan:** lines. Never omit them.
 """.strip()
 
 
@@ -212,11 +214,30 @@ def _build_llm_payload(
             if header and header not in alert_headers:
                 alert_headers.append(header)
 
-    return {
+    payload: dict[str, Any] = {
         "journey": f"{origin_name} → {destination_name}",
         "routes": simplified_routes,
         "active_alerts": alert_headers,
     }
+
+    # The recommendation is decided here, deterministically — lowest risk
+    # label wins, ties broken by shortest travel time (ADR-004: algorithms
+    # decide, the LLM only explains; small models are unreliable at
+    # comparing options themselves).
+    if simplified_routes:
+        label_rank = {"Low": 0, "Medium": 1, "High": 2}
+        order = sorted(
+            range(len(simplified_routes)),
+            key=lambda i: (
+                label_rank.get(routes_with_scores[i].get("risk_label"), 3),
+                routes_with_scores[i].get("total_travel_seconds", 0),
+            ),
+        )
+        payload["recommended_option"] = order[0] + 1
+        if len(order) > 1:
+            payload["backup_option"] = order[1] + 1
+
+    return payload
 
 
 async def _post_llm_request(
@@ -251,6 +272,10 @@ async def _explain_ollama(llm_input: dict[str, Any]) -> str:
     payload = {
         "model": OLLAMA_MODEL,
         "stream": False,
+        # Low temperature: this is a formatting/explanation task, not a
+        # creative one — higher temperatures make llama3.2 drop required
+        # sections.  Matches the 0.2 used for Gemini.
+        "options": {"temperature": 0.2},
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": json.dumps(llm_input, indent=2)},

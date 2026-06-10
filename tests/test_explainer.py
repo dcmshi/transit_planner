@@ -197,6 +197,32 @@ class TestBuildLlmPayload:
         assert payload["routes"] == []
         assert payload["active_alerts"] == []
 
+    def test_recommendation_prefers_lower_risk_over_speed(self):
+        fast_risky = _make_route([_make_trip_leg()], risk_label="High", total_travel_seconds=3600)
+        slow_safe = _make_route([_make_trip_leg()], risk_label="Low", total_travel_seconds=7200)
+        payload = _build_llm_payload([fast_risky, slow_safe], [], "O", "D")
+        assert payload["recommended_option"] == 2
+        assert payload["backup_option"] == 1
+
+    def test_recommendation_breaks_risk_tie_by_travel_time(self):
+        """Equal risk labels: the faster option must win (regression — the
+        LLM previously made this comparison itself and got it wrong)."""
+        slower = _make_route([_make_trip_leg()], risk_label="Medium", total_travel_seconds=5460)
+        faster = _make_route([_make_trip_leg()], risk_label="Medium", total_travel_seconds=4560)
+        payload = _build_llm_payload([slower, faster], [], "O", "D")
+        assert payload["recommended_option"] == 2
+        assert payload["backup_option"] == 1
+
+    def test_single_route_has_no_backup_option(self):
+        payload = _build_llm_payload([_make_route([_make_trip_leg()])], [], "O", "D")
+        assert payload["recommended_option"] == 1
+        assert "backup_option" not in payload
+
+    def test_empty_routes_no_recommendation_keys(self):
+        payload = _build_llm_payload([], [], "O", "D")
+        assert "recommended_option" not in payload
+        assert "backup_option" not in payload
+
     def test_route_with_no_legs(self):
         route = _make_route([])
         payload = _build_llm_payload([route], [], "O", "D")
