@@ -530,8 +530,10 @@ def _fill_later_departures(
     order.  For each path it advances the not_before pointer to 1 second past
     the first trip departure of the last result found for that path, then calls
     _schedule_path again to discover the next departure.  New trip signatures
-    are added to results; known signatures are skipped but the pointer still
-    advances so the following departure is tried in the next round.
+    are added to results; known signatures and departures that fail the route
+    filters are skipped, but the pointer still advances so the following
+    departure is tried in the next round — a single bad departure (e.g. one
+    tight transfer) must not exhaust the whole path.
 
     Terminates when the target count is reached or every path is exhausted
     (no more trips in the timetable for that date).
@@ -565,14 +567,21 @@ def _fill_later_departures(
             h, m, s = nb // 3600, (nb % 3600) // 60, nb % 60
             next_dt = datetime(travel_day.year, travel_day.month, travel_day.day, h, m, s)
             legs = _schedule_path(session, G, node_path, next_dt, cache)
-            if legs is None or not _passes_filters(legs):
+            if legs is None:
+                path_not_before[i] = None  # no more trips on this path today
+                continue
+            first_trip = next((l for l in legs if l["kind"] == "trip"), None)
+            if first_trip is None:
                 path_not_before[i] = None
                 continue
-            # Always advance the pointer so the next round tries the departure after this one.
-            first_trip = next((l for l in legs if l["kind"] == "trip"), None)
-            path_not_before[i] = (
-                _hms_to_seconds(first_trip["departure_time"]) + 1
-            ) if first_trip else None
+            # Advance the pointer past this departure even when it is filtered
+            # out or already seen.  max() keeps the pointer strictly increasing
+            # should a returned departure ever predate not_before.
+            path_not_before[i] = max(
+                _hms_to_seconds(first_trip["departure_time"]) + 1, nb + 1
+            )
+            if not _passes_filters(legs):
+                continue
             sig = _route_signature(legs)
             if sig not in seen_signatures:
                 seen_signatures.add(sig)
