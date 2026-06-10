@@ -162,16 +162,23 @@ def find_routes(
 # Timetable-aware path scheduling
 # ---------------------------------------------------------------------------
 
-def _pick_longest_route(G: nx.MultiDiGraph, node_path: list[str], start: int) -> str:
+def _rank_routes_by_coverage(
+    G: nx.MultiDiGraph, node_path: list[str], start: int
+) -> list[str]:
     """
     Among all trip-edge routes on the first stop pair of a segment, return the
-    route_id that has edges covering the most consecutive stops in node_path.
+    candidate route_ids ordered by how many consecutive stops of node_path
+    their edges cover (longest run first; route_id breaks exact ties so the
+    order is deterministic).
 
-    This breaks ties that arise when multiple routes share the same corridor
-    with identical (often zero-second) edge weights.  Without look-ahead, the
-    arbitrary dict ordering of min() can select a short-haul route that
-    terminates before the intended transfer point, causing _find_trip_legs to
-    return None for the full segment.
+    Coverage ranking breaks ties that arise when multiple routes share the
+    same corridor with identical (often zero-second) edge weights.  Without
+    look-ahead, the arbitrary dict ordering of min() can select a short-haul
+    route that terminates before the intended transfer point.  Returning the
+    full ranking (rather than just the winner) lets _schedule_path fall back
+    to the next candidate when the best-covering route has no trips on the
+    requested date — GTFS feeds publish one route_id per schedule period, so
+    a corridor is often covered by both a current and a future route_id.
     """
     u, v = node_path[start], node_path[start + 1]
     edges = G.get_edge_data(u, v) or {}
@@ -186,13 +193,10 @@ def _pick_longest_route(G: nx.MultiDiGraph, node_path: list[str], start: int) ->
     }
     if not candidates:
         raise RuntimeError(
-            f"_pick_longest_route: no trip edges between {u!r} and {v!r} in node path"
+            f"_rank_routes_by_coverage: no trip edges between {u!r} and {v!r} in node path"
         )
-    if len(candidates) == 1:
-        return next(iter(candidates))
 
-    best_route = next(iter(candidates))
-    best_count = 0
+    ranked: list[tuple[int, str]] = []
     for route_id in candidates:
         count = 0
         for j in range(start, len(node_path) - 1):
@@ -204,10 +208,14 @@ def _pick_longest_route(G: nx.MultiDiGraph, node_path: list[str], start: int) ->
             ):
                 break
             count += 1
-        if count > best_count:
-            best_count = count
-            best_route = route_id
-    return best_route
+        ranked.append((count, route_id))
+    ranked.sort(key=lambda rc: (-rc[0], rc[1]))
+    return [route_id for _count, route_id in ranked]
+
+
+def _pick_longest_route(G: nx.MultiDiGraph, node_path: list[str], start: int) -> str:
+    """Best-covering route_id for the segment starting at node_path[start]."""
+    return _rank_routes_by_coverage(G, node_path, start)[0]
 
 
 def _schedule_path(
@@ -256,31 +264,36 @@ def _schedule_path(
             i += 1
             continue
 
-        # Trip edge — choose the route_id that covers the most consecutive stops
-        # in the node path (longest-run tie-breaking).  This prevents zero-weight
-        # ties from selecting a short-haul route when a long-haul route on the
-        # same corridor serves all remaining stops.
-        route_id = _pick_longest_route(G, node_path, i)
-        segment: list[str] = [u]
+        # Trip edge — try candidate routes in corridor-coverage order
+        # (longest run first).  Multiple route_ids can share the corridor
+        # (e.g. one per GTFS schedule period); a candidate with no trips on
+        # this date must not kill the path when another candidate serves it.
+        trip_legs = None
         j = i
-        while j < len(node_path) - 1:
-            a, b = node_path[j], node_path[j + 1]
-            ab_edges = G.get_edge_data(a, b)
-            if not ab_edges:
-                break
-            has_route = any(
-                e.get("kind") == "trip" and e.get("route_id") == route_id
-                for e in ab_edges.values()
-            )
-            if not has_route:
-                break
-            segment.append(b)
-            j += 1
+        for route_id in _rank_routes_by_coverage(G, node_path, i):
+            segment: list[str] = [u]
+            j = i
+            while j < len(node_path) - 1:
+                a, b = node_path[j], node_path[j + 1]
+                ab_edges = G.get_edge_data(a, b)
+                if not ab_edges:
+                    break
+                has_route = any(
+                    e.get("kind") == "trip" and e.get("route_id") == route_id
+                    for e in ab_edges.values()
+                )
+                if not has_route:
+                    break
+                segment.append(b)
+                j += 1
 
-        trip_legs = _find_trip_legs(
-            session, G, route_id, segment, not_before_sec, service_date, cache
-        )
-        if not trip_legs:  # None (no trip found) or [] (degenerate single-stop segment)
+            trip_legs = _find_trip_legs(
+                session, G, route_id, segment, not_before_sec, service_date, cache
+            )
+            if trip_legs:
+                break
+
+        if not trip_legs:  # no candidate route has a viable trip on this date
             return None
 
         legs.extend(trip_legs)

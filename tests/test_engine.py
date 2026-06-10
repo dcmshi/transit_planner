@@ -742,6 +742,30 @@ class TestFindTripLegs:
         legs = _find_trip_legs(trip_db, G, "R1", ["S1"], 0, "20260302")
         assert legs is None
 
+    def test_schedule_path_falls_back_to_route_with_service(self, trip_db):
+        """Two route_ids share the corridor (GTFS publishes one per schedule
+        period); the candidate ranked first has no trips on the travel date.
+        _schedule_path must fall back to the other candidate instead of
+        returning None (regression — found live with the June 2026 feed)."""
+        import routing.engine as eng
+        from datetime import datetime
+
+        # "00-FUTURE" sorts before "R1" on the coverage tie-break, so it is
+        # tried first — and has no trips on 20260302.
+        trip_db.add(Route(route_id="00-FUTURE", route_short_name="1",
+                          route_long_name="Next period", route_type=3))
+        trip_db.commit()
+
+        G = _make_trip_graph()
+        G.add_edge("S1", "S2", route_id="00-FUTURE", weight=1800, kind="trip")
+        G.add_edge("S2", "S3", route_id="00-FUTURE", weight=1800, kind="trip")
+
+        assert eng._rank_routes_by_coverage(G, ["S1", "S2", "S3"], 0) == ["00-FUTURE", "R1"]
+
+        legs = eng._schedule_path(trip_db, G, ["S1", "S2", "S3"], datetime(2026, 3, 2, 7, 0, 0))
+        assert legs is not None
+        assert all(l["route_id"] == "R1" for l in legs)
+
     def test_schedule_path_treats_empty_legs_as_no_route(self, trip_db):
         # _find_trip_legs can theoretically return [] (empty, not None) for a
         # degenerate single-stop segment on a circular trip. _schedule_path must
