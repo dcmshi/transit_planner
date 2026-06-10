@@ -18,6 +18,7 @@ Endpoints (v1):
   POST /ingest/reliability-seed
 """
 
+import asyncio
 import logging
 import threading
 from contextlib import asynccontextmanager
@@ -127,8 +128,10 @@ async def _daily_gtfs_refresh() -> None:
     db = SessionLocal()
     try:
         await refresh_static_data(db)
-        build_graph(db)
-        seeded = seed_from_static(db, fill_gaps_only=True)
+        # build_graph and seed_from_static are CPU/DB-bound sync calls; run
+        # them in a worker thread so the event loop keeps serving requests.
+        await asyncio.to_thread(build_graph, db)
+        seeded = await asyncio.to_thread(seed_from_static, db, fill_gaps_only=True)
         logger.info("Daily GTFS static refresh complete: %d reliability records reseeded.", seeded)
         _clear_routes_cache()
     except Exception as exc:
@@ -143,7 +146,7 @@ async def _rt_poll_and_observe() -> None:
     await poll_all()
     db = SessionLocal()
     try:
-        count = observe_departures(db)
+        count = await asyncio.to_thread(observe_departures, db)
         if count:
             logger.info("RT observation: recorded %d departures.", count)
     except Exception as exc:
@@ -230,7 +233,7 @@ app.add_middleware(
 
 
 @app.get("/health", response_model=HealthResponse)
-async def health(session: Session = Depends(get_session)) -> HealthResponse:
+def health(session: Session = Depends(get_session)) -> HealthResponse:
     """
     Liveness + data-freshness check.
 
@@ -299,7 +302,7 @@ async def health(session: Session = Depends(get_session)) -> HealthResponse:
 
 
 @app.get("/stops", response_model=list[StopResult])
-async def search_stops(
+def search_stops(
     query: str = Query(..., min_length=2, max_length=128, description="Stop name substring to search"),
     session: Session = Depends(get_session),
 ) -> list[StopResult]:
@@ -339,49 +342,17 @@ async def search_stops(
     ]
 
 
-@app.get("/routes", response_model=RoutesResponse)
-async def get_routes(
-    origin: str = Query(..., max_length=64, description="Origin stop_id"),
-    destination: str = Query(..., max_length=64, description="Destination stop_id"),
-    departure_time: str | None = Query(
-        None,
-        max_length=8,
-        description="Earliest departure time as HH:MM or HH:MM:SS. Defaults to current time.",
-    ),
-    travel_date: str | None = Query(
-        None,
-        max_length=10,
-        description="Travel date as YYYY-MM-DD. Defaults to today.",
-    ),
-    explain: bool = Query(False, description="Include LLM plain-language explanation"),
-    session: Session = Depends(get_session),
-) -> RoutesResponse:
+def _score_routes_blocking(
+    origin: str,
+    destination: str,
+    departure_dt: datetime,
+    session: Session,
+) -> list[dict[str, Any]]:
     """
-    Return top-N scored routes from origin to destination.
-
-    Routes have real scheduled departure/arrival times for the requested date
-    and time.  Optionally include an LLM-generated explanation of tradeoffs.
+    Blocking part of GET /routes: cache lookup, route generation, and risk
+    scoring.  Called via asyncio.to_thread so the event loop stays free.
+    Raises HTTPException on routing failures (propagates through the await).
     """
-    if origin == destination:
-        raise HTTPException(
-            status_code=422,
-            detail="Origin and destination must be different stops.",
-        )
-
-    # Parse departure datetime, defaulting to now.
-    try:
-        base_date = Date.fromisoformat(travel_date) if travel_date else datetime.now().date()
-        if departure_time:
-            parts = departure_time.split(":")
-            h, m, s = int(parts[0]), int(parts[1]), int(parts[2]) if len(parts) > 2 else 0
-            departure_dt = datetime(base_date.year, base_date.month, base_date.day, h, m, s)
-        else:
-            now = datetime.now()
-            departure_dt = datetime(base_date.year, base_date.month, base_date.day,
-                                    now.hour, now.minute, now.second)
-    except (ValueError, IndexError) as exc:
-        raise HTTPException(status_code=422, detail=f"Invalid date/time parameter: {exc}")
-
     cache_key = _routes_cache_key(origin, destination, departure_dt)
     routes = _get_cached_routes(cache_key)
     if routes is None:
@@ -441,6 +412,58 @@ async def get_routes(
             "risk_label": risk_label,
         })
 
+    return scored_routes
+
+
+@app.get("/routes", response_model=RoutesResponse)
+async def get_routes(
+    origin: str = Query(..., max_length=64, description="Origin stop_id"),
+    destination: str = Query(..., max_length=64, description="Destination stop_id"),
+    departure_time: str | None = Query(
+        None,
+        max_length=8,
+        description="Earliest departure time as HH:MM or HH:MM:SS. Defaults to current time.",
+    ),
+    travel_date: str | None = Query(
+        None,
+        max_length=10,
+        description="Travel date as YYYY-MM-DD. Defaults to today.",
+    ),
+    explain: bool = Query(False, description="Include LLM plain-language explanation"),
+    session: Session = Depends(get_session),
+) -> RoutesResponse:
+    """
+    Return top-N scored routes from origin to destination.
+
+    Routes have real scheduled departure/arrival times for the requested date
+    and time.  Optionally include an LLM-generated explanation of tradeoffs.
+    """
+    if origin == destination:
+        raise HTTPException(
+            status_code=422,
+            detail="Origin and destination must be different stops.",
+        )
+
+    # Parse departure datetime, defaulting to now.
+    try:
+        base_date = Date.fromisoformat(travel_date) if travel_date else datetime.now().date()
+        if departure_time:
+            parts = departure_time.split(":")
+            h, m, s = int(parts[0]), int(parts[1]), int(parts[2]) if len(parts) > 2 else 0
+            departure_dt = datetime(base_date.year, base_date.month, base_date.day, h, m, s)
+        else:
+            now = datetime.now()
+            departure_dt = datetime(base_date.year, base_date.month, base_date.day,
+                                    now.hour, now.minute, now.second)
+    except (ValueError, IndexError) as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid date/time parameter: {exc}")
+
+    # Routing and risk scoring are sync DB/CPU work; run off the event loop
+    # so a slow request doesn't stall concurrent ones.
+    scored_routes = await asyncio.to_thread(
+        _score_routes_blocking, origin, destination, departure_dt, session
+    )
+
     response: dict[str, Any] = {"routes": scored_routes}
 
     if explain:
@@ -479,8 +502,8 @@ async def trigger_gtfs_ingest(
     fill_gaps_only=True to preserve accumulated real observations.
     """
     await refresh_static_data(session)
-    build_graph(session)
-    seeded = seed_from_static(session, fill_gaps_only=False)
+    await asyncio.to_thread(build_graph, session)
+    seeded = await asyncio.to_thread(seed_from_static, session, fill_gaps_only=False)
     _clear_routes_cache()
     return {
         "status": "ok",
@@ -492,7 +515,7 @@ async def trigger_gtfs_ingest(
 
 
 @app.post("/ingest/reliability-seed", response_model=SeedResponse)
-async def trigger_reliability_seed(
+def trigger_reliability_seed(
     window_days: int = Query(14, ge=1, le=90, description="Days of schedule to sample"),
     session: Session = Depends(get_session),
     _: None = Depends(_require_ingest_key),
