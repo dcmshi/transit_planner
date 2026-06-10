@@ -194,6 +194,7 @@ class TestObserveDepartures:
         assert rec.observed_departures == 1
         assert rec.total_delay_seconds == 120
         assert rec.cancellation_count == 0
+        assert rec.source == "observed"
 
     def test_dedup_survives_restart(self, obs_db):
         """Persisted markers prevent double-counting after a process restart."""

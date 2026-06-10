@@ -132,6 +132,10 @@ class ReliabilityRecord(Base):
     stop_id = Column(String)
     # e.g. "weekday_am_peak", "weekday_pm_peak", "weekday_offpeak", "weekend"
     time_bucket = Column(String)
+    # Provenance of the counts: "seed" = synthetic prior from the static
+    # schedule, "observed" = built from real GTFS-RT observations only,
+    # "mixed" = seeded record that has since absorbed real observations.
+    source = Column(String, nullable=False, default="observed")
     observed_departures = Column(Integer, default=0)
     scheduled_departures = Column(Integer, default=0)
     total_delay_seconds = Column(Integer, default=0)

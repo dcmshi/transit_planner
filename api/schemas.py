@@ -86,6 +86,9 @@ class GtfsStats(BaseModel):
 class ReliabilityStats(BaseModel):
     records: int
     last_seeded_at: str | None
+    # Record counts by provenance ("seed" / "mixed" / "observed") — how much
+    # of the risk model is synthetic priors vs real GTFS-RT observations.
+    by_source: dict[str, int]
 
 
 class GtfsRtStats(BaseModel):

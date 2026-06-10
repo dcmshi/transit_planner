@@ -117,9 +117,12 @@ def record_observed_departure(
             observed_departures=0,
             total_delay_seconds=0,
             cancellation_count=0,
+            source="observed",
         )
         session.add(record)
         session.flush()
+    elif record.source == "seed":
+        record.source = "mixed"  # synthetic prior now blended with real data
 
     record.scheduled_departures += 1
     if was_cancelled:

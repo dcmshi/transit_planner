@@ -215,6 +215,42 @@ class TestComputeLiveRisk:
 
         assert result["risk_score"] == pytest.approx(0.2, abs=1e-9)
 
+    def test_cross_midnight_departure_uses_gtfs_convention(self):
+        """A post-midnight departure ("24:05:00") queried at 23:55 is 10 min
+        away — the missing-vehicle window must work across midnight via the
+        GTFS >24:00:00 convention."""
+        with patch(f"{_LIVE}.trip_updates", {}), \
+             patch(f"{_LIVE}.service_alerts", []), \
+             patch(f"{_LIVE}.vehicle_positions", {}):
+            result = _compute(
+                departure="24:05:00",
+                query_dt=datetime(2026, 2, 9, 23, 55),  # Monday
+                hist=0.8,
+                trip="T1",
+            )
+
+        # 10 min to departure, no vehicle position → bump; also late evening.
+        expected = pytest.approx(
+            0.2 + MISSING_VEHICLE_RISK_BUMP + LATE_EVENING_RISK_BUMP, abs=1e-9
+        )
+        assert result["risk_score"] == expected
+
+    def test_cross_midnight_departure_outside_vehicle_window(self):
+        """"25:30:00" (1:30 AM next day) queried at 23:50 is 100 min away —
+        no missing-vehicle bump, late-evening bump only."""
+        with patch(f"{_LIVE}.trip_updates", {}), \
+             patch(f"{_LIVE}.service_alerts", []), \
+             patch(f"{_LIVE}.vehicle_positions", {}):
+            result = _compute(
+                departure="25:30:00",
+                query_dt=datetime(2026, 2, 9, 23, 50),  # Monday
+                hist=0.8,
+                trip="T1",
+            )
+
+        expected = pytest.approx(0.2 + LATE_EVENING_RISK_BUMP, abs=1e-9)
+        assert result["risk_score"] == expected
+
     def test_risk_capped_at_1(self):
         """Multiple modifiers cannot push the score above 1.0."""
         saturday = datetime(2026, 2, 7, 22, 30)
@@ -418,6 +454,35 @@ class TestRecordObservedDeparture:
         assert len(records) == 2
         buckets = {r.time_bucket for r in records}
         assert buckets == {"weekday_am_peak", "weekday_pm_peak"}
+
+    def test_new_record_tagged_observed(self, hist_db):
+        record_observed_departure(
+            "R1", "S1", self._AM_DT, delay_seconds=0,
+            was_cancelled=False, session=hist_db,
+        )
+        rec = hist_db.query(ReliabilityRecord).filter_by(
+            route_id="R1", stop_id="S1"
+        ).first()
+        assert rec.source == "observed"
+
+    def test_seeded_record_flips_to_mixed_on_real_observation(self, hist_db):
+        hist_db.add(ReliabilityRecord(
+            route_id="R1", stop_id="S1", time_bucket="weekday_am_peak",
+            scheduled_departures=100, observed_departures=85,
+            total_delay_seconds=0, cancellation_count=3,
+            window_start_date="20260201", source="seed",
+        ))
+        hist_db.commit()
+
+        record_observed_departure(
+            "R1", "S1", self._AM_DT, delay_seconds=0,
+            was_cancelled=False, session=hist_db,
+        )
+        rec = hist_db.query(ReliabilityRecord).filter_by(
+            route_id="R1", stop_id="S1"
+        ).first()
+        assert rec.source == "mixed"
+        assert rec.scheduled_departures == 101  # blended, not reset
 
     def test_window_end_date_updated(self, hist_db):
         record_observed_departure(

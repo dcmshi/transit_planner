@@ -255,6 +255,12 @@ def health(session: Session = Depends(get_session)) -> HealthResponse:
     last_seeded_at: str | None = (
         session.query(func.max(ReliabilityRecord.updated_at)).scalar()
     )
+    by_source: dict[str, int] = {
+        source: count
+        for source, count in session.query(
+            ReliabilityRecord.source, func.count(ReliabilityRecord.id)
+        ).group_by(ReliabilityRecord.source)
+    }
 
     # Graph stats (may not be built yet)
     graph_built = False
@@ -293,6 +299,7 @@ def health(session: Session = Depends(get_session)) -> HealthResponse:
         "reliability": {
             "records": reliability_count,
             "last_seeded_at": last_seeded_at,
+            "by_source": by_source,
         },
         "gtfs_rt": {
             "polling_active": GTFS_RT_API_KEY != "" and GTFS_RT_POLL_SECONDS > 0 and scheduler.running,

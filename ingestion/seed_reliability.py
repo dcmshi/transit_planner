@@ -172,6 +172,7 @@ def seed_from_static(
                 stop_id=stop_id,
                 time_bucket=bucket,
                 window_start_date=start_str,
+                source="seed",
             )
             session.add(record)
         elif fill_gaps_only:
@@ -183,6 +184,7 @@ def seed_from_static(
         record.cancellation_count = cancelled
         record.total_delay_seconds = total_delay
         record.window_end_date = end_str
+        record.source = "seed"  # values are fully synthetic after overwrite
         record.updated_at = datetime.now(timezone.utc).isoformat()
         written += 1
 

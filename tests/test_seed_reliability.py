@@ -101,6 +101,7 @@ class TestSeedFromStatic:
         ).first()
         assert record is not None
         assert record.scheduled_departures == 1
+        assert record.source == "seed"
 
     def test_synthetic_rates_applied(self, db):
         """observed_departures and cancellation_count match the prior rates."""
