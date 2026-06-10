@@ -172,6 +172,60 @@ class TestObserveDepartures:
         # _recorded_today was wiped on date change, so T_past was processed
         assert count == 2
 
+    def test_delayed_trip_writes_db_state(self, obs_db):
+        """End-to-end without mocks: a delayed trip produces a real
+        ReliabilityRecord with the delay accumulated."""
+        from db.models import ReliabilityRecord
+
+        rt_mod.trip_updates["T_past"] = TripUpdateState(
+            trip_id="T_past",
+            route_id="R1",
+            is_cancelled=False,
+            stop_time_overrides={"S1": 120},
+        )
+        count = observe_departures(obs_db)
+
+        assert count == 1
+        rec = obs_db.query(ReliabilityRecord).filter_by(
+            route_id="R1", stop_id="S1"
+        ).first()
+        assert rec is not None
+        assert rec.scheduled_departures == 1
+        assert rec.observed_departures == 1
+        assert rec.total_delay_seconds == 120
+        assert rec.cancellation_count == 0
+
+    def test_dedup_survives_restart(self, obs_db):
+        """Persisted markers prevent double-counting after a process restart."""
+        from db.models import ReliabilityRecord
+
+        rt_mod.trip_updates["T_past"] = TripUpdateState(
+            trip_id="T_past", route_id="R1", is_cancelled=True
+        )
+        count = observe_departures(obs_db)  # real record_observed_departure
+        assert count == 2
+
+        # Simulate a restart: all in-memory dedup state is lost.
+        rt_mod._recorded_today = set()
+        rt_mod._recorded_date = ""
+
+        count_after_restart = observe_departures(obs_db)
+        assert count_after_restart == 0  # markers reloaded from DB
+
+        recs = obs_db.query(ReliabilityRecord).all()
+        assert sum(r.cancellation_count for r in recs) == 2  # not doubled
+
+    def test_stale_markers_purged_on_rollover(self, obs_db):
+        """Markers from previous days are deleted during date rollover."""
+        from db.models import ObservedTrip
+
+        obs_db.add(ObservedTrip(trip_id="T_old", recorded_date="19990101"))
+        obs_db.commit()
+
+        observe_departures(obs_db)  # empty trip_updates; triggers rollover
+
+        assert obs_db.query(ObservedTrip).filter_by(recorded_date="19990101").count() == 0
+
 
 # ---------------------------------------------------------------------------
 # Polling functions (poll_trip_updates, poll_service_alerts,

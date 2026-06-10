@@ -252,16 +252,25 @@ async def poll_all() -> None:
         )
 
 
-def _parse_scheduled_at(departure_time_str: str, service_id: str) -> datetime | None:
+def _parse_scheduled_at(
+    departure_time_str: str, service_id: str, trip_id: str = ""
+) -> datetime | None:
     """Convert GTFS departure_time string + service_id (YYYYMMDD) to a datetime.
 
     Handles GTFS times > 24:00:00 (post-midnight trips) via timedelta.
+    Returns None (and logs a warning) on malformed input — the caller skips
+    the observation, so silence here would hide dropped data.
     """
     try:
         h, m, s = (int(x) for x in departure_time_str.split(":"))
         base = datetime.strptime(service_id, "%Y%m%d").replace(tzinfo=timezone.utc)
         return base + timedelta(hours=h, minutes=m, seconds=s)
     except (ValueError, AttributeError):
+        logger.warning(
+            "_parse_scheduled_at: could not parse departure_time=%r service_id=%r "
+            "(trip_id=%s) — observation skipped",
+            departure_time_str, service_id, trip_id,
+        )
         return None
 
 
@@ -277,9 +286,25 @@ def observe_departures(session: Session) -> int:
     """
     global _recorded_today, _recorded_date
 
+    from db.models import ObservedTrip, StopTime, Trip
+
     today = datetime.now(timezone.utc).date().strftime("%Y%m%d")
     if today != _recorded_date:
-        _recorded_today = set()
+        # Stale or empty in-memory state (new day, or fresh process after a
+        # restart) — reload today's dedup markers from the DB so already
+        # recorded trips are not double-counted.
+        _recorded_today = {
+            trip_id
+            for (trip_id,) in session.query(ObservedTrip.trip_id)
+            .filter(ObservedTrip.recorded_date == today)
+        }
+        stale = (
+            session.query(ObservedTrip)
+            .filter(ObservedTrip.recorded_date < today)
+            .delete()
+        )
+        if stale:
+            session.commit()
         _recorded_date = today
 
     unrecorded = {tid: state for tid, state in trip_updates.items()
@@ -288,7 +313,6 @@ def observe_departures(session: Session) -> int:
         return 0
 
     # Batch query: stop_id + departure_time + service_id for all unrecorded trips
-    from db.models import StopTime, Trip
     rows = (
         session.query(StopTime.trip_id, StopTime.stop_id, StopTime.departure_time, Trip.service_id)
         .join(Trip, Trip.trip_id == StopTime.trip_id)
@@ -303,6 +327,7 @@ def observe_departures(session: Session) -> int:
 
     now = datetime.now(timezone.utc)
     recorded = 0
+    newly_recorded: set[str] = set()
 
     for trip_id, state in unrecorded.items():
         stop_rows = stops_by_trip.get(trip_id, [])
@@ -314,7 +339,7 @@ def observe_departures(session: Session) -> int:
         if state.is_cancelled:
             # Record all stops as cancelled
             for stop_id, dep_time, service_id in stop_rows:
-                scheduled_at = _parse_scheduled_at(dep_time, service_id)
+                scheduled_at = _parse_scheduled_at(dep_time, service_id, trip_id)
                 if scheduled_at is None:
                     continue
                 record_observed_departure(
@@ -335,7 +360,7 @@ def observe_departures(session: Session) -> int:
             for stop_id, dep_time, service_id in stop_rows:
                 if stop_id not in override_stops:
                     continue
-                scheduled_at = _parse_scheduled_at(dep_time, service_id)
+                scheduled_at = _parse_scheduled_at(dep_time, service_id, trip_id)
                 if scheduled_at is None or scheduled_at > now:
                     continue  # not yet departed — don't record yet
                 delay = state.stop_time_overrides[stop_id]
@@ -351,6 +376,16 @@ def observe_departures(session: Session) -> int:
                 wrote_any = True
 
         if wrote_any:
-            _recorded_today.add(trip_id)
+            newly_recorded.add(trip_id)
+
+    if newly_recorded:
+        # One commit per poll cycle instead of one per observation.  Dedup
+        # markers are persisted in the same transaction, and trips are marked
+        # recorded in memory only after the commit succeeds, so a failed
+        # cycle rolls back atomically and is retried on the next poll.
+        for trip_id in newly_recorded:
+            session.add(ObservedTrip(trip_id=trip_id, recorded_date=today))
+        session.commit()
+        _recorded_today |= newly_recorded
 
     return recorded

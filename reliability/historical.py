@@ -94,6 +94,10 @@ def record_observed_departure(
     """
     Record one observed (or cancelled) departure and update reliability stats.
     Called by ingestion.gtfs_realtime.observe_departures() after every RT poll.
+
+    Does not commit — the caller owns the transaction and commits once per
+    batch.  New records are flushed so subsequent lookups in the same batch
+    see them (autoflush is off).
     """
     bucket = classify_time_bucket(scheduled_at)
     date_str = scheduled_at.strftime("%Y%m%d")
@@ -115,6 +119,7 @@ def record_observed_departure(
             cancellation_count=0,
         )
         session.add(record)
+        session.flush()
 
     record.scheduled_departures += 1
     if was_cancelled:
@@ -125,4 +130,3 @@ def record_observed_departure(
 
     record.window_end_date = date_str
     record.updated_at = datetime.now(timezone.utc).isoformat()
-    session.commit()

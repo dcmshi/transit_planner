@@ -103,6 +103,20 @@ class ServiceCalendarDate(Base):
     exception_type = Column(Integer)   # 1 = service added, 2 = service removed
 
 
+class ObservedTrip(Base):
+    """
+    Dedup marker: trips whose RT observations were recorded on a given day.
+
+    Persists the observe_departures() in-memory dedup set so a process
+    restart mid-day cannot double-count a trip.  Rows from previous days
+    are purged on date rollover.
+    """
+    __tablename__ = "observed_trips"
+
+    trip_id = Column(String, primary_key=True)
+    recorded_date = Column(String, primary_key=True)  # YYYYMMDD (UTC)
+
+
 class ReliabilityRecord(Base):
     """Rolling-window reliability stats per route / stop / time bucket."""
     __tablename__ = "reliability_records"
