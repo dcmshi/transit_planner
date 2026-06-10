@@ -43,6 +43,7 @@ from sqlalchemy.orm import Session
 from config import MAX_ROUTES, MAX_TRANSFERS, MIN_TRANSFER_MINUTES
 from db.models import StopTime
 from graph.builder import get_graph, get_projected_graph
+from gtfs_time import hms_to_seconds as _hms_to_seconds
 
 logger = logging.getLogger(__name__)
 
@@ -582,14 +583,3 @@ def _fill_later_departures(
     return routes
 
 
-def _hms_to_seconds(hms: str) -> int:
-    """
-    Convert HH:MM:SS (possibly HH > 23) to integer seconds past midnight.
-    Returns 0 on parse failure.
-    """
-    try:
-        parts = hms.strip().split(":")
-        return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
-    except (ValueError, IndexError, AttributeError):
-        logger.warning("_hms_to_seconds: could not parse %r, defaulting to 0", hms)
-        return 0

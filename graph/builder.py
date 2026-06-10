@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session
 
 from config import DATABASE_URL, MAX_WALK_METRES, WALK_SPEED_KPH
 from db.models import Stop, StopTime, Trip
+from gtfs_time import hms_to_seconds as _hms_to_seconds
 
 logger = logging.getLogger(__name__)
 
@@ -288,13 +289,3 @@ def _haversine_metres(lat1: float, lon1: float, lat2: float, lon2: float) -> flo
     return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
-def _hms_to_seconds(hms: str) -> int:
-    """
-    Convert HH:MM:SS (possibly HH > 23) to integer seconds past midnight.
-    Returns 0 on parse failure.
-    """
-    try:
-        parts = hms.strip().split(":")
-        return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
-    except Exception:
-        return 0

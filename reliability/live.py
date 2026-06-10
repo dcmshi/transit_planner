@@ -17,6 +17,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any
 
+from gtfs_time import hms_to_seconds as _hms_to_seconds
 from ingestion.gtfs_realtime import (
     ServiceAlertState,
     TripUpdateState,
@@ -31,7 +32,8 @@ logger = logging.getLogger(__name__)
 ALERT_RISK_BUMP = 0.10
 CANCELLATION_RISK_BUMP = 0.15
 MISSING_VEHICLE_RISK_BUMP = 0.08
-LATE_EVENING_RISK_BUMP = 0.05   # after 22:00
+LATE_EVENING_RISK_BUMP = 0.05
+LATE_EVENING_START_SEC = 22 * 3600  # 22:00 — service thins out after this
 WEEKEND_RISK_BUMP = 0.03
 
 
@@ -94,7 +96,7 @@ def compute_live_risk(
         modifiers.append("No vehicle position data found close to departure.")
 
     # 5. Late-evening service
-    if dep_seconds >= 22 * 3600:
+    if dep_seconds >= LATE_EVENING_START_SEC:
         total_adjustment += LATE_EVENING_RISK_BUMP
         modifiers.append("Late-evening departure (after 22:00) — reduced service frequency.")
 
@@ -134,9 +136,3 @@ def _risk_label(score: float) -> str:
     return "High"
 
 
-def _hms_to_seconds(hms: str) -> int:
-    try:
-        h, m, s = hms.strip().split(":")
-        return int(h) * 3600 + int(m) * 60 + int(s)
-    except Exception:
-        return 0
