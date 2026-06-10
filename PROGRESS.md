@@ -324,6 +324,47 @@ Five codebase audit passes + targeted coverage-gap analysis. All items complete.
 
 ---
 
+## Sixth Audit Pass (2026-06-10)
+
+Four-subsystem parallel audit (routing/graph, API/infra, ingestion/DB, reliability/LLM)
+with hand-verification of every high-severity finding.  288 tests passing.
+
+### Bugs Fixed
+
+- [x] **Event-loop blocking throughout `api/main.py`** — `get_routes` was `async def` calling sync `find_routes()` + risk scoring directly (one slow request stalled all others); scheduled jobs ran sync `build_graph`/`seed_from_static`/`observe_departures` on the loop.  Blocking section of `/routes` extracted to `_score_routes_blocking()` run via `asyncio.to_thread`; sync-only handlers (`health`, `search_stops`, `trigger_reliability_seed`) converted to plain `def` (FastAPI threadpool); scheduled jobs wrap sync calls in `asyncio.to_thread` (2026-06-10)
+- [x] **`_fill_later_departures` abandoned paths on filter failure** — a departure failing `_passes_filters` nulled the path pointer, hiding later valid departures on the same path; now only `_schedule_path → None` (timetable exhausted) ends a path; pointer strictly increases via `max(dep+1, nb+1)` guard; regression tests added (2026-06-10)
+- [x] **Per-observation commits in `record_observed_departure`** — one commit per record (dozens per 30 s poll, non-atomic on crash); commit moved to `observe_departures()` (one per cycle); `session.flush()` on create prevents duplicate rows under `autoflush=False`; `_recorded_today` updated only after successful commit (2026-06-10)
+- [x] **`_recorded_today` dedup lost on restart** — new `ObservedTrip` table (`trip_id`, `recorded_date` composite PK) persists dedup markers in the same transaction as observations; reloaded on stale in-memory date (covers restarts); previous-day rows purged on rollover; restart-simulation test added (2026-06-10)
+- [x] **`_parse_scheduled_at` silently dropped observations** — now logs a warning with departure_time, service_id, and trip_id on parse failure (2026-06-10)
+
+### Optimisations
+
+- [x] **Composite index on `reliability_records`** — `ix_reliability_route_stop_bucket (route_id, stop_id, time_bucket)` replaces three single-column indexes; all production queries filter on the full triple.  ⚠ Existing PostgreSQL DBs: `create_all` skips existing tables — apply `CREATE INDEX IF NOT EXISTS ix_reliability_route_stop_bucket ON reliability_records (route_id, stop_id, time_bucket);` or reset with `docker compose down -v` (2026-06-10)
+- [x] **Bulk inserts in GTFS static ingest** — `_parse_stops`/`_parse_routes`/`_parse_trips`/`_parse_calendar`/`_parse_calendar_dates` switched from per-row `session.add` + `iterrows()` to `bulk_save_objects` + `to_dict("records")`, matching `_parse_stop_times` (2026-06-10)
+
+### Features
+
+- [x] **Reliability record provenance** — `ReliabilityRecord.source` column: `"seed"` (synthetic prior), `"observed"` (real RT only), `"mixed"` (seed blended with real observations); set by `seed_from_static` / flipped by `record_observed_departure`; `/health` exposes `reliability.by_source` counts.  Scoring unchanged — synthetic counts still act as a prior.  ⚠ Existing PostgreSQL DBs need `ALTER TABLE reliability_records ADD COLUMN source VARCHAR NOT NULL DEFAULT 'seed';` (2026-06-10)
+
+### Refactoring
+
+- [x] **`_hms_to_seconds` deduplicated** — three copies (routing/engine.py, graph/builder.py, reliability/live.py — third found during refactor) replaced by shared `gtfs_time.hms_to_seconds` (logs + returns 0 on failure); aliased imports preserve test imports (2026-06-10)
+- [x] **LLM backend error handling deduplicated** — shared `_post_llm_request()` helper; per-backend fallback strings unchanged (2026-06-10)
+- [x] **Alert headers sanitised before LLM prompt** — `_sanitise_alert_header()` flattens control characters and caps at 200 chars (prompt-injection defence in depth) (2026-06-10)
+- [x] **`LATE_EVENING_START_SEC` constant** — replaces magic `22 * 3600` in `reliability/live.py` (2026-06-10)
+
+### Testing Gaps Filled
+
+- [x] **Cross-midnight live risk** — `compute_live_risk` with GTFS `>24:00:00` departures ("24:05:00" within vehicle window, "25:30:00" outside) (2026-06-10)
+- [x] **`observe_departures` DB-state assertions** — delayed-trip end-to-end test without mocks (record counts, delay, source); restart-survival test (2026-06-10)
+- [x] **LLM payload edges** — route with no legs, leg without modifiers, control-char/overlong alert headers (2026-06-10)
+
+### Deferred
+
+- [ ] **Route-cache stampede** — concurrent identical `/routes` requests can duplicate `find_routes()` work (benign: wasted CPU, no corruption); fix is a per-key lock / single-flight pattern (task #11 in session task list)
+
+---
+
 ## Environment Setup
 
 ```bash
