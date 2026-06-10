@@ -613,3 +613,44 @@ class TestRoutesCache:
         from api.main import _store_cached_routes
         _store_cached_routes(key_a, [["route_a"]])
         assert _get_cached_routes(key_b) is None
+
+
+class TestRouteCacheSingleFlight:
+    def test_concurrent_identical_requests_compute_once(self, monkeypatch):
+        """N concurrent cache misses on the same key run find_routes once;
+        the others wait and reuse the cached result (single-flight)."""
+        import threading
+        import time
+        from unittest.mock import MagicMock
+        import api.main as main_mod
+
+        main_mod._clear_routes_cache()
+        calls = []
+        walk_route = [[{
+            "kind": "walk", "from_stop_name": "A", "to_stop_name": "B",
+            "walk_seconds": 60, "distance_m": 80.0,
+        }]]
+
+        def slow_find(*args, **kwargs):
+            calls.append(1)
+            time.sleep(0.1)
+            return walk_route
+
+        monkeypatch.setattr(main_mod, "find_routes", slow_find)
+
+        results = []
+        def worker():
+            results.append(main_mod._score_routes_blocking(
+                "A", "B", datetime(2026, 2, 9, 8, 0), MagicMock()
+            ))
+
+        threads = [threading.Thread(target=worker) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert len(calls) == 1
+        assert len(results) == 4
+        assert all(r == results[0] for r in results)
+        main_mod._clear_routes_cache()

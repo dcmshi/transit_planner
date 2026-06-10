@@ -82,6 +82,19 @@ _routes_cache: dict[tuple[str, str, str, str], tuple[list, datetime]] = {}
 _routes_cache_lock = threading.Lock()
 _ROUTES_CACHE_TTL = timedelta(hours=1)
 
+# Per-key in-flight locks (single-flight): concurrent requests for the same
+# cache key wait for the first one's find_routes() instead of recomputing.
+_inflight_locks: dict[tuple[str, str, str, str], threading.Lock] = {}
+
+
+def _inflight_lock_for(key: tuple[str, str, str, str]) -> threading.Lock:
+    with _routes_cache_lock:
+        lock = _inflight_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _inflight_locks[key] = lock
+        return lock
+
 
 def _routes_cache_key(origin: str, destination: str, departure_dt: datetime) -> tuple[str, str, str, str]:
     """Stable cache key at minute resolution."""
@@ -363,19 +376,29 @@ def _score_routes_blocking(
     cache_key = _routes_cache_key(origin, destination, departure_dt)
     routes = _get_cached_routes(cache_key)
     if routes is None:
+        key_lock = _inflight_lock_for(cache_key)
         try:
-            routes = find_routes(
-                origin, destination,
-                departure_dt=departure_dt,
-                session=session,
-                max_routes=MAX_ROUTES,
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=404, detail=str(exc))
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"Routing error: {exc}")
-        if routes:
-            _store_cached_routes(cache_key, routes)
+            with key_lock:
+                # Re-check — another request may have filled the cache while
+                # this one waited on the lock.
+                routes = _get_cached_routes(cache_key)
+                if routes is None:
+                    try:
+                        routes = find_routes(
+                            origin, destination,
+                            departure_dt=departure_dt,
+                            session=session,
+                            max_routes=MAX_ROUTES,
+                        )
+                    except ValueError as exc:
+                        raise HTTPException(status_code=404, detail=str(exc))
+                    except Exception as exc:
+                        raise HTTPException(status_code=500, detail=f"Routing error: {exc}")
+                    if routes:
+                        _store_cached_routes(cache_key, routes)
+        finally:
+            with _routes_cache_lock:
+                _inflight_locks.pop(cache_key, None)
 
     if not routes:
         raise HTTPException(status_code=404, detail="No routes found between these stops.")
