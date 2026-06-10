@@ -361,7 +361,25 @@ with hand-verification of every high-severity finding.  288 tests passing.
 
 ### Deferred
 
-- [ ] **Route-cache stampede** — concurrent identical `/routes` requests can duplicate `find_routes()` work (benign: wasted CPU, no corruption); fix is a per-key lock / single-flight pattern (task #11 in session task list)
+- [x] **Route-cache stampede** — single-flight per cache key: concurrent identical `/routes` requests wait on a per-key lock and reuse the first result instead of recomputing; locks removed after computation so the dict stays bounded (2026-06-10)
+
+---
+
+## Live E2E Verification Fixes (2026-06-10)
+
+Bringing up the Docker stack against the June 2026 Metrolinx feed surfaced three
+issues invisible to the SQLite unit suite.  295 tests passing.
+
+- [x] **GTFS re-ingest broken on PostgreSQL** — `parse_and_store` deleted `stops` while `stop_times` still referenced them (parents-first delete order); SQLite unit tests never caught it (no FK enforcement by default), so every re-ingest and daily refresh over existing data had been failing silently since the PostgreSQL migration.  Fixed with child-first deletes up front; regression test enables `PRAGMA foreign_keys=ON` and ingests twice (2026-06-10)
+- [x] **Schedule-period route_ids made corridors unroutable** — the feed publishes one route_id per schedule period (e.g. `04260626-GT` Apr 26–Jun 26 and `06260926-GT` Jun 26–Sep 26) sharing every corridor edge; `_pick_longest_route` coverage ties between periods were broken arbitrarily, and picking the inactive period (zero trips on the travel date) made `_schedule_path` return None — every UN→GL query 404'd.  `_rank_routes_by_coverage` now returns all candidates ordered by coverage and `_schedule_path` falls back until one schedules (2026-06-10)
+- [x] **LLM recommendation computed in code, not by the model** — llama3.2 recommended a 91-min option over a 76-min equal-risk one, violating its own prompt rule.  `_build_llm_payload` now computes `recommended_option` / `backup_option` deterministically (lowest risk label, ties by shortest travel time) and the prompt instructs the model to copy them verbatim (ADR-004: algorithms decide, LLMs explain).  Ollama temperature set to 0.2 (matching Gemini) — default sampling occasionally dropped required sections.  Verified stable 3/3 live runs (2026-06-10)
+
+### Verified working against the live stack (2026-06-10)
+
+- Ingest: 154 832 trips through 2026-09-04; re-ingest idempotent
+- Routing: UN→GL returns 5 options matching the GT timetable exactly; later-departure fill populating options 2–5
+- RT pipeline: ~10 departures recorded per 30 s cycle; `observed_trips` dedup markers accumulating; 1 058+ records flipped seed→mixed
+- `/health` `by_source` provenance counts live; LLM explanation via bundled Ollama with sanitized real alert text
 
 ---
 
