@@ -62,6 +62,14 @@ def parse_and_store(zip_bytes: bytes, session: Session) -> None:
             with zf.open(filename) as f:
                 return pd.read_csv(f, dtype=str).fillna("")
 
+        # Clear child tables first: stop_times references stops and trips,
+        # trips references routes.  The parsers below delete their own table
+        # before inserting, but they run parents-first, which violates FK
+        # constraints on PostgreSQL when data already exists (re-ingest).
+        session.query(StopTime).delete()
+        session.query(Trip).delete()
+        session.flush()
+
         _parse_stops(read("stops.txt"), session)
         _parse_routes(read("routes.txt"), session)
         _parse_trips(read("trips.txt"), session)

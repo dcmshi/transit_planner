@@ -464,6 +464,36 @@ class TestParseAndStore:
         assert removed is not None
         assert removed.date == "20260704"
 
+    def test_reingest_with_enforced_foreign_keys(self):
+        """Re-ingest over existing data must not violate FK constraints.
+
+        PostgreSQL enforces FKs (SQLite doesn't by default), so deletes must
+        run child-first.  Regression: DELETE FROM stops failed on re-ingest
+        with stop_times rows still referencing stops.  PRAGMA foreign_keys=ON
+        makes SQLite enforce the same constraints as PostgreSQL.
+        """
+        from sqlalchemy import event
+
+        engine = create_engine(
+            "sqlite:///:memory:",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        event.listen(
+            engine, "connect",
+            lambda conn, _: conn.execute("PRAGMA foreign_keys=ON"),
+        )
+        Base.metadata.create_all(engine)
+        session = sessionmaker(bind=engine)()
+        try:
+            parse_and_store(_make_gtfs_zip(), session)  # initial ingest
+            parse_and_store(_make_gtfs_zip(), session)  # re-ingest over data
+            assert session.query(Stop).count() == 2
+            assert session.query(StopTime).count() == 2
+        finally:
+            session.close()
+            engine.dispose()
+
 
 # ---------------------------------------------------------------------------
 # download_gtfs_zip
