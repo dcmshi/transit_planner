@@ -47,6 +47,11 @@ def classify_time_bucket(dt: datetime) -> str:
 
 NEUTRAL_PRIOR = 0.8
 
+# Records whose decayed scheduled count has faded below this are treated as
+# "no data" (and deleted by the decay job) — scoring on a fraction of a
+# departure is meaningless.
+_MIN_SCHEDULED = 0.5
+
 
 def _score_record(record: ReliabilityRecord) -> float:
     """0–1 reliability score from a record's counters (see module docstring)."""
@@ -79,7 +84,7 @@ def get_historical_reliability(
         .order_by(ReliabilityRecord.updated_at.desc())
         .first()
     )
-    if record is None or record.scheduled_departures == 0:
+    if record is None or record.scheduled_departures < _MIN_SCHEDULED:
         logger.debug(
             "No historical data for route=%s stop=%s bucket=%s; using neutral prior.",
             route_id, stop_id, time_bucket,
@@ -119,7 +124,7 @@ def get_historical_reliability_batch(
     return {
         (r.route_id, r.stop_id, r.time_bucket): _score_record(r)
         for r in records
-        if r.scheduled_departures
+        if r.scheduled_departures >= _MIN_SCHEDULED
     }
 
 
@@ -210,21 +215,29 @@ def decay_reliability_records(session: Session, days_elapsed: float = 1.0) -> in
     if today == _last_decay_date:
         return 0
 
+    # Counters are Float columns — no rounding, so decay applies uniformly
+    # at every magnitude (integer ROUND made every value <= 10 immortal).
     factor = 0.5 ** (days_elapsed / WINDOW_DAYS)
     result = session.execute(
         text("""
             UPDATE reliability_records SET
-                scheduled_departures = CAST(ROUND(scheduled_departures * :f) AS INT),
-                observed_departures  = CAST(ROUND(observed_departures  * :f) AS INT),
-                total_delay_seconds  = CAST(ROUND(total_delay_seconds  * :f) AS INT),
-                cancellation_count   = CAST(ROUND(cancellation_count   * :f) AS INT)
+                scheduled_departures = scheduled_departures * :f,
+                observed_departures  = observed_departures  * :f,
+                total_delay_seconds  = total_delay_seconds  * :f,
+                cancellation_count   = cancellation_count   * :f
         """),
         {"f": factor},
+    )
+    # Fully-faded records carry no signal — remove them so scoring falls
+    # back to the neutral prior instead of ratios over fractional counts.
+    purged = session.execute(
+        text("DELETE FROM reliability_records WHERE scheduled_departures < :min"),
+        {"min": _MIN_SCHEDULED},
     )
     session.commit()
     _last_decay_date = today
     logger.info(
-        "Reliability decay applied: %d records scaled by %.4f (half-life %d days).",
-        result.rowcount, factor, WINDOW_DAYS,
+        "Reliability decay applied: %d records scaled by %.4f (half-life %d days), %d faded records purged.",
+        result.rowcount, factor, WINDOW_DAYS, purged.rowcount,
     )
     return result.rowcount

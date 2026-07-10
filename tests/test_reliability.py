@@ -510,10 +510,10 @@ class TestDecayReliabilityRecords:
 
         assert updated == 1
         rec = hist_db.query(ReliabilityRecord).one()
-        assert rec.scheduled_departures == 50
-        assert rec.observed_departures == 40
-        assert rec.total_delay_seconds == 3000
-        assert rec.cancellation_count == 2
+        assert rec.scheduled_departures == pytest.approx(50)
+        assert rec.observed_departures == pytest.approx(40)
+        assert rec.total_delay_seconds == pytest.approx(3000)
+        assert rec.cancellation_count == pytest.approx(2)
 
     def test_decay_preserves_score(self, hist_db):
         """Uniform scaling keeps observed_rate/cancel_rate/avg-delay — the
@@ -536,7 +536,39 @@ class TestDecayReliabilityRecords:
 
         rec = hist_db.query(ReliabilityRecord).one()
         # One day of decay only (factor 0.5**(1/14) ≈ 0.9517)
-        assert rec.scheduled_departures == 95
+        assert rec.scheduled_departures == pytest.approx(100 * 0.5 ** (1 / 14), rel=1e-6)
+
+    def test_small_counters_actually_decay(self, hist_db):
+        """Regression: with integer ROUND, every counter <= 10 was a fixed
+        point — a single recorded no-show (scheduled=1, observed=0) scored
+        risk 1.0 forever.  Float counters must keep shrinking."""
+        import reliability.historical as hist_mod
+        from reliability.historical import WINDOW_DAYS, decay_reliability_records
+
+        self._seed(hist_db, scheduled=1, observed=0, delay=0, cancels=0)
+        decay_reliability_records(hist_db, days_elapsed=WINDOW_DAYS)
+
+        rec = hist_db.query(ReliabilityRecord).one()
+        assert rec.scheduled_departures == pytest.approx(0.5)
+
+        # After another half-life it fades below the minimum sample and is
+        # purged — the score falls back to the neutral prior.
+        hist_mod._last_decay_date = ""  # bypass the once-per-day guard
+        decay_reliability_records(hist_db, days_elapsed=WINDOW_DAYS)
+        assert hist_db.query(ReliabilityRecord).count() == 0
+        score = get_historical_reliability("R1", "S1", "weekday_am_peak", hist_db)
+        assert score == pytest.approx(0.8)
+
+    def test_faded_record_scores_neutral_prior_before_purge(self, hist_db):
+        """A record already below the minimum sample must not be scored."""
+        hist_db.add(ReliabilityRecord(
+            route_id="R1", stop_id="S1", time_bucket="weekday_am_peak",
+            scheduled_departures=0.3, observed_departures=0.0,
+            cancellation_count=0.0, total_delay_seconds=0.0,
+        ))
+        hist_db.commit()
+        score = get_historical_reliability("R1", "S1", "weekday_am_peak", hist_db)
+        assert score == pytest.approx(0.8)
 
 
 # ---------------------------------------------------------------------------

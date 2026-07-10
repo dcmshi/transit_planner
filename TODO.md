@@ -32,7 +32,13 @@ same pattern and rationale as the existing `DATABASE_URL` pin.  Belt and
 braces: also patch `api.main.poll_all` in the `client` fixture so no
 future config path can reintroduce network I/O in unit tests.
 
-### Reliability decay is a no-op below ~10 counts  [MEDIUM-HIGH]
+### ✅ Reliability decay is a no-op below ~10 counts  [MEDIUM-HIGH] (fixed 2026-07-10)
+
+> Counter columns are now Float; decay multiplies without ROUND/CAST so it
+> applies at every magnitude, and rows fading below 0.5 scheduled
+> departures are purged (scoring falls back to the neutral prior — the
+> same `_MIN_SCHEDULED` guard applies at read time).  Live Docker DB
+> migrated in place; ALTER SQL recorded in the migration section below.
 
 `decay_reliability_records` scales integer counters with
 `CAST(ROUND(x * :f) AS INT)` where `f = 0.5 ** (1/14) ≈ 0.9517`.  Any
@@ -317,6 +323,14 @@ CREATE INDEX IF NOT EXISTS ix_reliability_route_stop_bucket
 DROP INDEX IF EXISTS ix_reliability_records_route_id;
 DROP INDEX IF EXISTS ix_reliability_records_stop_id;
 DROP INDEX IF EXISTS ix_reliability_records_time_bucket;
+-- 2026-07-10 (eighth pass): counters became Float so the daily decay
+-- actually decays small values (integer ROUND froze everything <= 10).
+-- SQLite needs nothing (dynamic typing); PostgreSQL needs:
+ALTER TABLE reliability_records
+  ALTER COLUMN scheduled_departures TYPE DOUBLE PRECISION,
+  ALTER COLUMN observed_departures  TYPE DOUBLE PRECISION,
+  ALTER COLUMN total_delay_seconds  TYPE DOUBLE PRECISION,
+  ALTER COLUMN cancellation_count   TYPE DOUBLE PRECISION;
 ```
 
 (`observed_trips` is a new table — `init_db()`/`create_all` adds it

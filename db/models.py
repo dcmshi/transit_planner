@@ -134,10 +134,13 @@ class ReliabilityRecord(Base):
     # schedule, "observed" = built from real GTFS-RT observations only,
     # "mixed" = seeded record that has since absorbed real observations.
     source = Column(String, nullable=False, default="observed")
-    observed_departures = Column(Integer, default=0)
-    scheduled_departures = Column(Integer, default=0)
-    total_delay_seconds = Column(Integer, default=0)
-    cancellation_count = Column(Integer, default=0)
+    # Float, not Integer: the daily exponential decay multiplies these by
+    # ~0.95 — integer rounding made every value <= 10 a fixed point that
+    # never decayed, permanently freezing sparse (often bad) records.
+    observed_departures = Column(Float, default=0)
+    scheduled_departures = Column(Float, default=0)
+    total_delay_seconds = Column(Float, default=0)
+    cancellation_count = Column(Float, default=0)
     window_start_date = Column(String)  # YYYYMMDD
     window_end_date = Column(String)    # YYYYMMDD
     updated_at = Column(String)         # ISO 8601 timestamp
