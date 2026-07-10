@@ -116,10 +116,16 @@ def _rate_limit(request: Request) -> None:
 # Route cache — keyed by (origin, destination, YYYY-MM-DD, HH:MM)
 # Caches raw find_routes() output (legs only); risk scoring is always fresh.
 # Protected by a lock so concurrent requests don't duplicate find_routes() work.
+# Empty results are cached too (shorter TTL) so repeated queries for
+# unroutable pairs don't re-run Yen's every time, and the cache is bounded:
+# expired entries are otherwise only evicted when their exact key is looked
+# up again, so unique keys would accumulate until the daily clear.
 # ---------------------------------------------------------------------------
-_routes_cache: dict[tuple[str, str, str, str], tuple[list, datetime]] = {}
+_routes_cache: dict[tuple[str, str, str, str], tuple[list, datetime, timedelta]] = {}
 _routes_cache_lock = threading.Lock()
 _ROUTES_CACHE_TTL = timedelta(hours=1)
+_ROUTES_CACHE_NEGATIVE_TTL = timedelta(minutes=5)
+_ROUTES_CACHE_MAX_ENTRIES = 1000
 
 # Per-key in-flight locks (single-flight): concurrent requests for the same
 # cache key wait for the first one's find_routes() instead of recomputing.
@@ -141,20 +147,28 @@ def _routes_cache_key(origin: str, destination: str, departure_dt: datetime) -> 
 
 
 def _get_cached_routes(key: tuple[str, str, str, str]) -> list | None:
+    """Cached routes for key, or None on miss/expiry.  An empty list is a
+    negative-cache hit ('known unroutable'), distinct from None."""
     with _routes_cache_lock:
         entry = _routes_cache.get(key)
         if entry is None:
             return None
-        cached_routes, cached_at = entry
-        if datetime.now(timezone.utc) - cached_at > _ROUTES_CACHE_TTL:
+        cached_routes, cached_at, ttl = entry
+        if datetime.now(timezone.utc) - cached_at > ttl:
             del _routes_cache[key]
             return None
         return cached_routes
 
 
 def _store_cached_routes(key: tuple[str, str, str, str], routes: list) -> None:
+    ttl = _ROUTES_CACHE_TTL if routes else _ROUTES_CACHE_NEGATIVE_TTL
     with _routes_cache_lock:
-        _routes_cache[key] = (routes, datetime.now(timezone.utc))
+        _routes_cache[key] = (routes, datetime.now(timezone.utc), ttl)
+        if len(_routes_cache) > _ROUTES_CACHE_MAX_ENTRIES:
+            # Evict the oldest ~10% by insertion time.
+            oldest = sorted(_routes_cache.items(), key=lambda kv: kv[1][1])
+            for evict_key, _ in oldest[: max(1, _ROUTES_CACHE_MAX_ENTRIES // 10)]:
+                del _routes_cache[evict_key]
 
 
 def _clear_routes_cache() -> None:
@@ -442,8 +456,9 @@ def _score_routes_blocking(
                         raise HTTPException(status_code=404, detail=str(exc))
                     except Exception as exc:
                         raise HTTPException(status_code=500, detail=f"Routing error: {exc}")
-                    if routes:
-                        _store_cached_routes(cache_key, routes)
+                    # Empty results are stored too (negative cache) so
+                    # repeated unroutable queries don't re-run Yen's.
+                    _store_cached_routes(cache_key, routes)
         finally:
             with _routes_cache_lock:
                 _inflight_locks.pop(cache_key, None)

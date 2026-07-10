@@ -100,7 +100,9 @@ def find_routes(
 
     Raises:
         ValueError: If origin or destination stop is not in the graph.
-        nx.NetworkXNoPath: If no path exists between the stops.
+
+    Returns an empty list (rather than raising) when the stops are both in
+    the graph but no path connects them.
     """
     G = get_graph()
 
@@ -128,22 +130,27 @@ def find_routes(
     seen_signatures: set[tuple[str, ...]] = set()
     routes: list[Route] = []
     candidate_paths: list[list[str]] = []
-    for examined, node_path in enumerate(raw_paths):
-        if examined >= MAX_CANDIDATES:
-            break
-        legs = _schedule_path(session, G, node_path, departure_dt, cache)
-        if legs is None:
-            continue
-        if not _passes_filters(legs):
-            continue
-        sig = _route_signature(legs)
-        if sig in seen_signatures:
-            continue
-        seen_signatures.add(sig)
-        routes.append(legs)
-        candidate_paths.append(node_path)
-        if len(routes) >= max_routes:
-            break
+    try:
+        for examined, node_path in enumerate(raw_paths):
+            if examined >= MAX_CANDIDATES:
+                break
+            legs = _schedule_path(session, G, node_path, departure_dt, cache)
+            if legs is None:
+                continue
+            if not _passes_filters(legs):
+                continue
+            sig = _route_signature(legs)
+            if sig in seen_signatures:
+                continue
+            seen_signatures.add(sig)
+            routes.append(legs)
+            candidate_paths.append(node_path)
+            if len(routes) >= max_routes:
+                break
+    except nx.NetworkXNoPath:
+        # Both stops exist but nothing connects them — "no routes found"
+        # (a 404 for the API), not an internal error.
+        return []
 
     # Fill remaining slots with later departures on already-found paths.
     if len(routes) < max_routes and candidate_paths:

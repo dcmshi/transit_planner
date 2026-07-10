@@ -67,6 +67,16 @@ def client(db_session):
         app.dependency_overrides.clear()
 
 
+@pytest.fixture(autouse=True)
+def _clear_route_cache():
+    """The route cache is module-level in api.main — with negative caching,
+    one test's empty result would otherwise poison the next test's query
+    for the same origin/destination/time."""
+    from api.main import _clear_routes_cache
+    _clear_routes_cache()
+    yield
+
+
 # ---------------------------------------------------------------------------
 # GET /health
 # ---------------------------------------------------------------------------
@@ -660,10 +670,43 @@ class TestRoutesCache:
         from api.main import _get_cached_routes, _store_cached_routes
 
         key = ("UN", "GL", "2026-02-17", "08:30")
-        _store_cached_routes(key, [[]])
-        # Artificially expire by shrinking the TTL to zero.
+        # TTL is captured per entry at store time — shrink it before storing.
         monkeypatch.setattr(main_mod, "_ROUTES_CACHE_TTL", timedelta(seconds=0))
+        _store_cached_routes(key, [[]])
         assert _get_cached_routes(key) is None
+
+    def test_empty_result_negative_cached(self, client, monkeypatch):
+        """Repeated queries for an unroutable pair must not re-run routing."""
+        import api.main as main_mod
+
+        calls = {"n": 0}
+
+        def fake_find_routes(*args, **kwargs):
+            calls["n"] += 1
+            return []
+
+        monkeypatch.setattr(main_mod, "find_routes", fake_find_routes)
+        params = "origin=UN&destination=GL&travel_date=2026-02-18&departure_time=08:00"
+        assert client.get(f"/routes?{params}").status_code == 404
+        assert client.get(f"/routes?{params}").status_code == 404
+        assert calls["n"] == 1  # second 404 came from the negative cache
+
+    def test_negative_entries_use_short_ttl(self):
+        import api.main as main_mod
+        from api.main import _store_cached_routes
+
+        key = ("UN", "GL", "2026-02-17", "08:30")
+        _store_cached_routes(key, [])
+        assert main_mod._routes_cache[key][2] == main_mod._ROUTES_CACHE_NEGATIVE_TTL
+
+    def test_cache_size_is_bounded(self, monkeypatch):
+        import api.main as main_mod
+        from api.main import _store_cached_routes
+
+        monkeypatch.setattr(main_mod, "_ROUTES_CACHE_MAX_ENTRIES", 20)
+        for i in range(60):
+            _store_cached_routes(("UN", f"S{i}", "2026-02-17", "08:30"), [["x"]])
+        assert len(main_mod._routes_cache) <= 20
 
     def test_find_routes_called_once_on_cache_hit(self, client, monkeypatch):
         """Second identical request uses cached routes; find_routes called once."""

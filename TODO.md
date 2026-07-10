@@ -140,14 +140,13 @@ vs a weighted sum once enough real observations accumulate.
 > revisit (slowapi + shared store) if the app ever scales to multiple
 > workers.
 
-### Bound the route cache; consider negative caching
+### ✅ Bound the route cache; negative caching (done 2026-07-10)
 
-`_routes_cache` (`api/main.py`) grows until the daily refresh clears it —
-expired entries are only evicted when their exact key is looked up again,
-so unique queries accumulate for up to 24 h.  Cap it (LRU or max-entries
-sweep).  Also: empty results are never cached, so repeated 404 queries
-(unknown stop pairs) recompute every time — a short negative-cache TTL
-would close that gap alongside rate limiting.
+> Cache capped at 1000 entries (oldest 10% evicted on overflow); empty
+> results cached with a 5-minute negative TTL so unroutable pairs don't
+> re-run Yen's.  Bonus fix: `find_routes` now returns `[]` for
+> disconnected stops instead of leaking `NetworkXNoPath` (which the API
+> surfaced as a 500 — now a proper 404).
 
 ### Move `/ingest/gtfs-static` to a background task
 

@@ -96,6 +96,37 @@ class TestHmsToSeconds:
 
 
 # ---------------------------------------------------------------------------
+# find_routes — disconnected stops
+# ---------------------------------------------------------------------------
+
+class TestFindRoutesNoPath:
+    def test_disconnected_stops_return_empty_list(self):
+        """Both stops exist but nothing connects them: find_routes returns []
+        (the API turns that into a 404) instead of leaking NetworkXNoPath
+        (which the API turned into a 500)."""
+        from datetime import datetime
+        import graph.builder as builder_mod
+        from routing.engine import find_routes
+
+        G = nx.MultiDiGraph()
+        G.add_node("A", name="Stop A", lat=43.0, lon=-79.0)
+        G.add_node("B", name="Stop B", lat=43.1, lon=-79.1)  # no edges
+        H = nx.DiGraph()
+        H.add_nodes_from(G.nodes(data=True))
+
+        old = builder_mod._graph, builder_mod._digraph
+        builder_mod._graph, builder_mod._digraph = G, H
+        try:
+            routes = find_routes(
+                "A", "B", departure_dt=datetime(2026, 2, 11, 8, 0), session=None
+            )
+        finally:
+            builder_mod._graph, builder_mod._digraph = old
+
+        assert routes == []
+
+
+# ---------------------------------------------------------------------------
 # total_travel_seconds
 # ---------------------------------------------------------------------------
 
