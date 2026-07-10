@@ -94,6 +94,8 @@ the extra options, which is far more useful to a rider.
 - Rate limiting keys on `request.client.host`; behind any reverse proxy
   all callers share one bucket (fine for the documented single-worker
   local deployment — revisit with X-Forwarded-For if ever proxied).
+  *(2026-07-10: stale-bucket eviction and Retry-After added; the
+  proxy-IP caveat remains open by design.)*
 - `db/session.py` `get_session()` is a generator but is annotated
   `-> Session`; should be `Iterator[Session]`.
 - `_parse_stops` aborts the whole ingest on a blank `stop_lat`/`stop_lon`

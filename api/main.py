@@ -103,6 +103,7 @@ scheduler = AsyncIOScheduler()
 _rate_buckets: dict[str, "deque[float]"] = {}
 _rate_lock = threading.Lock()
 _RATE_WINDOW_SECONDS = 60.0
+_RATE_BUCKETS_MAX = 10_000
 
 
 def _rate_limit(request: Request) -> None:
@@ -119,14 +120,22 @@ def _rate_limit(request: Request) -> None:
         while bucket and now - bucket[0] > _RATE_WINDOW_SECONDS:
             bucket.popleft()
         if len(bucket) >= RATE_LIMIT_PER_MINUTE:
+            retry_after = max(1, int(_RATE_WINDOW_SECONDS - (now - bucket[0])) + 1)
             raise HTTPException(
                 status_code=429,
                 detail="Rate limit exceeded — try again shortly.",
+                headers={"Retry-After": str(retry_after)},
             )
         bucket.append(now)
-        # Opportunistic cleanup so idle IPs don't accumulate forever.
-        if len(_rate_buckets) > 10_000:
-            for key in [k for k, b in _rate_buckets.items() if not b]:
+        # Opportunistic cleanup: evict buckets whose newest entry has aged
+        # out of the window (an idle IP's bucket is never popped by its own
+        # requests, so "empty" is not a usable eviction signal).
+        if len(_rate_buckets) > _RATE_BUCKETS_MAX:
+            stale = [
+                k for k, b in _rate_buckets.items()
+                if not b or now - b[-1] > _RATE_WINDOW_SECONDS
+            ]
+            for key in stale:
                 del _rate_buckets[key]
 
 # ---------------------------------------------------------------------------
@@ -723,6 +732,17 @@ async def _run_gtfs_ingest() -> None:
         _finish_ingest("error", str(exc))
     finally:
         db.close()
+        # CancelledError is a BaseException and bypasses the handler above
+        # (e.g. shutdown cancels pending tasks) — never leave the slot
+        # claimed, or every future ingest AND daily refresh is blocked.
+        if _ingest_state["running"]:
+            _finish_ingest("error", "Ingest task cancelled before completion.")
+
+
+# Strong reference to the running ingest task — asyncio keeps only weak
+# refs to tasks, so a discarded reference could be garbage-collected
+# mid-run (documented asyncio requirement).
+_ingest_task: "asyncio.Task | None" = None
 
 
 @app.post("/ingest/gtfs-static", response_model=IngestResponse, status_code=202)
@@ -738,12 +758,13 @@ async def trigger_gtfs_ingest(
     GET /ingest/status (or /health) for completion.  409 if an ingest is
     already running.
     """
+    global _ingest_task
     if not _try_begin_ingest():
         raise HTTPException(
             status_code=409,
             detail="An ingest is already running — poll GET /ingest/status.",
         )
-    asyncio.create_task(_run_gtfs_ingest())
+    _ingest_task = asyncio.create_task(_run_gtfs_ingest())
     return {
         "status": "accepted",
         "message": "GTFS ingest started in the background — poll GET /ingest/status.",

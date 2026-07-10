@@ -280,6 +280,34 @@ class TestRateLimit:
             client.get("/stops?query=Guelph")  # consume the budget
             assert client.get("/health").status_code == 200
 
+    def test_429_includes_retry_after(self, client):
+        with patch("api.main.RATE_LIMIT_PER_MINUTE", 1):
+            client.get("/stops?query=Guelph")
+            resp = client.get("/stops?query=Guelph")
+        assert resp.status_code == 429
+        assert 1 <= int(resp.headers["Retry-After"]) <= 61
+
+    def test_stale_idle_buckets_evicted(self, client):
+        """Regression: buckets are never emptied by their own IP's absence,
+        so eviction must key on the age of the newest entry — the old
+        'delete empty buckets' cleanup could never delete anything."""
+        import time as time_mod
+        from collections import deque
+
+        import api.main as main_mod
+
+        stale_ts = time_mod.monotonic() - 3600  # far outside the window
+        for i in range(5):
+            main_mod._rate_buckets[f"10.0.0.{i}"] = deque([stale_ts])
+
+        with (
+            patch("api.main.RATE_LIMIT_PER_MINUTE", 100),
+            patch("api.main._RATE_BUCKETS_MAX", 3),  # force the cleanup pass
+        ):
+            client.get("/stops?query=Guelph")
+
+        assert not any(k.startswith("10.0.0.") for k in main_mod._rate_buckets)
+
 
 # ---------------------------------------------------------------------------
 # GET /routes
@@ -662,6 +690,35 @@ class TestIngestBackground:
         assert main_mod._ingest_state["last_status"] == "ok"
         assert "42" in main_mod._ingest_state["last_message"]
         mock_session.close.assert_called_once()
+
+    @pytest.mark.anyio
+    async def test_cancelled_ingest_releases_slot(self):
+        """Regression: CancelledError bypasses `except Exception`; a
+        cancelled ingest task must not leave running=True forever (which
+        would 409 every manual ingest and skip every daily refresh)."""
+        import asyncio
+
+        import api.main as main_mod
+        from api.main import _run_gtfs_ingest
+
+        main_mod._ingest_state["running"] = True
+
+        async def hang(session):
+            await asyncio.Event().wait()
+
+        with (
+            patch("api.main.SessionLocal", return_value=MagicMock()),
+            patch("api.main.refresh_static_data", side_effect=hang),
+        ):
+            task = asyncio.get_running_loop().create_task(_run_gtfs_ingest())
+            await asyncio.sleep(0.05)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        assert main_mod._ingest_state["running"] is False
+        assert main_mod._ingest_state["last_status"] == "error"
+        assert "cancelled" in main_mod._ingest_state["last_message"].lower()
 
     @pytest.mark.anyio
     async def test_run_ingest_records_error(self):
