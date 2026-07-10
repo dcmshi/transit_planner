@@ -19,6 +19,7 @@ from typing import Any
 
 import httpx
 from google.transit import gtfs_realtime_pb2
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from config import (
@@ -64,6 +65,20 @@ _last_fetched: datetime | None = None
 # Tracks trip_ids already recorded today — prevents double-counting across polls
 _recorded_today: set[str] = set()
 _recorded_date: str = ""   # YYYYMMDD; set resets when date changes
+
+# No-show detection state.
+# _seen_in_rt_today accumulates every trip_id that appeared in any RT feed
+# (trip updates or vehicle positions) since the last date rollover — the RT
+# snapshot dicts only hold the current poll, so without this a trip that ran
+# at 10:00 would look "never seen" by 11:00.
+# _polling_since marks the start of continuous RT coverage: set on the first
+# successful poll, reset to None when all feeds fail (a coverage hole means
+# a trip could have shown evidence we never saw — don't judge those).
+_seen_in_rt_today: set[str] = set()
+_polling_since: datetime | None = None       # UTC
+_last_noshow_sweep: datetime | None = None   # UTC; throttles the sweep
+NO_SHOW_GRACE_MINUTES = 30
+NO_SHOW_SWEEP_SECONDS = 300
 
 # Exponential backoff for sustained API failures
 _consecutive_poll_failures: int = 0
@@ -213,7 +228,7 @@ async def poll_all() -> None:
     on each consecutive failure, capped at _MAX_BACKOFF_SECONDS (30 min).
     A single successful poll resets the backoff counter.
     """
-    global _last_fetched, _consecutive_poll_failures, _backoff_until
+    global _last_fetched, _consecutive_poll_failures, _backoff_until, _polling_since
 
     if not GTFS_RT_API_KEY:
         logger.info(
@@ -241,9 +256,17 @@ async def poll_all() -> None:
         _consecutive_poll_failures = 0
         _backoff_until = None
         _last_fetched = datetime.now(timezone.utc)
+        if _polling_since is None:
+            _polling_since = _last_fetched
+        # Remember every trip that has shown RT evidence today — the
+        # snapshot dicts only hold the current poll (see record_no_shows).
+        _seen_in_rt_today.update(trip_updates.keys())
+        _seen_in_rt_today.update(vehicle_positions.keys())
         logger.debug("GTFS-RT poll complete at %s", _last_fetched.isoformat())
     else:
-        # All three feeds failed
+        # All three feeds failed — coverage hole; no-show judgements must
+        # restart from the next successful poll.
+        _polling_since = None
         _consecutive_poll_failures += 1
         backoff_secs = min(60 * (2 ** (_consecutive_poll_failures - 1)), _MAX_BACKOFF_SECONDS)
         _backoff_until = datetime.now(timezone.utc) + timedelta(seconds=backoff_secs)
@@ -298,6 +321,7 @@ def observe_departures(session: Session) -> int:
         # Stale or empty in-memory state (new day, or fresh process after a
         # restart) — reload today's dedup markers from the DB so already
         # recorded trips are not double-counted.
+        _seen_in_rt_today.clear()  # yesterday's RT evidence is irrelevant now
         _recorded_today = {
             trip_id
             for (trip_id,) in session.query(ObservedTrip.trip_id)
@@ -392,5 +416,124 @@ def observe_departures(session: Session) -> int:
             session.add(ObservedTrip(trip_id=trip_id, recorded_date=today))
         session.commit()
         _recorded_today |= newly_recorded
+
+    return recorded
+
+
+# GTFS HH:MM:SS → seconds-past-midnight, in SQL (works on SQLite and
+# PostgreSQL; the routing engine uses the same expression).
+_DEP_SEC_SQL = (
+    "CAST(substr(st.departure_time, 1, 2) AS INT) * 3600"
+    " + CAST(substr(st.departure_time, 4, 2) AS INT) * 60"
+    " + CAST(substr(st.departure_time, 7, 2) AS INT)"
+)
+
+
+def record_no_shows(session: Session) -> int:
+    """
+    Record scheduled trips that never appeared in any GTFS-RT feed as misses.
+
+    This is the signal observe_departures cannot capture: a bus that silently
+    never runs produces no TripUpdate at all, so nothing was ever recorded
+    and observed_rate never dropped.  A trip counts as a no-show when:
+
+      - its entire scheduled run happened inside the continuous RT coverage
+        window (first departure after _polling_since — trips that started
+        before we were watching are not judged),
+      - the grace period after its final scheduled departure has elapsed,
+      - it never appeared in trip updates or vehicle positions today, and
+      - it was not already recorded (observed or cancelled).
+
+    Each stop of the trip is recorded with was_missed=True (scheduled += 1,
+    observed += 0).  Runs at most once per NO_SHOW_SWEEP_SECONDS.
+
+    Trips with post-midnight (>24:00:00) final departures are never swept —
+    their service day ends before they can satisfy the cutoff.  This is a
+    known small gap, acceptable for the Toronto–Guelph corridor where
+    service ends before midnight.
+
+    Returns the number of missed departures recorded.
+    """
+    global _last_noshow_sweep, _recorded_today
+
+    from db.models import ObservedTrip, StopTime, Trip
+
+    if _polling_since is None:
+        return 0
+    now_utc = datetime.now(timezone.utc)
+    if (
+        _last_noshow_sweep is not None
+        and (now_utc - _last_noshow_sweep).total_seconds() < NO_SHOW_SWEEP_SECONDS
+    ):
+        return 0
+    _last_noshow_sweep = now_utc
+
+    now_local = now_utc.astimezone(AGENCY_TZ)
+    today = now_local.strftime("%Y%m%d")
+    midnight = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    now_sec = (now_local - midnight).total_seconds()
+    cutoff_sec = now_sec - NO_SHOW_GRACE_MINUTES * 60
+
+    polling_local = _polling_since.astimezone(AGENCY_TZ)
+    coverage_start_sec = (
+        0.0 if polling_local < midnight else (polling_local - midnight).total_seconds()
+    )
+
+    candidates = session.execute(
+        text(f"""
+            SELECT t.trip_id, t.route_id
+            FROM trips t
+            JOIN stop_times st ON st.trip_id = t.trip_id
+            WHERE t.service_id = :today
+            GROUP BY t.trip_id, t.route_id
+            HAVING MAX({_DEP_SEC_SQL}) <= :cutoff
+               AND MIN({_DEP_SEC_SQL}) >= :coverage_start
+        """),
+        {"today": today, "cutoff": cutoff_sec, "coverage_start": coverage_start_sec},
+    ).fetchall()
+
+    route_by_trip = {
+        trip_id: route_id
+        for trip_id, route_id in candidates
+        if trip_id not in _recorded_today and trip_id not in _seen_in_rt_today
+    }
+    if not route_by_trip:
+        return 0
+
+    stop_rows = (
+        session.query(StopTime.trip_id, StopTime.stop_id, StopTime.departure_time)
+        .filter(StopTime.trip_id.in_(list(route_by_trip)))
+        .all()
+    )
+
+    recorded = 0
+    newly_recorded: set[str] = set()
+    for trip_id, stop_id, dep_time in stop_rows:
+        scheduled_at = _parse_scheduled_at(dep_time, today, trip_id)
+        if scheduled_at is None:
+            continue
+        record_observed_departure(
+            route_id=route_by_trip[trip_id],
+            stop_id=stop_id,
+            scheduled_at=scheduled_at,
+            delay_seconds=0,
+            was_cancelled=False,
+            session=session,
+            was_missed=True,
+        )
+        recorded += 1
+        newly_recorded.add(trip_id)
+
+    if newly_recorded:
+        # Same commit discipline as observe_departures: markers persist in
+        # the same transaction; in-memory state updates only after commit.
+        for trip_id in newly_recorded:
+            session.add(ObservedTrip(trip_id=trip_id, recorded_date=today))
+        session.commit()
+        _recorded_today |= newly_recorded
+        logger.info(
+            "No-show sweep: %d trips with no RT evidence recorded as missed (%d departures).",
+            len(newly_recorded), recorded,
+        )
 
     return recorded

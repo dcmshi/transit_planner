@@ -90,10 +90,17 @@ def record_observed_departure(
     delay_seconds: int,
     was_cancelled: bool,
     session: Session,
+    was_missed: bool = False,
 ) -> None:
     """
-    Record one observed (or cancelled) departure and update reliability stats.
-    Called by ingestion.gtfs_realtime.observe_departures() after every RT poll.
+    Record one observed, cancelled, or missed departure and update
+    reliability stats.  Called by ingestion.gtfs_realtime after every RT
+    poll (observe_departures for observed/cancelled, record_no_shows for
+    missed).
+
+    was_missed=True records a scheduled departure with no RT evidence at
+    all — scheduled_departures increments but observed_departures does not,
+    which is what drives observed_rate down for no-shows.
 
     Does not commit — the caller owns the transaction and commits once per
     batch.  New records are flushed so subsequent lookups in the same batch
@@ -127,6 +134,8 @@ def record_observed_departure(
     record.scheduled_departures += 1
     if was_cancelled:
         record.cancellation_count += 1
+    elif was_missed:
+        pass  # no-show: scheduled but never seen — observed_rate drops
     else:
         record.observed_departures += 1
         record.total_delay_seconds += delay_seconds

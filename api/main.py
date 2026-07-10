@@ -155,14 +155,19 @@ async def _daily_gtfs_refresh() -> None:
 
 
 async def _rt_poll_and_observe() -> None:
-    """Poll all GTFS-RT feeds then record observed departures into DB."""
-    from ingestion.gtfs_realtime import observe_departures
+    """Poll all GTFS-RT feeds then record observed departures and no-shows."""
+    from ingestion.gtfs_realtime import observe_departures, record_no_shows
     await poll_all()
     db = SessionLocal()
     try:
         count = await asyncio.to_thread(observe_departures, db)
         if count:
             logger.info("RT observation: recorded %d departures.", count)
+        # After observed/cancelled trips are recorded (and the service-day
+        # rollover has run), sweep for trips that never showed up at all.
+        missed = await asyncio.to_thread(record_no_shows, db)
+        if missed:
+            logger.info("RT observation: recorded %d no-show departures.", missed)
     except Exception as exc:
         logger.error("RT observation failed: %s", exc, exc_info=True)
     finally:

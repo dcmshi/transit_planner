@@ -68,13 +68,18 @@ def obs_db():
 @pytest.fixture(autouse=True)
 def reset_rt_state():
     """Reset module-level RT state before each test."""
-    rt_mod.trip_updates.clear()
-    rt_mod._recorded_today = set()
-    rt_mod._recorded_date = ""
+    def _reset():
+        rt_mod.trip_updates.clear()
+        rt_mod.vehicle_positions.clear()
+        rt_mod._recorded_today = set()
+        rt_mod._recorded_date = ""
+        rt_mod._seen_in_rt_today.clear()
+        rt_mod._polling_since = None
+        rt_mod._last_noshow_sweep = None
+
+    _reset()
     yield
-    rt_mod.trip_updates.clear()
-    rt_mod._recorded_today = set()
-    rt_mod._recorded_date = ""
+    _reset()
 
 
 # ---------------------------------------------------------------------------
@@ -228,6 +233,112 @@ class TestObserveDepartures:
         observe_departures(obs_db)  # empty trip_updates; triggers rollover
 
         assert obs_db.query(ObservedTrip).filter_by(recorded_date="19990101").count() == 0
+
+
+# ---------------------------------------------------------------------------
+# record_no_shows — trips absent from every RT feed become misses
+# ---------------------------------------------------------------------------
+
+# Frozen instant: Wednesday 2026-07-08 15:00 agency-local (19:00 UTC, EDT).
+_FROZEN_LOCAL = datetime(2026, 7, 8, 15, 0, tzinfo=AGENCY_TZ)
+_FROZEN_UTC = _FROZEN_LOCAL.astimezone(timezone.utc)
+
+
+class _FrozenDatetime(datetime):
+    """datetime subclass whose now() is pinned to _FROZEN_UTC."""
+
+    @classmethod
+    def now(cls, tz=None):
+        if tz is None:
+            return _FROZEN_UTC.replace(tzinfo=None)
+        return _FROZEN_UTC.astimezone(tz)
+
+
+@pytest.fixture
+def frozen_now():
+    with patch.object(rt_mod, "datetime", _FrozenDatetime):
+        yield
+
+
+def _add_todays_trip(session, trip_id, dep1="12:00:00", dep2="12:10:00"):
+    """Seed a trip on the frozen day's service date with two stops."""
+    today = _FROZEN_LOCAL.strftime("%Y%m%d")
+    session.add(Trip(trip_id=trip_id, route_id="R1", service_id=today,
+                     trip_headsign="GL", direction_id=0))
+    session.add(StopTime(trip_id=trip_id, stop_id="S1", stop_sequence=1,
+                         departure_time=dep1, arrival_time=dep1))
+    session.add(StopTime(trip_id=trip_id, stop_id="S2", stop_sequence=2,
+                         departure_time=dep2, arrival_time=dep2))
+    session.commit()
+    return today
+
+
+class TestRecordNoShows:
+    def _arm_polling(self, since_hours_before=6):
+        """Simulate continuous RT coverage since N hours before frozen now."""
+        rt_mod._polling_since = _FROZEN_UTC - timedelta(hours=since_hours_before)
+        rt_mod._recorded_date = _FROZEN_LOCAL.strftime("%Y%m%d")
+
+    def test_unseen_finished_trip_recorded_as_missed(self, obs_db, frozen_now):
+        from db.models import ObservedTrip, ReliabilityRecord
+
+        _add_todays_trip(obs_db, "T_ghost")  # ran 12:00–12:10, never seen
+        self._arm_polling()
+
+        count = rt_mod.record_no_shows(obs_db)
+
+        assert count == 2  # both stops recorded as scheduled-but-missed
+        recs = obs_db.query(ReliabilityRecord).all()
+        assert sum(r.scheduled_departures for r in recs) == 2
+        assert sum(r.observed_departures for r in recs) == 0
+        assert sum(r.cancellation_count for r in recs) == 0
+        marker = obs_db.query(ObservedTrip).filter_by(trip_id="T_ghost").first()
+        assert marker is not None
+        assert "T_ghost" in rt_mod._recorded_today
+
+    def test_trip_seen_in_rt_today_not_marked(self, obs_db, frozen_now):
+        _add_todays_trip(obs_db, "T_seen")
+        self._arm_polling()
+        rt_mod._seen_in_rt_today.add("T_seen")  # appeared in a feed earlier
+
+        assert rt_mod.record_no_shows(obs_db) == 0
+
+    def test_already_recorded_trip_not_marked(self, obs_db, frozen_now):
+        _add_todays_trip(obs_db, "T_done")
+        self._arm_polling()
+        rt_mod._recorded_today.add("T_done")  # observed/cancelled earlier
+
+        assert rt_mod.record_no_shows(obs_db) == 0
+
+    def test_trip_outside_coverage_window_not_judged(self, obs_db, frozen_now):
+        """A trip that departed before polling started could have shown
+        evidence we never saw — it must not be marked missed."""
+        _add_todays_trip(obs_db, "T_early", dep1="07:00:00", dep2="07:10:00")
+        rt_mod._polling_since = _FROZEN_UTC - timedelta(hours=6)  # 09:00 local
+        rt_mod._recorded_date = _FROZEN_LOCAL.strftime("%Y%m%d")
+
+        assert rt_mod.record_no_shows(obs_db) == 0
+
+    def test_grace_period_not_elapsed_not_marked(self, obs_db, frozen_now):
+        # Final departure 14:45 local; frozen now is 15:00 — inside the
+        # 30-minute grace window.
+        _add_todays_trip(obs_db, "T_recent", dep1="14:35:00", dep2="14:45:00")
+        self._arm_polling()
+
+        assert rt_mod.record_no_shows(obs_db) == 0
+
+    def test_no_polling_coverage_no_sweep(self, obs_db, frozen_now):
+        _add_todays_trip(obs_db, "T_ghost")
+        rt_mod._polling_since = None  # coverage hole / polling never started
+
+        assert rt_mod.record_no_shows(obs_db) == 0
+
+    def test_sweep_throttled(self, obs_db, frozen_now):
+        _add_todays_trip(obs_db, "T_ghost")
+        self._arm_polling()
+        rt_mod._last_noshow_sweep = _FROZEN_UTC - timedelta(seconds=60)
+
+        assert rt_mod.record_no_shows(obs_db) == 0  # swept < 5 min ago
 
 
 # ---------------------------------------------------------------------------

@@ -74,7 +74,15 @@ service dates through ServiceCalendar + calendar_dates properly.
 
 ## Reliability model
 
-### No-show detection — the headline feature isn't measured
+### ✅ No-show detection — the headline feature isn't measured (done 2026-07-10)
+
+> Fixed: `record_no_shows` in `ingestion/gtfs_realtime.py` sweeps today's
+> schedule (throttled to every 5 min) for trips whose entire run finished
+> ≥30 min ago inside continuous RT coverage (`_polling_since`, reset on
+> total feed failure) with no appearance in `_seen_in_rt_today`; each stop
+> is recorded `was_missed=True` (scheduled += 1, observed += 0), sharing
+> the ObservedTrip dedup markers.  Known gap: >24:00:00 final departures
+> are never swept (GO corridor service ends before midnight).
 
 `observe_departures` only records trips that *appear* in the RT feed
 (cancelled or delayed).  A bus that silently never runs — the exact failure
