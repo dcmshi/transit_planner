@@ -381,6 +381,31 @@ class TestComputeLiveRisk:
         assert result["is_cancelled"] is False
         assert result["risk_score"] == pytest.approx(0.2, abs=1e-9)
 
+    def test_post_midnight_leg_still_gets_same_day_live_signals(self):
+        """Regression: a 25:30 leg rolls scheduled_dt onto tomorrow's date,
+        but the bus belongs to today's service and is live in today's RT
+        snapshot — the service_date gate must keep its cancellation
+        visible."""
+        from datetime import date
+
+        cancelled = TripUpdateState(trip_id="T1", route_id="R1", is_cancelled=True)
+        query = datetime(2026, 2, 9, 23, 50)               # Monday night
+        rolled_dep = datetime(2026, 2, 10, 1, 30)          # 25:30 → Tue 01:30
+        with patch(f"{_LIVE}.trip_updates", {"T1": cancelled}), \
+             patch(f"{_LIVE}.service_alerts", []), \
+             patch(f"{_LIVE}.vehicle_positions", {}):
+            result = compute_live_risk(
+                route_id="R1", stop_id="S1", trip_id="T1",
+                departure_time_str="25:30:00",
+                query_dt=query,
+                historical_reliability=0.8,
+                scheduled_dt=rolled_dep,
+                service_date=date(2026, 2, 9),  # Monday's service
+            )
+
+        assert result["is_cancelled"] is True
+        assert result["risk_score"] == 1.0
+
     def test_get_live_delay_lookup(self):
         from reliability.live import get_live_delay
 

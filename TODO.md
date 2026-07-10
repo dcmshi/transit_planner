@@ -75,7 +75,16 @@ Options: make the counter columns Float (simplest — `_score_record`
 already divides), carry the fractional remainder in a new column, or
 store per-day rows and aggregate over the window at read time.
 
-### RT snapshot dicts are read from worker threads while the poller mutates them  [MEDIUM]
+### ✅ RT snapshot dicts are read from worker threads while the poller mutates them  [MEDIUM] (fixed 2026-07-10)
+
+> Copy-on-read at every consumer iteration point (`_alerts_for`,
+> `_same_route_cancellations`, `/alerts`, the explain payload):
+> `list(...)` snapshots are single C-level ops, atomic under the GIL, so
+> a poll landing mid-request can no longer raise "changed size during
+> iteration".  Chosen over rebind-and-swap to keep the by-name imports
+> (and ~20 existing test patches) intact.  Bonus fix: live-signal gating
+> now keys on the *service* day, so >24:00:00 legs of today's service
+> keep their cancellation/delay signals past midnight.
 
 `_score_routes_blocking` runs in `asyncio.to_thread` and, via
 `compute_live_risk` → `_same_route_cancellations` /` _alerts_for`,

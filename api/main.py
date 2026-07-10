@@ -497,6 +497,8 @@ def search_stops(
 def get_alerts(_: None = Depends(_rate_limit)) -> list[AlertResult]:
     """Active GTFS-RT service alerts — lets a frontend show a disruption
     banner without requesting routes.  Empty until RT polling is active."""
+    # list(...) snapshot: this sync endpoint runs in a worker thread while
+    # the poller clears/extends the shared list on the event loop.
     return [
         {
             "alert_id": a.alert_id,
@@ -506,7 +508,7 @@ def get_alerts(_: None = Depends(_rate_limit)) -> list[AlertResult]:
             "affected_stop_ids": a.affected_stop_ids,
             "fetched_at": a.fetched_at.isoformat(),
         }
-        for a in service_alerts
+        for a in list(service_alerts)
     ]
 
 
@@ -599,11 +601,12 @@ def _score_routes_blocking(
                 query_dt=query_dt,
                 historical_reliability=hist,
                 scheduled_dt=leg_dt,
+                service_date=travel_day,
             )
             scored_leg = {**leg, "risk": live}
-            # Live expected times — same-day trips only (trip_ids repeat
-            # across service days; the RT snapshot describes today's run).
-            if leg_dt.date() == query_dt.date():
+            # Live expected times — same SERVICE day only (a >24:00:00 leg
+            # rolls leg_dt onto tomorrow but belongs to today's run).
+            if travel_day == query_dt.date():
                 delay = get_live_delay(leg["trip_id"], leg["from_stop_id"])
                 if delay:
                     scored_leg["live_delay_seconds"] = delay
@@ -689,7 +692,7 @@ async def get_routes(
         alerts_payload = [
             {"header": a.header, "description": a.description,
              "routes": a.affected_route_ids, "stops": a.affected_stop_ids}
-            for a in service_alerts
+            for a in list(service_alerts)  # snapshot vs poller mutation
         ]
         G = get_graph()
         origin_name = G.nodes[origin].get("name", origin) if origin in G else origin

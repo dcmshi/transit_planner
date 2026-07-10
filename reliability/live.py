@@ -14,6 +14,7 @@ Score is a 0–1 risk value (higher = riskier).
 """
 
 import logging
+from datetime import date as Date
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -63,6 +64,7 @@ def compute_live_risk(
     query_dt: datetime,
     historical_reliability: float,
     scheduled_dt: datetime | None = None,
+    service_date: Date | None = None,
 ) -> dict[str, Any]:
     """
     Compute the final risk score for a single trip leg.
@@ -97,10 +99,12 @@ def compute_live_risk(
     total_adjustment = 0.0
     modifiers: list[str] = []
 
-    # GTFS-RT snapshots describe *today's* runs, and trip_ids repeat across
-    # service days — per-trip live signals (cancellation, running late,
-    # same-day cancellations) must not leak onto future-dated queries.
-    is_same_day = scheduled_dt.date() == query_naive.date()
+    # GTFS-RT snapshots describe *today's* runs — per-trip live signals
+    # (cancellation, running late, same-day cancellations) must not leak
+    # onto future-dated queries.  Gate on the SERVICE day when the caller
+    # knows it: a >24:00:00 leg rolls scheduled_dt onto tomorrow's date
+    # even though the bus belongs to (and is live in) today's service.
+    is_same_day = (service_date or scheduled_dt.date()) == query_naive.date()
 
     # 1. Is this trip currently cancelled?
     tu = trip_updates.get(trip_id)
@@ -169,15 +173,19 @@ def compute_live_risk(
 
 
 def _alerts_for(route_id: str, stop_id: str) -> list[ServiceAlertState]:
+    # list(...) snapshot: this runs in request worker threads while the
+    # poller clears/extends the shared list on the event loop — iterating
+    # the live object can raise "changed size during iteration".
     return [
-        a for a in service_alerts
+        a for a in list(service_alerts)
         if route_id in a.affected_route_ids or stop_id in a.affected_stop_ids
     ]
 
 
 def _same_route_cancellations(route_id: str) -> int:
+    # list(...) snapshot — see _alerts_for.
     return sum(
-        1 for tu in trip_updates.values()
+        1 for tu in list(trip_updates.values())
         if tu.route_id == route_id and tu.is_cancelled
     )
 
