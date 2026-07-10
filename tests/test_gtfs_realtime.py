@@ -73,6 +73,7 @@ def reset_rt_state():
         rt_mod._recorded_today = set()
         rt_mod._recorded_date = ""
         rt_mod._seen_in_rt_today.clear()
+        rt_mod._seen_date = ""
         rt_mod._polling_since = None
         rt_mod._last_noshow_sweep = None
 
@@ -241,19 +242,22 @@ _FROZEN_LOCAL = datetime(2026, 7, 8, 15, 0, tzinfo=AGENCY_TZ)
 _FROZEN_UTC = _FROZEN_LOCAL.astimezone(timezone.utc)
 
 
-class _FrozenDatetime(datetime):
-    """datetime subclass whose now() is pinned to _FROZEN_UTC."""
+def _freeze(instant_utc):
+    """Context manager pinning rt_mod's datetime.now() to instant_utc."""
 
-    @classmethod
-    def now(cls, tz=None):
-        if tz is None:
-            return _FROZEN_UTC.replace(tzinfo=None)
-        return _FROZEN_UTC.astimezone(tz)
+    class _Frozen(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            if tz is None:
+                return instant_utc.replace(tzinfo=None)
+            return instant_utc.astimezone(tz)
+
+    return patch.object(rt_mod, "datetime", _Frozen)
 
 
 @pytest.fixture
 def frozen_now():
-    with patch.object(rt_mod, "datetime", _FrozenDatetime):
+    with _freeze(_FROZEN_UTC):
         yield
 
 
@@ -336,6 +340,118 @@ class TestRecordNoShows:
         rt_mod._last_noshow_sweep = _FROZEN_UTC - timedelta(seconds=60)
 
         assert rt_mod.record_no_shows(obs_db) == 0  # swept < 5 min ago
+
+    def test_calendar_removed_trips_are_not_no_shows(self, obs_db, frozen_now):
+        """Regression: a trip whose service is removed for the date via
+        calendar_dates exception_type=2 was never supposed to run — it must
+        not be recorded as a mass no-show."""
+        from db.models import ServiceCalendarDate
+
+        today = _add_todays_trip(obs_db, "T_holiday")
+        obs_db.add(ServiceCalendarDate(
+            service_id=today, date=today, exception_type=2,
+        ))
+        obs_db.commit()
+        self._arm_polling()
+
+        assert rt_mod.record_no_shows(obs_db) == 0
+
+
+class TestObservationDedupAcrossMidnight:
+    def test_lingering_trip_not_double_counted_after_rollover(self, obs_db):
+        """Regression: dedup markers were keyed by the wall-clock recording
+        date, so a cancelled trip recorded at 23:50 that lingered in the
+        feed past agency midnight was re-recorded at 00:05 — doubling its
+        cancellation counts nightly."""
+        from db.models import ObservedTrip, ReliabilityRecord
+
+        service_day = datetime(2026, 7, 8, tzinfo=AGENCY_TZ)
+        obs_db.add(Trip(trip_id="T_late", route_id="R1",
+                        service_id=service_day.strftime("%Y%m%d"),
+                        trip_headsign="GL", direction_id=0))
+        obs_db.add(StopTime(trip_id="T_late", stop_id="S1", stop_sequence=1,
+                            departure_time="23:00:00", arrival_time="23:00:00"))
+        obs_db.commit()
+
+        rt_mod.trip_updates["T_late"] = TripUpdateState(
+            trip_id="T_late", route_id="R1", is_cancelled=True
+        )
+
+        # First observation at 23:50 agency-local on the service day.
+        before_midnight = service_day.replace(hour=23, minute=50).astimezone(timezone.utc)
+        with _freeze(before_midnight):
+            assert observe_departures(obs_db) == 1
+
+        marker = obs_db.query(ObservedTrip).filter_by(trip_id="T_late").one()
+        assert marker.recorded_date == service_day.strftime("%Y%m%d")
+
+        # 00:05 the next day: trip still in the feed, in-memory state lost
+        # (as after a restart) — the reloaded markers must still dedup it.
+        rt_mod._recorded_today = set()
+        rt_mod._recorded_date = ""
+        after_midnight = (service_day + timedelta(days=1)).replace(
+            hour=0, minute=5
+        ).astimezone(timezone.utc)
+        with _freeze(after_midnight):
+            assert observe_departures(obs_db) == 0
+
+        rec = obs_db.query(ReliabilityRecord).filter_by(stop_id="S1").one()
+        assert rec.cancellation_count == 1  # not doubled
+
+
+class TestNoShowCoverage:
+    @pytest.fixture(autouse=True)
+    def _poll_state(self):
+        rt_mod._consecutive_poll_failures = 0
+        rt_mod._backoff_until = None
+        yield
+        rt_mod._consecutive_poll_failures = 0
+        rt_mod._backoff_until = None
+
+    def _patch_feeds(self, tu, alerts, vp):
+        return (
+            patch("ingestion.gtfs_realtime.poll_trip_updates",
+                  new=AsyncMock(return_value=tu)),
+            patch("ingestion.gtfs_realtime.poll_service_alerts",
+                  new=AsyncMock(return_value=alerts)),
+            patch("ingestion.gtfs_realtime.poll_vehicle_positions",
+                  new=AsyncMock(return_value=vp)),
+        )
+
+    @pytest.mark.anyio
+    async def test_coverage_requires_trip_updates_feed(self):
+        """Regression: coverage survived as long as ANY feed succeeded, so
+        a trip-updates outage (the primary evidence stream) produced false
+        no-shows for buses that report no vehicle positions."""
+        with patch.object(rt_mod, "GTFS_RT_API_KEY", "k"):
+            p1, p2, p3 = self._patch_feeds(True, True, True)
+            with p1, p2, p3:
+                await rt_mod.poll_all()
+            assert rt_mod._polling_since is not None
+
+            # Trip-updates fails while the other feeds stay healthy →
+            # coverage must reset.
+            p1, p2, p3 = self._patch_feeds(False, True, True)
+            with p1, p2, p3:
+                await rt_mod.poll_all()
+            assert rt_mod._polling_since is None
+
+    @pytest.mark.anyio
+    async def test_seen_set_rolls_before_update_at_midnight(self):
+        """Regression: poll_all recorded evidence into _seen_in_rt_today
+        BEFORE observe_departures' rollover cleared it, destroying the
+        first post-midnight poll's evidence."""
+        rt_mod._seen_date = "19990101"       # stale — forces a rollover
+        rt_mod._seen_in_rt_today.add("T_yesterday")
+        rt_mod.trip_updates["T_now"] = TripUpdateState(trip_id="T_now", route_id="R1")
+
+        with patch.object(rt_mod, "GTFS_RT_API_KEY", "k"):
+            p1, p2, p3 = self._patch_feeds(True, True, True)
+            with p1, p2, p3:
+                await rt_mod.poll_all()
+
+        assert "T_yesterday" not in rt_mod._seen_in_rt_today
+        assert "T_now" in rt_mod._seen_in_rt_today  # survived the rollover
 
 
 # ---------------------------------------------------------------------------

@@ -127,6 +127,9 @@ def seed_from_static(
 
     # --- Count scheduled departures per (route, stop, date, hour) -----------
     # dep_hour % 24 handles GTFS times past midnight (e.g. 25:10 → hour 1).
+    # Trips removed for their date via calendar_dates (exception_type=2)
+    # never run — excluding them keeps the synthetic priors aligned with
+    # the routing and no-show queries, which apply the same filter.
     rows = session.execute(
         text("""
             SELECT
@@ -138,6 +141,12 @@ def seed_from_static(
             FROM stop_times st
             JOIN trips t ON t.trip_id = st.trip_id
             WHERE t.service_id BETWEEN :start AND :end
+              AND NOT EXISTS (
+                    SELECT 1 FROM service_calendar_dates scd
+                    WHERE scd.service_id   = t.service_id
+                      AND scd.date         = t.service_id
+                      AND scd.exception_type = 2
+                  )
             GROUP BY t.route_id, st.stop_id, t.service_id, dep_hour
         """),
         {"start": start_str, "end": end_str},

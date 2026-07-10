@@ -69,11 +69,14 @@ _recorded_date: str = ""   # YYYYMMDD; set resets when date changes
 # _seen_in_rt_today accumulates every trip_id that appeared in any RT feed
 # (trip updates or vehicle positions) since the last date rollover — the RT
 # snapshot dicts only hold the current poll, so without this a trip that ran
-# at 10:00 would look "never seen" by 11:00.
-# _polling_since marks the start of continuous RT coverage: set on the first
-# successful poll, reset to None when all feeds fail (a coverage hole means
-# a trip could have shown evidence we never saw — don't judge those).
+# at 10:00 would look "never seen" by 11:00.  _seen_date rolls the set at
+# agency midnight inside poll_all (before the set is updated).
+# _polling_since marks the start of continuous coverage of the TRIP-UPDATES
+# feed specifically — it is the primary evidence stream, so a gap in it
+# (even while other feeds succeed) means a bus could have reported without
+# us seeing it; reset to None on any trip-updates failure.
 _seen_in_rt_today: set[str] = set()
+_seen_date: str = ""                         # YYYYMMDD agency-local
 _polling_since: datetime | None = None       # UTC
 _last_noshow_sweep: datetime | None = None   # UTC; throttles the sweep
 NO_SHOW_GRACE_MINUTES = 30
@@ -227,7 +230,8 @@ async def poll_all() -> None:
     on each consecutive failure, capped at _MAX_BACKOFF_SECONDS (30 min).
     A single successful poll resets the backoff counter.
     """
-    global _last_fetched, _consecutive_poll_failures, _backoff_until, _polling_since
+    global _last_fetched, _consecutive_poll_failures, _backoff_until
+    global _polling_since, _seen_date
 
     if not GTFS_RT_API_KEY:
         logger.info(
@@ -244,19 +248,33 @@ async def poll_all() -> None:
         )
         return
 
-    results = await asyncio.gather(
+    tu_ok, alerts_ok, vp_ok = await asyncio.gather(
         poll_trip_updates(),
         poll_service_alerts(),
         poll_vehicle_positions(),
     )
 
-    if any(results):
+    if tu_ok or alerts_ok or vp_ok:
         # At least one feed succeeded — reset backoff
         _consecutive_poll_failures = 0
         _backoff_until = None
         _last_fetched = datetime.now(timezone.utc)
-        if _polling_since is None:
-            _polling_since = _last_fetched
+        # No-show coverage requires the trip-updates feed specifically:
+        # a gap there (even with the other feeds healthy) means a bus
+        # could have reported without us ever seeing it — buses with no
+        # vehicle-position data would otherwise become false no-shows.
+        if tu_ok:
+            if _polling_since is None:
+                _polling_since = _last_fetched
+        else:
+            _polling_since = None
+        # Roll the evidence set at agency midnight BEFORE updating it, so
+        # the first post-midnight poll's evidence is not destroyed by a
+        # later rollover (observe_departures used to clear it afterwards).
+        seen_today = datetime.now(AGENCY_TZ).strftime("%Y%m%d")
+        if seen_today != _seen_date:
+            _seen_in_rt_today.clear()
+            _seen_date = seen_today
         # Remember every trip that has shown RT evidence today — the
         # snapshot dicts only hold the current poll (see record_no_shows).
         _seen_in_rt_today.update(trip_updates.keys())
@@ -329,24 +347,25 @@ def observe_departures(session: Session) -> int:
     from db.models import ObservedTrip, StopTime, Trip
 
     # Service days roll over at agency-local midnight, not UTC midnight.
-    today = datetime.now(AGENCY_TZ).date().strftime("%Y%m%d")
+    # Markers are keyed by the trip's SERVICE date and retained for
+    # yesterday + today: a late-evening trip recorded at 23:50 can linger
+    # in the RT feed past midnight, and a today-keyed marker would let it
+    # be double-counted on the first post-midnight poll.  (Safe because a
+    # trip_id maps to exactly one service date in this feed.)
+    now_local = datetime.now(AGENCY_TZ)
+    today = now_local.strftime("%Y%m%d")
     if today != _recorded_date:
-        # Stale or empty in-memory state (new day, or fresh process after a
-        # restart) — reload today's dedup markers from the DB so already
-        # recorded trips are not double-counted.
-        _seen_in_rt_today.clear()  # yesterday's RT evidence is irrelevant now
+        yesterday = (now_local - timedelta(days=1)).strftime("%Y%m%d")
+        session.query(ObservedTrip).filter(
+            ObservedTrip.recorded_date < yesterday
+        ).delete()
+        session.commit()
+        # Reload every remaining marker (yesterday's + today's service
+        # dates) so already recorded trips are not double-counted after a
+        # restart or rollover.
         _recorded_today = {
-            trip_id
-            for (trip_id,) in session.query(ObservedTrip.trip_id)
-            .filter(ObservedTrip.recorded_date == today)
+            trip_id for (trip_id,) in session.query(ObservedTrip.trip_id)
         }
-        stale = (
-            session.query(ObservedTrip)
-            .filter(ObservedTrip.recorded_date < today)
-            .delete()
-        )
-        if stale:
-            session.commit()
         _recorded_date = today
 
     unrecorded = {tid: state for tid, state in trip_updates.items()
@@ -425,8 +444,10 @@ def observe_departures(session: Session) -> int:
         # markers are persisted in the same transaction, and trips are marked
         # recorded in memory only after the commit succeeds, so a failed
         # cycle rolls back atomically and is retried on the next poll.
+        # Marker date = the trip's service date, not the wall-clock date.
         for trip_id in newly_recorded:
-            session.add(ObservedTrip(trip_id=trip_id, recorded_date=today))
+            service_date = stops_by_trip[trip_id][0][2]
+            session.add(ObservedTrip(trip_id=trip_id, recorded_date=service_date))
         session.commit()
         _recorded_today |= newly_recorded
 
@@ -492,12 +513,21 @@ def record_no_shows(session: Session) -> int:
         0.0 if polling_local < midnight else (polling_local - midnight).total_seconds()
     )
 
+    # NOT EXISTS mirrors the routing query: trips removed for this date via
+    # calendar_dates (exception_type=2 — holiday schedules, planned
+    # closures) were never supposed to run and must not become no-shows.
     candidates = session.execute(
         text(f"""
             SELECT t.trip_id, t.route_id
             FROM trips t
             JOIN stop_times st ON st.trip_id = t.trip_id
             WHERE t.service_id = :today
+              AND NOT EXISTS (
+                    SELECT 1 FROM service_calendar_dates scd
+                    WHERE scd.service_id   = t.service_id
+                      AND scd.date         = :today
+                      AND scd.exception_type = 2
+                  )
             GROUP BY t.trip_id, t.route_id
             HAVING MAX({_DEP_SEC_SQL}) <= :cutoff
                AND MIN({_DEP_SEC_SQL}) >= :coverage_start

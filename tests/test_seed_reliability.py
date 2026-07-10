@@ -67,6 +67,25 @@ class TestSeedFromStatic:
         with pytest.raises(RuntimeError, match="No trips in database"):
             seed_from_static(db, window_days=7)
 
+    def test_calendar_removed_service_not_seeded(self, db):
+        """Regression: trips removed for their date via calendar_dates
+        exception_type=2 never run and must not contribute synthetic
+        priors (routing and the no-show sweep apply the same filter)."""
+        from db.models import ServiceCalendarDate
+
+        service_id = "20260209"
+        _add_trip(db, "T1", "R1", service_id)
+        _add_stop_time(db, "T1", "S1", 1, "08:00:00")
+        db.add(ServiceCalendarDate(
+            service_id=service_id, date=service_id, exception_type=2,
+        ))
+        db.commit()
+
+        with patch("ingestion.seed_reliability._today", return_value=date(2026, 2, 9)):
+            written = seed_from_static(db, window_days=7)
+
+        assert written == 0
+
     def test_stale_feed_falls_back_to_feed_dates(self, db):
         """When today is past all service dates, falls back to feed date range."""
         _add_trip(db, "T1", "R1", "20200101")  # stale feed date

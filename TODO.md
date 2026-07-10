@@ -7,6 +7,18 @@ e2e suite).  Items ordered by priority within each section; see
 
 ## Eighth pass — open findings (2026-07-10)
 
+### ✅ Observation-pipeline batch (fixed 2026-07-10)
+
+> Four adversarial-review findings fixed together: no-show coverage now
+> requires the trip-updates feed specifically (a gap there resets
+> `_polling_since` even while other feeds succeed); the RT evidence set
+> rolls at agency midnight inside `poll_all` *before* being updated;
+> dedup markers are keyed by the trip's service date with a
+> yesterday+today retention window (late-evening trips lingering in the
+> feed past midnight were double-counted nightly); and the no-show sweep
+> and reliability seeder both exclude `calendar_dates exception_type=2`
+> removals like the routing query always did.
+
 ### ✅ Unit tests hit the live Metrolinx RT API when `.env` has a key  [HIGH] (fixed 2026-07-10)
 
 > `tests/conftest.py` hard-pins `GTFS_RT_API_KEY=""` before config import,
