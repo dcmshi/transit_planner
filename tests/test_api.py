@@ -59,6 +59,9 @@ def client(db_session):
         patch("api.main.init_db"),
         patch("api.main.build_graph"),
         patch("api.main.SessionLocal", return_value=MagicMock()),
+        # Belt and braces on top of conftest's GTFS_RT_API_KEY="" pin: the
+        # lifespan must never fire real RT polls from unit tests.
+        patch("api.main.GTFS_RT_API_KEY", ""),
     ):
         app.dependency_overrides[get_session] = override_get_session
         with TestClient(app, raise_server_exceptions=True) as c:

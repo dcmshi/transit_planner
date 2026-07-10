@@ -1,8 +1,110 @@
 # TODO — audit backlog
 
-Updated 2026-07-10 (seventh audit pass).  Items ordered by priority within
-each section; nothing here is blocking the current live stack.  See
+Updated 2026-07-10 (eighth audit pass — full source re-read plus a live
+check against the running Docker stack and the frontend's new Playwright
+e2e suite).  Items ordered by priority within each section; see
 `PROGRESS.md` for everything completed in earlier passes.
+
+## Eighth pass — open findings (2026-07-10)
+
+### ✅ Unit tests hit the live Metrolinx RT API when `.env` has a key  [HIGH] (fixed 2026-07-10)
+
+> `tests/conftest.py` hard-pins `GTFS_RT_API_KEY=""` before config import,
+> and the `client` fixture additionally patches `api.main.GTFS_RT_API_KEY`
+> so no future config path can reintroduce network I/O in unit tests.
+
+The `client` fixture in `tests/test_api.py` patches `api.main.init_db`,
+`build_graph`, and `SessionLocal`, but the lifespan's
+`await _rt_poll_and_observe()` still runs whenever `GTFS_RT_API_KEY` is
+set — and `tests/conftest.py` pins `DATABASE_URL` and
+`RATE_LIMIT_PER_MINUTE` but **not** the RT key, so a developer `.env`
+leaks in.  Consequences, verified on this machine:
+
+- `TestHealth::test_gtfs_rt_freshness_fields_present` fails (asserts
+  `trip_updates == 0`, live feed currently has 1) — the suite is red
+  locally while green in CI, purely because CI has no `.env`.
+- Every `client`-fixture test fires 3 real HTTP requests at the
+  rate-limited Metrolinx API (dozens per suite run).
+
+Fix (verified: the failing test passes with the key pinned empty):
+`os.environ.setdefault("GTFS_RT_API_KEY", "")` in `tests/conftest.py`,
+same pattern and rationale as the existing `DATABASE_URL` pin.  Belt and
+braces: also patch `api.main.poll_all` in the `client` fixture so no
+future config path can reintroduce network I/O in unit tests.
+
+### Reliability decay is a no-op below ~10 counts  [MEDIUM-HIGH]
+
+`decay_reliability_records` scales integer counters with
+`CAST(ROUND(x * :f) AS INT)` where `f = 0.5 ** (1/14) ≈ 0.9517`.  Any
+counter value `v` with `v · (1 − f) < 0.5` — i.e. **every value ≤ 10** —
+rounds back to itself and never decays; larger counters decay down to
+~10 and freeze there.  The half-life therefore does not apply to exactly
+the sparse-data case it was built for: a record with
+`scheduled=1, observed=0` (one recorded no-show) scores risk 1.0
+permanently, and seeded counters converge to ~10 instead of fading.
+Options: make the counter columns Float (simplest — `_score_record`
+already divides), carry the fractional remainder in a new column, or
+store per-day rows and aggregate over the window at read time.
+
+### RT snapshot dicts are read from worker threads while the poller mutates them  [MEDIUM]
+
+`_score_routes_blocking` runs in `asyncio.to_thread` and, via
+`compute_live_risk` → `_same_route_cancellations` /` _alerts_for`,
+iterates `trip_updates` / `service_alerts` while `poll_trip_updates` /
+`poll_service_alerts` do `clear()` + `update()/extend()` on the event
+loop.  A poll landing mid-iteration raises
+`RuntimeError: dictionary changed size during iteration` → a 500 on
+`/routes` (and `/alerts` — a sync-def endpoint running in the
+threadpool — can serve a momentarily empty list).  Low probability per
+request but guaranteed eventually at 30 s polling under load.  Fix:
+have pollers build the new dict and swap via a module-level holder
+object (readers grab a reference snapshot), or guard both sides with a
+lock, or iterate over `list(...)` copies inside the scoring path.
+
+### `/routes` returns strictly dominated routes  [MEDIUM]
+
+Live example (Sat 2026-07-11, GL → UN, departure 09:00): all five
+results depart 16:08; #1 arrives 17:35 with 0 transfers, #2–#5 all
+arrive 20:35 with 2 transfers — four results that are worse than #1 on
+every axis.  Dedup is by trip signature only; there is no dominance
+pruning.  Drop any route whose (departure ≥, arrival ≥, transfers ≥,
+risk ≥) another's, and consider sorting the survivors by arrival time —
+today's order is Yen's path weight, so the UI's "#1" is not necessarily
+the earliest or the best.  Follow-up: with dominated routes pruned,
+`_fill_later_departures` would naturally surface later departures as
+the extra options, which is far more useful to a rider.
+
+### Smaller findings  [LOW]
+
+- `total_travel_seconds` measures first-trip departure → last-trip
+  arrival, so leading/trailing *walk* legs add nothing to the reported
+  door-to-door duration (`routing/engine.py`).
+- LLM explanations are never cached — identical journeys re-run
+  Ollama/Gemini per request; the `find_routes` cache doesn't help.  A
+  small TTL cache keyed on the scored-route signature would do.
+- `search_stops` interpolates the user query into `ILIKE` without
+  escaping `%`/`_` — not injection (bound param), but a stray `%`
+  changes match semantics.
+- Rate limiting keys on `request.client.host`; behind any reverse proxy
+  all callers share one bucket (fine for the documented single-worker
+  local deployment — revisit with X-Forwarded-For if ever proxied).
+- `db/session.py` `get_session()` is a generator but is annotated
+  `-> Session`; should be `Iterator[Session]`.
+- `_parse_stops` aborts the whole ingest on a blank `stop_lat`/`stop_lon`
+  (`float("")`) — pre-commit, so previous data survives, but a targeted
+  skip-and-warn (like the trip/stop-time parsers) would be friendlier.
+
+### Verified healthy in this pass
+
+- 337/338 unit tests pass (the 1 failure is the RT-key leak above);
+  ruff clean.
+- Live stack: `/health` reports graph built (889 nodes / 3,955 edges),
+  5,198 seeded reliability records; `/stops` and `/routes` exercised
+  end-to-end by the frontend's new Playwright suite (5/5 passing) —
+  stop search, route planning with risk badges, selection, persistence.
+- Timezone handling, travel-time risk keying, no-show sweep, decay
+  scheduling, cache bounding, 202 ingest, and the security items from
+  passes 1–7 all re-read clean; their regression tests pass.
 
 ## Correctness
 
