@@ -232,17 +232,13 @@ adopting Alembic instead of manual SQL.
 
 ## Performance (later)
 
-### Ingest memory footprint
+### ✅ Ingest memory footprint (done 2026-07-10)
 
-`parse_and_store` materialises the full stop_times CSV as pandas → dicts →
-~2M ORM objects in a list before one `bulk_save_objects`.  Works today but
-peaks at multiple GB.  Chunked inserts (e.g. 50k rows per flush, or
-`session.execute(insert(StopTime), dicts)` in batches) would flatten the
-spike.
+> `_parse_stop_times` iterates `df.itertuples` and saves in 50k-row chunks
+> instead of materialising ~2M dicts + ORM objects at once.
 
-### Batch historical reliability lookups
+### ✅ Batch historical reliability lookups (done 2026-07-10)
 
-`_score_routes_blocking` calls `get_historical_reliability` once per trip
-leg — up to ~5 routes × several legs of point queries per request.  One
-`IN`-query over all (route_id, stop_id, bucket) triples for the request,
-then a dict lookup per leg.
+> `get_historical_reliability_batch` fetches every (route, stop, bucket)
+> triple for the request in one tuple-`IN` query; `_score_routes_blocking`
+> falls back to `NEUTRAL_PRIOR` for missing triples.

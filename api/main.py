@@ -66,9 +66,10 @@ from ingestion.gtfs_static import refresh_static_data
 from ingestion.seed_reliability import seed_from_static
 from llm.explainer import explain_routes
 from reliability.historical import (
+    NEUTRAL_PRIOR,
     classify_time_bucket,
     decay_reliability_records,
-    get_historical_reliability,
+    get_historical_reliability_batch,
 )
 from reliability.live import compute_live_risk, get_live_delay
 from routing.engine import count_transfers, find_routes, total_travel_seconds, total_walk_metres
@@ -546,6 +547,26 @@ def _score_routes_blocking(
     query_dt = datetime.now(AGENCY_TZ).replace(tzinfo=None)
     travel_day = departure_dt.date()
 
+    def _leg_dt(leg: dict[str, Any]) -> datetime:
+        # The leg's scheduled departure on the travel date — GTFS times may
+        # exceed 24:00:00, so timedelta rolls into the next day.  Risk is
+        # keyed to when the bus runs, not when the query is made.
+        return datetime(travel_day.year, travel_day.month, travel_day.day) + timedelta(
+            seconds=hms_to_seconds(leg["departure_time"])
+        )
+
+    # One historical-reliability query for every trip leg in the response
+    # (up to MAX_ROUTES × legs point queries otherwise).
+    hist_by_key = get_historical_reliability_batch(
+        [
+            (leg["route_id"], leg["from_stop_id"], classify_time_bucket(_leg_dt(leg)))
+            for route_legs in routes
+            for leg in route_legs
+            if leg["kind"] == "trip"
+        ],
+        session,
+    )
+
     scored_routes: list[dict[str, Any]] = []
     for route_legs in routes:
         scored_legs = []
@@ -556,14 +577,10 @@ def _score_routes_blocking(
                 scored_legs.append(leg)
                 continue
 
-            # The leg's scheduled departure on the travel date — GTFS times
-            # may exceed 24:00:00, so timedelta rolls into the next day.
-            # Risk is keyed to when the bus runs, not when the query is made.
-            leg_dt = datetime(travel_day.year, travel_day.month, travel_day.day) + timedelta(
-                seconds=hms_to_seconds(leg["departure_time"])
-            )
-            hist = get_historical_reliability(
-                leg["route_id"], leg["from_stop_id"], classify_time_bucket(leg_dt), session
+            leg_dt = _leg_dt(leg)
+            hist = hist_by_key.get(
+                (leg["route_id"], leg["from_stop_id"], classify_time_bucket(leg_dt)),
+                NEUTRAL_PRIOR,
             )
             live = compute_live_risk(
                 route_id=leg["route_id"],

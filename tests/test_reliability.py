@@ -427,6 +427,62 @@ def hist_db():
 
 
 # ---------------------------------------------------------------------------
+# get_historical_reliability_batch
+# ---------------------------------------------------------------------------
+
+class TestGetHistoricalReliabilityBatch:
+    def test_matches_single_lookups(self, hist_db):
+        from reliability.historical import get_historical_reliability_batch
+
+        hist_db.add(ReliabilityRecord(
+            route_id="R1", stop_id="S1", time_bucket="weekday_am_peak",
+            scheduled_departures=100, observed_departures=80,
+            cancellation_count=4, total_delay_seconds=6000,
+            updated_at="2026-07-01T00:00:00+00:00",
+        ))
+        hist_db.add(ReliabilityRecord(
+            route_id="R2", stop_id="S2", time_bucket="weekend",
+            scheduled_departures=10, observed_departures=10,
+            cancellation_count=0, total_delay_seconds=0,
+            updated_at="2026-07-01T00:00:00+00:00",
+        ))
+        hist_db.commit()
+
+        keys = [
+            ("R1", "S1", "weekday_am_peak"),
+            ("R2", "S2", "weekend"),
+            ("R9", "S9", "weekday_offpeak"),  # no record
+        ]
+        batch = get_historical_reliability_batch(keys, hist_db)
+
+        for key in keys[:2]:
+            assert batch[key] == pytest.approx(
+                get_historical_reliability(*key, hist_db)
+            )
+        assert ("R9", "S9", "weekday_offpeak") not in batch  # caller uses prior
+
+    def test_newest_record_wins_duplicates(self, hist_db):
+        from reliability.historical import get_historical_reliability_batch
+
+        for updated, observed in [("2026-07-01T00:00:00", 0), ("2026-07-09T00:00:00", 10)]:
+            hist_db.add(ReliabilityRecord(
+                route_id="R1", stop_id="S1", time_bucket="weekend",
+                scheduled_departures=10, observed_departures=observed,
+                cancellation_count=0, total_delay_seconds=0,
+                updated_at=updated,
+            ))
+        hist_db.commit()
+
+        batch = get_historical_reliability_batch([("R1", "S1", "weekend")], hist_db)
+        # Newest record (perfect 10/10) wins, matching the single lookup.
+        assert batch[("R1", "S1", "weekend")] == pytest.approx(1.0)
+
+    def test_empty_keys(self, hist_db):
+        from reliability.historical import get_historical_reliability_batch
+        assert get_historical_reliability_batch([], hist_db) == {}
+
+
+# ---------------------------------------------------------------------------
 # decay_reliability_records — rolling-window enforcement
 # ---------------------------------------------------------------------------
 

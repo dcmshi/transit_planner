@@ -45,6 +45,24 @@ def classify_time_bucket(dt: datetime) -> str:
     return "weekday_offpeak"
 
 
+NEUTRAL_PRIOR = 0.8
+
+
+def _score_record(record: ReliabilityRecord) -> float:
+    """0–1 reliability score from a record's counters (see module docstring)."""
+    observed_rate = record.observed_departures / record.scheduled_departures
+    cancel_rate = record.cancellation_count / record.scheduled_departures
+    avg_delay_min = (
+        record.total_delay_seconds / record.observed_departures / 60
+        if record.observed_departures > 0 else 0
+    )
+
+    # Simple weighted combination — tunable
+    delay_penalty = min(avg_delay_min / 30, 1.0) * 0.2  # up to 0.2 penalty at 30-min avg delay
+    score = observed_rate * (1 - cancel_rate) - delay_penalty
+    return max(0.0, min(1.0, score))
+
+
 def get_historical_reliability(
     route_id: str,
     stop_id: str,
@@ -66,19 +84,43 @@ def get_historical_reliability(
             "No historical data for route=%s stop=%s bucket=%s; using neutral prior.",
             route_id, stop_id, time_bucket,
         )
-        return 0.8  # neutral prior
+        return NEUTRAL_PRIOR
+    return _score_record(record)
 
-    observed_rate = record.observed_departures / record.scheduled_departures
-    cancel_rate = record.cancellation_count / record.scheduled_departures
-    avg_delay_min = (
-        record.total_delay_seconds / record.observed_departures / 60
-        if record.observed_departures > 0 else 0
+
+def get_historical_reliability_batch(
+    keys: list[tuple[str, str, str]],
+    session: Session,
+) -> dict[tuple[str, str, str], float]:
+    """
+    Batch variant of get_historical_reliability: one query for all
+    (route_id, stop_id, time_bucket) triples instead of one per trip leg.
+    Missing triples are simply absent — callers fall back to NEUTRAL_PRIOR.
+    """
+    unique = list(set(keys))
+    if not unique:
+        return {}
+    from sqlalchemy import tuple_
+
+    records = (
+        session.query(ReliabilityRecord)
+        .filter(
+            tuple_(
+                ReliabilityRecord.route_id,
+                ReliabilityRecord.stop_id,
+                ReliabilityRecord.time_bucket,
+            ).in_(unique)
+        )
+        # Ascending so the newest record per triple wins the dict overwrite,
+        # matching the single-lookup ORDER BY updated_at DESC ... first().
+        .order_by(ReliabilityRecord.updated_at.asc())
+        .all()
     )
-
-    # Simple weighted combination — tunable
-    delay_penalty = min(avg_delay_min / 30, 1.0) * 0.2  # up to 0.2 penalty at 30-min avg delay
-    score = observed_rate * (1 - cancel_rate) - delay_penalty
-    return max(0.0, min(1.0, score))
+    return {
+        (r.route_id, r.stop_id, r.time_bucket): _score_record(r)
+        for r in records
+        if r.scheduled_departures
+    }
 
 
 def record_observed_departure(

@@ -192,23 +192,34 @@ def _parse_stop_times(df: pd.DataFrame, session: Session) -> None:
     # SQLite silently ignores FK violations; PostgreSQL raises immediately.
     valid_trips = {r[0] for r in session.query(Trip.trip_id).all()}
     valid_stops = {r[0] for r in session.query(Stop.stop_id).all()}
-    records = []
+    # stop_times is by far the largest feed file (~2M rows for GO Transit) —
+    # iterate tuples and save in chunks rather than materialising 2M dicts
+    # plus 2M ORM objects at once (multi-GB peak).
+    chunk_size = 50_000
+    batch: list[StopTime] = []
+    loaded = 0
     skipped = 0
-    for row in df.to_dict("records"):
-        if row["trip_id"] not in valid_trips or row["stop_id"] not in valid_stops:
+    for row in df.itertuples(index=False):
+        if row.trip_id not in valid_trips or row.stop_id not in valid_stops:
             skipped += 1
             continue
-        records.append(StopTime(
-            trip_id=row["trip_id"],
-            arrival_time=row["arrival_time"],
-            departure_time=row["departure_time"],
-            stop_id=row["stop_id"],
-            stop_sequence=int(row["stop_sequence"]),
+        batch.append(StopTime(
+            trip_id=row.trip_id,
+            arrival_time=row.arrival_time,
+            departure_time=row.departure_time,
+            stop_id=row.stop_id,
+            stop_sequence=int(row.stop_sequence),
         ))
+        if len(batch) >= chunk_size:
+            session.bulk_save_objects(batch)
+            loaded += len(batch)
+            batch = []
+    if batch:
+        session.bulk_save_objects(batch)
+        loaded += len(batch)
     if skipped:
         logger.warning("Skipped %d stop_times with invalid trip_id or stop_id.", skipped)
-    session.bulk_save_objects(records)
-    logger.info("Loaded %d stop times.", len(records))
+    logger.info("Loaded %d stop times.", loaded)
 
 
 def _parse_calendar(df: pd.DataFrame, session: Session) -> None:

@@ -355,7 +355,7 @@ class TestGetRoutes:
     def test_valid_route_returns_200(self, client):
         with (
             patch("api.main.find_routes", return_value=[_FAKE_ROUTE]),
-            patch("api.main.get_historical_reliability", return_value=0.8),
+            patch("api.main.get_historical_reliability_batch", return_value={}),
             patch("api.main.compute_live_risk", return_value=_FAKE_LIVE_RISK),
         ):
             resp = client.get(
@@ -367,7 +367,7 @@ class TestGetRoutes:
     def test_response_contains_routes_key(self, client):
         with (
             patch("api.main.find_routes", return_value=[_FAKE_ROUTE]),
-            patch("api.main.get_historical_reliability", return_value=0.8),
+            patch("api.main.get_historical_reliability_batch", return_value={}),
             patch("api.main.compute_live_risk", return_value=_FAKE_LIVE_RISK),
         ):
             body = client.get(
@@ -381,7 +381,7 @@ class TestGetRoutes:
     def test_route_has_expected_fields(self, client):
         with (
             patch("api.main.find_routes", return_value=[_FAKE_ROUTE]),
-            patch("api.main.get_historical_reliability", return_value=0.8),
+            patch("api.main.get_historical_reliability_batch", return_value={}),
             patch("api.main.compute_live_risk", return_value=_FAKE_LIVE_RISK),
         ):
             route = client.get(
@@ -397,7 +397,7 @@ class TestGetRoutes:
     def test_total_travel_seconds_correct(self, client):
         with (
             patch("api.main.find_routes", return_value=[_FAKE_ROUTE]),
-            patch("api.main.get_historical_reliability", return_value=0.8),
+            patch("api.main.get_historical_reliability_batch", return_value={}),
             patch("api.main.compute_live_risk", return_value=_FAKE_LIVE_RISK),
         ):
             route = client.get(
@@ -410,7 +410,7 @@ class TestGetRoutes:
     def test_risk_score_and_label_present(self, client):
         with (
             patch("api.main.find_routes", return_value=[_FAKE_ROUTE]),
-            patch("api.main.get_historical_reliability", return_value=0.8),
+            patch("api.main.get_historical_reliability_batch", return_value={}),
             patch("api.main.compute_live_risk", return_value=_FAKE_LIVE_RISK),
         ):
             route = client.get(
@@ -427,7 +427,7 @@ class TestGetRoutes:
         weekday_am_peak), not from the wall clock at query time."""
         with (
             patch("api.main.find_routes", return_value=[_FAKE_ROUTE]),
-            patch("api.main.get_historical_reliability", return_value=0.8) as mock_hist,
+            patch("api.main.get_historical_reliability_batch", return_value={}) as mock_hist,
             patch("api.main.compute_live_risk", return_value=_FAKE_LIVE_RISK) as mock_live,
         ):
             resp = client.get(
@@ -438,7 +438,8 @@ class TestGetRoutes:
         assert resp.status_code == 200
         # _FAKE_ROUTE departs 08:00:00 on 2026-02-11 → weekday_am_peak,
         # regardless of when this test happens to run.
-        assert mock_hist.call_args.args[2] == "weekday_am_peak"
+        batch_keys = mock_hist.call_args.args[0]
+        assert batch_keys == [("GT1", "UN", "weekday_am_peak")]
         assert mock_live.call_args.kwargs["scheduled_dt"] == datetime(2026, 2, 11, 8, 0, 0)
 
     def test_live_delay_adds_expected_times_same_day(self, client):
@@ -448,7 +449,7 @@ class TestGetRoutes:
         today = _dt.now(AGENCY_TZ).strftime("%Y-%m-%d")
         with (
             patch("api.main.find_routes", return_value=[_FAKE_ROUTE]),
-            patch("api.main.get_historical_reliability", return_value=0.8),
+            patch("api.main.get_historical_reliability_batch", return_value={}),
             patch("api.main.compute_live_risk", return_value=_FAKE_LIVE_RISK),
             patch("api.main.get_live_delay", return_value=300),
         ):
@@ -466,7 +467,7 @@ class TestGetRoutes:
         delay must not produce expected times for a future travel date."""
         with (
             patch("api.main.find_routes", return_value=[_FAKE_ROUTE]),
-            patch("api.main.get_historical_reliability", return_value=0.8),
+            patch("api.main.get_historical_reliability_batch", return_value={}),
             patch("api.main.compute_live_risk", return_value=_FAKE_LIVE_RISK),
             patch("api.main.get_live_delay", return_value=300),
         ):
@@ -483,7 +484,7 @@ class TestGetRoutes:
         """HH:MM (without seconds) should be accepted."""
         with (
             patch("api.main.find_routes", return_value=[_FAKE_ROUTE]),
-            patch("api.main.get_historical_reliability", return_value=0.8),
+            patch("api.main.get_historical_reliability_batch", return_value={}),
             patch("api.main.compute_live_risk", return_value=_FAKE_LIVE_RISK),
         ):
             resp = client.get(
@@ -849,7 +850,7 @@ class TestRoutesCache:
             return [fake_legs]
 
         monkeypatch.setattr(main_mod, "find_routes", fake_find_routes)
-        monkeypatch.setattr(main_mod, "get_historical_reliability", lambda *a, **kw: 0.8)
+        monkeypatch.setattr(main_mod, "get_historical_reliability_batch", lambda *a, **kw: {})
         monkeypatch.setattr(main_mod, "compute_live_risk", lambda **kw: {
             "risk_score": 0.1, "risk_label": "Low", "modifiers": [], "is_cancelled": False,
         })
