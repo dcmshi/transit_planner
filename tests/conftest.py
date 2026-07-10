@@ -16,3 +16,7 @@ DATABASE_URL=postgresql+... uv run pytest tests/integration/ -q).
 import os
 
 os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
+
+# The unit suite fires hundreds of requests from one "client IP" — disable
+# the per-IP rate limit.  The rate-limit tests patch the constant back on.
+os.environ.setdefault("RATE_LIMIT_PER_MINUTE", "0")

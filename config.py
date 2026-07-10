@@ -59,6 +59,12 @@ CORS_ORIGINS: list[str] = [
 API_HOST: str = os.getenv("API_HOST", "0.0.0.0")
 API_PORT: int = int(os.getenv("API_PORT", "8000"))
 
+# Rate limiting — per-IP sliding-window cap on the public endpoints
+# (/routes, /stops).  Unique route queries cost real CPU (Yen's +
+# scheduling), so a hostile client could exhaust the worker pool.
+# 0 disables (tests / trusted networks).
+RATE_LIMIT_PER_MINUTE: int = int(os.getenv("RATE_LIMIT_PER_MINUTE", "100"))
+
 # Routing constraints
 MAX_ROUTES: int = int(os.getenv("MAX_ROUTES", "5"))
 MAX_TRANSFERS: int = int(os.getenv("MAX_TRANSFERS", "2"))

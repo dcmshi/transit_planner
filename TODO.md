@@ -131,16 +131,14 @@ vs a weighted sum once enough real observations accumulate.
 
 ## API & operations
 
-### Rate limiting on public endpoints
+### ✅ Rate limiting on public endpoints (done 2026-07-10)
 
-No rate limiting exists on `/routes` or `/stops`.  The route cache absorbs
-repeated identical queries, but unique route queries each cost real CPU
-(Yen's + scheduling), so a hostile client could exhaust the worker pool.
-Only matters if the API faces the public internet.
-
-- Suggested: [slowapi](https://github.com/laurentS/slowapi) middleware,
-  per-IP, e.g. 100 req/min on `/routes`, looser on `/health`.
-- `/ingest/*` is already gated by `INGEST_API_KEY` when set.
+> Implemented as a dependency-free per-IP sliding window (`_rate_limit` in
+> `api/main.py`, `RATE_LIMIT_PER_MINUTE` env, default 100/min, 0 disables)
+> on `/routes` and `/stops`; `/health` and `/ingest/*` (API-key-gated)
+> exempt.  In-process state is correct for the single-worker deployment;
+> revisit (slowapi + shared store) if the app ever scales to multiple
+> workers.
 
 ### Bound the route cache; consider negative caching
 

@@ -193,6 +193,39 @@ class TestStopsSearch:
 
 
 # ---------------------------------------------------------------------------
+# Rate limiting
+# ---------------------------------------------------------------------------
+
+class TestRateLimit:
+    @pytest.fixture(autouse=True)
+    def _clean_buckets(self):
+        import api.main as main_mod
+        main_mod._rate_buckets.clear()
+        yield
+        main_mod._rate_buckets.clear()
+
+    def test_requests_over_limit_get_429(self, client):
+        with patch("api.main.RATE_LIMIT_PER_MINUTE", 3):
+            statuses = [
+                client.get("/stops?query=Guelph").status_code for _ in range(4)
+            ]
+        assert statuses[:3] == [200, 200, 200]
+        assert statuses[3] == 429
+
+    def test_limit_disabled_when_zero(self, client):
+        with patch("api.main.RATE_LIMIT_PER_MINUTE", 0):
+            statuses = [
+                client.get("/stops?query=Guelph").status_code for _ in range(5)
+            ]
+        assert statuses == [200] * 5
+
+    def test_health_not_rate_limited(self, client):
+        with patch("api.main.RATE_LIMIT_PER_MINUTE", 1):
+            client.get("/stops?query=Guelph")  # consume the budget
+            assert client.get("/health").status_code == 200
+
+
+# ---------------------------------------------------------------------------
 # GET /routes
 # ---------------------------------------------------------------------------
 

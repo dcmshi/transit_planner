@@ -21,12 +21,14 @@ Endpoints (v1):
 import asyncio
 import logging
 import threading
+import time
+from collections import deque
 from contextlib import asynccontextmanager
 from datetime import datetime, date as Date, timedelta, timezone
 from typing import Any
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from fastapi import Depends, FastAPI, HTTPException, Query, Security
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Security
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import APIKeyHeader
 from sqlalchemy.orm import Session
@@ -41,7 +43,7 @@ from api.schemas import (
 from config import (
     AGENCY_TZ, CORS_ORIGINS, GTFS_REFRESH_HOURS, GTFS_RT_ALERTS_URL, GTFS_RT_API_KEY,
     GTFS_RT_POLL_SECONDS, GTFS_RT_TRIP_UPDATES_URL, GTFS_RT_VEHICLE_POSITIONS_URL,
-    GTFS_STATIC_URL, INGEST_API_KEY, MAX_ROUTES,
+    GTFS_STATIC_URL, INGEST_API_KEY, MAX_ROUTES, RATE_LIMIT_PER_MINUTE,
 )
 from db.session import SessionLocal, get_session, init_db
 from graph.builder import build_graph, get_graph, get_last_built_at
@@ -75,6 +77,40 @@ def _require_ingest_key(key: str | None = Security(_ingest_key_header)) -> None:
         raise HTTPException(status_code=401, detail="Invalid or missing X-API-Key header.")
 
 scheduler = AsyncIOScheduler()
+
+# ---------------------------------------------------------------------------
+# Rate limiting — per-IP sliding window on the public endpoints.
+# In-process state is sufficient: the app runs a single uvicorn worker
+# (APScheduler constraint, see README known limitations).
+# ---------------------------------------------------------------------------
+_rate_buckets: dict[str, "deque[float]"] = {}
+_rate_lock = threading.Lock()
+_RATE_WINDOW_SECONDS = 60.0
+
+
+def _rate_limit(request: Request) -> None:
+    """FastAPI dependency: reject with 429 when the caller's IP has made
+    more than RATE_LIMIT_PER_MINUTE requests in the sliding window."""
+    if RATE_LIMIT_PER_MINUTE <= 0:
+        return
+    ip = request.client.host if request.client else "unknown"
+    now = time.monotonic()
+    with _rate_lock:
+        bucket = _rate_buckets.get(ip)
+        if bucket is None:
+            bucket = _rate_buckets[ip] = deque()
+        while bucket and now - bucket[0] > _RATE_WINDOW_SECONDS:
+            bucket.popleft()
+        if len(bucket) >= RATE_LIMIT_PER_MINUTE:
+            raise HTTPException(
+                status_code=429,
+                detail="Rate limit exceeded — try again shortly.",
+            )
+        bucket.append(now)
+        # Opportunistic cleanup so idle IPs don't accumulate forever.
+        if len(_rate_buckets) > 10_000:
+            for key in [k for k, b in _rate_buckets.items() if not b]:
+                del _rate_buckets[key]
 
 # ---------------------------------------------------------------------------
 # Route cache — keyed by (origin, destination, YYYY-MM-DD, HH:MM)
@@ -336,6 +372,7 @@ def health(session: Session = Depends(get_session)) -> HealthResponse:
 def search_stops(
     query: str = Query(..., min_length=2, max_length=128, description="Stop name substring to search"),
     session: Session = Depends(get_session),
+    _: None = Depends(_rate_limit),
 ) -> list[StopResult]:
     """Search stops by name substring."""
     from collections import defaultdict
@@ -493,6 +530,7 @@ async def get_routes(
     ),
     explain: bool = Query(False, description="Include LLM plain-language explanation"),
     session: Session = Depends(get_session),
+    _: None = Depends(_rate_limit),
 ) -> RoutesResponse:
     """
     Return top-N scored routes from origin to destination.
