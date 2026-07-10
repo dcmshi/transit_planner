@@ -21,7 +21,8 @@ from datetime import datetime, timezone
 from typing import Optional
 
 import networkx as nx
-from sqlalchemy import select as sa_select, text
+from sqlalchemy import select as sa_select
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from config import DATABASE_URL, MAX_WALK_METRES, WALK_SPEED_KPH

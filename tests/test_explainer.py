@@ -6,9 +6,9 @@ server is needed.  LLM_PROVIDER / GEMINI_API_KEY / OLLAMA_* config values
 are monkey-patched per-test via importlib or direct module attribute writes.
 """
 
-import json
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 import llm.explainer as explainer_mod
 from llm.explainer import (
@@ -18,7 +18,6 @@ from llm.explainer import (
     _route_number,
     explain_routes,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers

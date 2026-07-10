@@ -20,7 +20,6 @@ from typing import Any
 from gtfs_time import hms_to_seconds as _hms_to_seconds
 from ingestion.gtfs_realtime import (
     ServiceAlertState,
-    TripUpdateState,
     service_alerts,
     trip_updates,
     vehicle_positions,

@@ -6,15 +6,16 @@ reliability.live       — compute_live_risk, which reads module-level
                          GTFS-RT state; patched via unittest.mock.
 """
 
-import pytest
 from datetime import datetime, timezone
 from unittest.mock import patch
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from db.models import Base, ReliabilityRecord
+from ingestion.gtfs_realtime import ServiceAlertState, TripUpdateState
 from reliability.historical import (
     classify_time_bucket,
     get_historical_reliability,
@@ -28,8 +29,6 @@ from reliability.live import (
     WEEKEND_RISK_BUMP,
     compute_live_risk,
 )
-from ingestion.gtfs_realtime import ServiceAlertState, TripUpdateState
-
 
 # ---------------------------------------------------------------------------
 # classify_time_bucket

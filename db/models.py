@@ -6,9 +6,7 @@ because the GTFS spec allows values >= 24:00:00 for trips crossing midnight.
 Application code converts to integer seconds-past-midnight when needed.
 """
 
-from sqlalchemy import (
-    Boolean, Column, Float, ForeignKey, Index, Integer, String
-)
+from sqlalchemy import Boolean, Column, Float, ForeignKey, Index, Integer, String
 from sqlalchemy.orm import declarative_base, relationship
 
 from config import DATABASE_URL

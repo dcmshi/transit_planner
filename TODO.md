@@ -174,25 +174,24 @@ vs a weighted sum once enough real observations accumulate.
 
 ## Developer experience
 
-### CI
+### ✅ CI (done 2026-07-10)
 
-No `.github/workflows/` — the 295-test suite only runs when someone
-remembers to.  Minimum: GitHub Actions job with `uv sync` + `pytest`
-(SQLite unit suite).  Nice-to-have: second job running
-`tests/integration/` against a `postgis/postgis` service container.
+> `.github/workflows/ci.yml`: lint + unit tests (uv, SQLite) on every
+> push/PR, plus an integration job running `tests/integration/` against a
+> `postgis/postgis` service container with the schema created via
+> `init_db()`.
 
-### Linter / formatter / type checker
+### ✅ Linter (done 2026-07-10)
 
-No ruff/mypy/formatter config anywhere.  Suggested: `ruff check` + `ruff
-format` (config in `pyproject.toml`), wired into CI.  mypy optional —
-the codebase is already well-annotated, so it's mostly free coverage.
+> ruff configured in `pyproject.toml` (E4/E7/E9, F, I; line-length 100,
+> E501 not selected) and wired into CI; codebase passes clean.  mypy
+> remains optional future work.
 
-### `requirements.txt` is stale — delete it
+### ✅ `requirements.txt` deleted (done 2026-07-10)
 
-It contradicts `pyproject.toml`: lists `anthropic` (no longer used —
-explainer is Ollama/Gemini via httpx) and omits `psycopg`, `geoalchemy2`,
-`shapely`.  uv + `uv.lock` is the source of truth; delete the file or
-generate it with `uv export` if something still needs it.
+> It contradicted `pyproject.toml` (listed unused `anthropic`, omitted
+> `psycopg`/`geoalchemy2`/`shapely`).  uv + `uv.lock` is the source of
+> truth; regenerate with `uv export` if ever needed.
 
 ### Split `api/main.py` into modules
 

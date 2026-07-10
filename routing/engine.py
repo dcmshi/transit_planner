@@ -443,7 +443,7 @@ def _passes_filters(legs: Route) -> bool:
         between the arriving trip's last arrival and the connecting trip's
         first departure.
     """
-    trip_legs = [l for l in legs if l["kind"] == "trip"]
+    trip_legs = [leg for leg in legs if leg["kind"] == "trip"]
     if not trip_legs:
         return False
 
@@ -504,7 +504,7 @@ def total_travel_seconds(legs: Route) -> int:
     departure.  This includes transfer wait times, giving the true door-to-door
     experience rather than the sum of in-vehicle and walking time only.
     """
-    trip_legs = [l for l in legs if l["kind"] == "trip"]
+    trip_legs = [leg for leg in legs if leg["kind"] == "trip"]
     if not trip_legs:
         return 0
     first_dep = _hms_to_seconds(trip_legs[0]["departure_time"])
@@ -519,7 +519,7 @@ def count_transfers(legs: Route) -> int:
     A transfer is counted each time the route_id changes between consecutive
     trip legs.  Walk legs are ignored (ADR-008).
     """
-    trip_legs = [l for l in legs if l["kind"] == "trip"]
+    trip_legs = [leg for leg in legs if leg["kind"] == "trip"]
     transfers = 0
     for i in range(1, len(trip_legs)):
         if trip_legs[i]["route_id"] != trip_legs[i - 1]["route_id"]:
@@ -529,7 +529,7 @@ def count_transfers(legs: Route) -> int:
 
 def total_walk_metres(legs: Route) -> float:
     """Total walking distance across all walk legs in metres."""
-    return sum(l.get("distance_m", 0.0) for l in legs if l["kind"] == "walk")
+    return sum(leg.get("distance_m", 0.0) for leg in legs if leg["kind"] == "walk")
 
 
 def _fill_later_departures(
@@ -567,7 +567,7 @@ def _fill_later_departures(
     # Seed each path's not_before with 1 second past its first trip departure.
     path_not_before: list[int | None] = []
     for legs in routes:
-        first_trip = next((l for l in legs if l["kind"] == "trip"), None)
+        first_trip = next((leg for leg in legs if leg["kind"] == "trip"), None)
         if first_trip:
             path_not_before.append(_hms_to_seconds(first_trip["departure_time"]) + 1)
         else:
@@ -590,7 +590,7 @@ def _fill_later_departures(
             if legs is None:
                 path_not_before[i] = None  # no more trips on this path today
                 continue
-            first_trip = next((l for l in legs if l["kind"] == "trip"), None)
+            first_trip = next((leg for leg in legs if leg["kind"] == "trip"), None)
             if first_trip is None:
                 path_not_before[i] = None
                 continue

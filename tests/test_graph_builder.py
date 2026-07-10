@@ -5,23 +5,23 @@ _haversine_metres and _hms_to_seconds are private helpers but are
 tested directly since they encapsulate meaningful logic.
 """
 
-import pytest
 import networkx as nx
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+import graph.builder as builder_mod
+from config import MAX_WALK_METRES
 from db.models import Base, Route, Stop, StopTime, Trip
 from graph.builder import (
-    _haversine_metres,
     _add_walk_edges_bisect,
+    _haversine_metres,
     _hms_to_seconds,
     build_graph,
     get_graph,
     get_projected_graph,
 )
-import graph.builder as builder_mod
-from config import MAX_WALK_METRES
 
 
 class TestHaversineMetres:
@@ -148,7 +148,6 @@ class TestAddWalkEdges:
 
     def test_matches_brute_force(self):
         """Spatial index and O(n²) brute force produce identical edge sets."""
-        import math
 
         # 20 stops scattered around Toronto — mix of nearby and distant pairs.
         import random
@@ -168,8 +167,6 @@ class TestAddWalkEdges:
 
         # Brute-force reference
         from graph.builder import _haversine_metres
-        from config import WALK_SPEED_KPH
-        walk_speed_ms = WALK_SPEED_KPH * 1000 / 3600
         G_bf = nx.MultiDiGraph()
         for a in raw:
             for b in raw:

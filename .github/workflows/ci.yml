@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Install dependencies
+        run: uv sync --frozen
+      - name: Lint
+        run: uv run ruff check .
+      - name: Unit tests (SQLite)
+        run: uv run pytest -q
+
+  integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_DB: transit
+          POSTGRES_USER: transit
+          POSTGRES_PASSWORD: transit
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U transit -d transit"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+    env:
+      DATABASE_URL: postgresql+psycopg://transit:transit@localhost:5432/transit
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Install dependencies
+        run: uv sync --frozen
+      - name: Create schema
+        run: uv run python -c "from db.session import init_db; init_db()"
+      - name: Integration tests (PostGIS)
+        run: uv run pytest tests/integration/ -q

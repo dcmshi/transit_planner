@@ -1,7 +1,8 @@
 from __future__ import annotations
-from typing import Annotated, Literal
-from pydantic import BaseModel, Field
 
+from typing import Annotated, Literal
+
+from pydantic import BaseModel, Field
 
 # ---------------------------------------------------------------------------
 # GET /stops

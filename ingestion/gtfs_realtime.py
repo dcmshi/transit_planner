@@ -14,7 +14,7 @@ import asyncio
 import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -26,7 +26,6 @@ from config import (
     AGENCY_TZ,
     GTFS_RT_ALERTS_URL,
     GTFS_RT_API_KEY,
-    GTFS_RT_POLL_SECONDS,
     GTFS_RT_TRIP_UPDATES_URL,
     GTFS_RT_VEHICLE_POSITIONS_URL,
 )
@@ -470,7 +469,7 @@ def record_no_shows(session: Session) -> int:
     """
     global _last_noshow_sweep, _recorded_today
 
-    from db.models import ObservedTrip, StopTime, Trip
+    from db.models import ObservedTrip, StopTime
 
     if _polling_since is None:
         return 0

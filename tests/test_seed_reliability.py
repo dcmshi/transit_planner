@@ -6,17 +6,16 @@ so we can verify the aggregation and upsert logic without needing the full
 904-stop GO Transit dataset.
 """
 
-import pytest
-from datetime import date, datetime
+from datetime import date
 from unittest.mock import patch
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from db.models import Base, ReliabilityRecord, Stop, StopTime, Trip
+from db.models import Base, ReliabilityRecord, StopTime, Trip
 from ingestion.seed_reliability import _PRIORS, seed_from_static
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -75,9 +74,7 @@ class TestSeedFromStatic:
         db.commit()
 
         # today is far in the future — the seeder should use the feed's own dates
-        with patch("ingestion.seed_reliability.date") as mock_date:
-            mock_date.today.return_value = date(2030, 1, 1)
-            mock_date.side_effect = lambda *a, **kw: date(*a, **kw)
+        with patch("ingestion.seed_reliability._today", return_value=date(2030, 1, 1)):
             result = seed_from_static(db, window_days=7)
 
         # Falls back to feed data — still writes a record
@@ -90,9 +87,7 @@ class TestSeedFromStatic:
         _add_stop_time(db, "T1", "S1", 1, "08:00:00")
         db.commit()
 
-        with patch("ingestion.seed_reliability.date") as mock_date:
-            mock_date.today.return_value = date(2026, 2, 9)
-            mock_date.side_effect = lambda *a, **kw: date(*a, **kw)
+        with patch("ingestion.seed_reliability._today", return_value=date(2026, 2, 9)):
             written = seed_from_static(db, window_days=7)
 
         assert written == 1
@@ -112,9 +107,7 @@ class TestSeedFromStatic:
             _add_stop_time(db, f"T{i}", "S1", 1, "08:00:00")
         db.commit()
 
-        with patch("ingestion.seed_reliability.date") as mock_date:
-            mock_date.today.return_value = date(2026, 2, 9)
-            mock_date.side_effect = lambda *a, **kw: date(*a, **kw)
+        with patch("ingestion.seed_reliability._today", return_value=date(2026, 2, 9)):
             seed_from_static(db, window_days=1)
 
         record = db.query(ReliabilityRecord).filter_by(
@@ -133,9 +126,7 @@ class TestSeedFromStatic:
         _add_stop_time(db, "T_pm", "S1", 2, "16:00:00")  # pm_peak
         db.commit()
 
-        with patch("ingestion.seed_reliability.date") as mock_date:
-            mock_date.today.return_value = date(2026, 2, 9)
-            mock_date.side_effect = lambda *a, **kw: date(*a, **kw)
+        with patch("ingestion.seed_reliability._today", return_value=date(2026, 2, 9)):
             written = seed_from_static(db, window_days=1)
 
         assert written == 2
@@ -152,9 +143,7 @@ class TestSeedFromStatic:
         _add_stop_time(db, "T1", "S1", 1, "10:00:00")
         db.commit()
 
-        with patch("ingestion.seed_reliability.date") as mock_date:
-            mock_date.today.return_value = date(2026, 2, 7)
-            mock_date.side_effect = lambda *a, **kw: date(*a, **kw)
+        with patch("ingestion.seed_reliability._today", return_value=date(2026, 2, 7)):
             seed_from_static(db, window_days=1)
 
         record = db.query(ReliabilityRecord).filter_by(
@@ -169,9 +158,7 @@ class TestSeedFromStatic:
         _add_stop_time(db, "T1", "S1", 1, "08:00:00")
         db.commit()
 
-        with patch("ingestion.seed_reliability.date") as mock_date:
-            mock_date.today.return_value = date(2026, 2, 9)
-            mock_date.side_effect = lambda *a, **kw: date(*a, **kw)
+        with patch("ingestion.seed_reliability._today", return_value=date(2026, 2, 9)):
             first = seed_from_static(db, window_days=1)
             second = seed_from_static(db, window_days=1)
 
@@ -188,9 +175,7 @@ class TestSeedFromStatic:
                 _add_stop_time(db, trip_id, stop, 1, "08:00:00")
         db.commit()
 
-        with patch("ingestion.seed_reliability.date") as mock_date:
-            mock_date.today.return_value = date(2026, 2, 9)
-            mock_date.side_effect = lambda *a, **kw: date(*a, **kw)
+        with patch("ingestion.seed_reliability._today", return_value=date(2026, 2, 9)):
             written = seed_from_static(db, window_days=1)
 
         assert written == 4
@@ -202,9 +187,7 @@ class TestSeedFromStatic:
         _add_stop_time(db, "T1", "S1", 1, "08:00:00")
         db.commit()
 
-        with patch("ingestion.seed_reliability.date") as mock_date:
-            mock_date.today.return_value = date(2026, 2, 9)
-            mock_date.side_effect = lambda *a, **kw: date(*a, **kw)
+        with patch("ingestion.seed_reliability._today", return_value=date(2026, 2, 9)):
             seed_from_static(db, window_days=1)
 
         record = db.query(ReliabilityRecord).first()
@@ -225,9 +208,7 @@ class TestFillGapsOnly:
         _add_stop_time(db, "T1", "S1", 1, "08:00:00")
         db.commit()
 
-        with patch("ingestion.seed_reliability.date") as mock_date:
-            mock_date.today.return_value = date(2026, 2, 9)
-            mock_date.side_effect = lambda *a, **kw: date(*a, **kw)
+        with patch("ingestion.seed_reliability._today", return_value=date(2026, 2, 9)):
             # First seed — full overwrite
             seed_from_static(db, window_days=1, fill_gaps_only=False)
 
@@ -236,9 +217,7 @@ class TestFillGapsOnly:
         record.observed_departures = 999
         db.commit()
 
-        with patch("ingestion.seed_reliability.date") as mock_date:
-            mock_date.today.return_value = date(2026, 2, 9)
-            mock_date.side_effect = lambda *a, **kw: date(*a, **kw)
+        with patch("ingestion.seed_reliability._today", return_value=date(2026, 2, 9)):
             written = seed_from_static(db, window_days=1, fill_gaps_only=True)
 
         # Record should be unchanged — fill_gaps_only skipped it
@@ -254,9 +233,7 @@ class TestFillGapsOnly:
         db.commit()
 
         # No records yet — fill_gaps_only should insert
-        with patch("ingestion.seed_reliability.date") as mock_date:
-            mock_date.today.return_value = date(2026, 2, 9)
-            mock_date.side_effect = lambda *a, **kw: date(*a, **kw)
+        with patch("ingestion.seed_reliability._today", return_value=date(2026, 2, 9)):
             written = seed_from_static(db, window_days=1, fill_gaps_only=True)
 
         assert written == 1
@@ -269,18 +246,14 @@ class TestFillGapsOnly:
         _add_stop_time(db, "T1", "S1", 1, "08:00:00")
         db.commit()
 
-        with patch("ingestion.seed_reliability.date") as mock_date:
-            mock_date.today.return_value = date(2026, 2, 9)
-            mock_date.side_effect = lambda *a, **kw: date(*a, **kw)
+        with patch("ingestion.seed_reliability._today", return_value=date(2026, 2, 9)):
             seed_from_static(db, window_days=1, fill_gaps_only=False)
 
         record = db.query(ReliabilityRecord).first()
         record.observed_departures = 999
         db.commit()
 
-        with patch("ingestion.seed_reliability.date") as mock_date:
-            mock_date.today.return_value = date(2026, 2, 9)
-            mock_date.side_effect = lambda *a, **kw: date(*a, **kw)
+        with patch("ingestion.seed_reliability._today", return_value=date(2026, 2, 9)):
             seed_from_static(db, window_days=1, fill_gaps_only=False)
 
         record = db.query(ReliabilityRecord).first()
@@ -295,10 +268,12 @@ class TestReliabilitySeedEndpoint:
 
     @pytest.fixture
     def client(self, db):
+        from unittest.mock import MagicMock
+
+        from fastapi.testclient import TestClient
+
         from api.main import app
         from db.session import get_session
-        from fastapi.testclient import TestClient
-        from unittest.mock import MagicMock
 
         def override_session():
             yield db
@@ -325,9 +300,7 @@ class TestReliabilitySeedEndpoint:
         _add_stop_time(db, "T1", "S1", 1, "08:00:00")
         db.commit()
 
-        with patch("ingestion.seed_reliability.date") as mock_date:
-            mock_date.today.return_value = date(2026, 2, 9)
-            mock_date.side_effect = lambda *a, **kw: date(*a, **kw)
+        with patch("ingestion.seed_reliability._today", return_value=date(2026, 2, 9)):
             resp = client.post("/ingest/reliability-seed?window_days=1")
 
         assert resp.status_code == 200
@@ -342,9 +315,7 @@ class TestReliabilitySeedEndpoint:
         _add_stop_time(db, "T1", "S1", 1, "08:00:00")
         db.commit()
 
-        with patch("ingestion.seed_reliability.date") as mock_date:
-            mock_date.today.return_value = date(2026, 2, 9)
-            mock_date.side_effect = lambda *a, **kw: date(*a, **kw)
+        with patch("ingestion.seed_reliability._today", return_value=date(2026, 2, 9)):
             resp = client.post("/ingest/reliability-seed?window_days=7")
 
         assert resp.status_code == 200

@@ -53,7 +53,6 @@ class TestWalkEdgesPostGIS:
     def test_nearby_stops_linked(self, pg_session):
         """Two stops ~333 m apart get a walk edge via ST_DWithin."""
         from graph.builder import _add_walk_edges_postgis
-        from config import MAX_WALK_METRES
 
         # Stops ~333 m apart (0.003° lat ≈ 333 m)
         _insert_stop(pg_session, "_TEST_A", 43.6453, -79.3806)
@@ -90,8 +89,9 @@ class TestWalkEdgesPostGIS:
 
     def test_matches_bisect_result(self, pg_session):
         """PostGIS and bisect produce the same edge set for a small stop cluster."""
-        from graph.builder import _add_walk_edges_postgis, _add_walk_edges_bisect
         from unittest.mock import MagicMock
+
+        from graph.builder import _add_walk_edges_bisect, _add_walk_edges_postgis
 
         stops_data = [
             ("_TEST_E", 43.6453, -79.3806),

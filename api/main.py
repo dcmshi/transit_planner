@@ -25,7 +25,8 @@ import threading
 import time
 from collections import deque
 from contextlib import asynccontextmanager
-from datetime import datetime, date as Date, timedelta, timezone
+from datetime import date as Date
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -44,9 +45,18 @@ from api.schemas import (
     StopResult,
 )
 from config import (
-    AGENCY_TZ, CORS_ORIGINS, GTFS_REFRESH_HOURS, GTFS_RT_ALERTS_URL, GTFS_RT_API_KEY,
-    GTFS_RT_POLL_SECONDS, GTFS_RT_TRIP_UPDATES_URL, GTFS_RT_VEHICLE_POSITIONS_URL,
-    GTFS_STATIC_URL, INGEST_API_KEY, MAX_ROUTES, RATE_LIMIT_PER_MINUTE,
+    AGENCY_TZ,
+    CORS_ORIGINS,
+    GTFS_REFRESH_HOURS,
+    GTFS_RT_ALERTS_URL,
+    GTFS_RT_API_KEY,
+    GTFS_RT_POLL_SECONDS,
+    GTFS_RT_TRIP_UPDATES_URL,
+    GTFS_RT_VEHICLE_POSITIONS_URL,
+    GTFS_STATIC_URL,
+    INGEST_API_KEY,
+    MAX_ROUTES,
+    RATE_LIMIT_PER_MINUTE,
 )
 from db.session import SessionLocal, get_session, init_db
 from graph.builder import build_graph, get_graph, get_last_built_at
@@ -56,7 +66,9 @@ from ingestion.gtfs_static import refresh_static_data
 from ingestion.seed_reliability import seed_from_static
 from llm.explainer import explain_routes
 from reliability.historical import (
-    classify_time_bucket, decay_reliability_records, get_historical_reliability,
+    classify_time_bucket,
+    decay_reliability_records,
+    get_historical_reliability,
 )
 from reliability.live import compute_live_risk, get_live_delay
 from routing.engine import count_transfers, find_routes, total_travel_seconds, total_walk_metres
@@ -358,8 +370,9 @@ def health(session: Session = Depends(get_session)) -> HealthResponse:
     Returns DB record counts, graph stats, and timestamps so operators can
     quickly tell whether GTFS data has been loaded and the graph is ready.
     """
+    from sqlalchemy import func
+
     from db.models import ReliabilityRecord, Stop, Trip
-    from sqlalchemy import func, text as sa_text
 
     # GTFS data counts (0 if no data loaded yet)
     stop_count: int = session.query(func.count(Stop.stop_id)).scalar() or 0
@@ -435,6 +448,7 @@ def search_stops(
 ) -> list[StopResult]:
     """Search stops by name substring."""
     from collections import defaultdict
+
     from db.models import Stop, StopTime, Trip
 
     results = (

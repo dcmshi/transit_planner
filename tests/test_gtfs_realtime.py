@@ -5,17 +5,17 @@ Each test patches the module-level state dicts and _recorded_today/_recorded_dat
 directly so no real HTTP calls or scheduler are needed.
 """
 
-import pytest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+import ingestion.gtfs_realtime as rt_mod
 from config import AGENCY_TZ
 from db.models import Base, Route, Stop, StopTime, Trip
-import ingestion.gtfs_realtime as rt_mod
 from ingestion.gtfs_realtime import (
     TripUpdateState,
     observe_departures,
@@ -24,7 +24,6 @@ from ingestion.gtfs_realtime import (
     poll_trip_updates,
     poll_vehicle_positions,
 )
-
 
 # ---------------------------------------------------------------------------
 # In-memory DB fixture
@@ -88,7 +87,6 @@ def reset_rt_state():
 
 class TestObserveDepartures:
     def test_cancelled_trip_records_all_stops(self, obs_db):
-        yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y%m%d")
         rt_mod.trip_updates["T_past"] = TripUpdateState(
             trip_id="T_past", route_id="R1", is_cancelled=True
         )
@@ -135,7 +133,6 @@ class TestObserveDepartures:
     def test_delayed_trip_only_records_past_stops(self, obs_db):
         # T_past has S1 at 08:00 (past) and S2 at 08:30 (past).
         # Override only S1 with delay data — S2 has no RT override and should be skipped.
-        yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y%m%d")
         rt_mod.trip_updates["T_past"] = TripUpdateState(
             trip_id="T_past",
             route_id="R1",
@@ -626,11 +623,6 @@ class TestPollAll:
     @pytest.mark.anyio
     async def test_backoff_doubles_on_consecutive_failures(self, reset_poll_state):
         with patch.object(rt_mod, "GTFS_RT_API_KEY", "test-key"):
-            all_fail = {
-                "ingestion.gtfs_realtime.poll_trip_updates": AsyncMock(return_value=False),
-                "ingestion.gtfs_realtime.poll_service_alerts": AsyncMock(return_value=False),
-                "ingestion.gtfs_realtime.poll_vehicle_positions": AsyncMock(return_value=False),
-            }
             with patch("ingestion.gtfs_realtime.poll_trip_updates",
                        new=AsyncMock(return_value=False)), \
                  patch("ingestion.gtfs_realtime.poll_service_alerts",

@@ -8,13 +8,13 @@ parse_and_store() is tested via a minimal in-memory zip.
 
 import io
 import zipfile
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
-from unittest.mock import AsyncMock, MagicMock, patch
 
 from db.models import (
     Base,
@@ -34,7 +34,6 @@ from ingestion.gtfs_static import (
     _parse_trips,
     parse_and_store,
 )
-
 
 # ---------------------------------------------------------------------------
 # Shared in-memory DB fixture
@@ -553,6 +552,7 @@ class TestDownloadGtfsZip:
     @pytest.mark.anyio
     async def test_http_error_propagates(self):
         import httpx
+
         from ingestion.gtfs_static import download_gtfs_zip
 
         mock_resp = MagicMock()

@@ -5,28 +5,26 @@ These tests have no DB or graph dependency — they exercise only the
 logic that lives entirely inside routing/engine.py.
 """
 
-import pytest
-
 import networkx as nx
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from config import MAX_TRANSFERS, MIN_TRANSFER_MINUTES
+from config import MIN_TRANSFER_MINUTES
 from db.models import Base, Route, ServiceCalendarDate, Stop, StopTime, Trip
 from routing.engine import (
-    _RouteQueryCache,
     _fill_later_departures,
     _find_trip_legs,
     _hms_to_seconds,
     _passes_filters,
     _pick_longest_route,
     _route_signature,
+    _RouteQueryCache,
     count_transfers,
     total_travel_seconds,
     total_walk_metres,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers to build minimal leg dicts
@@ -105,6 +103,7 @@ class TestFindRoutesNoPath:
         (the API turns that into a 404) instead of leaking NetworkXNoPath
         (which the API turned into a 500)."""
         from datetime import datetime
+
         import graph.builder as builder_mod
         from routing.engine import find_routes
 
@@ -429,9 +428,10 @@ class TestFillLaterDepartures:
 
     def test_no_fill_needed_when_full(self):
         """If routes already at max_routes, fill returns unchanged list."""
-        import networkx as nx
-        from unittest.mock import MagicMock
         from datetime import datetime
+        from unittest.mock import MagicMock
+
+        import networkx as nx
 
         routes = [
             self._make_route("T1", "08:00:00", "09:00:00"),
@@ -447,9 +447,11 @@ class TestFillLaterDepartures:
 
     def test_fills_one_slot_with_later_departure(self, monkeypatch):
         """One existing route, max_routes=2: fill finds next departure."""
-        import networkx as nx
-        from unittest.mock import MagicMock
         from datetime import datetime
+        from unittest.mock import MagicMock
+
+        import networkx as nx
+
         import routing.engine as eng
 
         later_legs = self._make_route("T2", "10:00:00", "11:00:00")
@@ -476,9 +478,11 @@ class TestFillLaterDepartures:
 
     def test_skips_already_seen_signature(self, monkeypatch):
         """Fill skips a known sig but keeps advancing to the next departure."""
-        import networkx as nx
-        from unittest.mock import MagicMock
         from datetime import datetime
+        from unittest.mock import MagicMock
+
+        import networkx as nx
+
         import routing.engine as eng
 
         seen_legs = self._make_route("T2", "10:00:00", "11:00:00")
@@ -508,9 +512,11 @@ class TestFillLaterDepartures:
     def test_filter_failure_advances_to_next_departure(self, monkeypatch):
         """A departure failing filters must not exhaust the path —
         the next departure on the same path is still tried (regression)."""
-        import networkx as nx
-        from unittest.mock import MagicMock
         from datetime import datetime
+        from unittest.mock import MagicMock
+
+        import networkx as nx
+
         import routing.engine as eng
 
         bad_legs = self._make_route("T_bad", "09:00:00", "10:00:00")
@@ -542,9 +548,11 @@ class TestFillLaterDepartures:
     def test_all_departures_filtered_terminates_without_fill(self, monkeypatch):
         """If every remaining departure fails filters, fill terminates once
         the timetable is exhausted and adds nothing."""
-        import networkx as nx
-        from unittest.mock import MagicMock
         from datetime import datetime
+        from unittest.mock import MagicMock
+
+        import networkx as nx
+
         import routing.engine as eng
 
         bad_legs = self._make_route("T_bad", "10:00:00", "11:00:00")
@@ -568,9 +576,11 @@ class TestFillLaterDepartures:
 
     def test_exhausted_path_returns_none(self, monkeypatch):
         """If _schedule_path returns None immediately, no fill occurs."""
-        import networkx as nx
-        from unittest.mock import MagicMock
         from datetime import datetime
+        from unittest.mock import MagicMock
+
+        import networkx as nx
+
         import routing.engine as eng
 
         monkeypatch.setattr(eng, "_schedule_path", lambda *a, **kw: None)
@@ -763,7 +773,7 @@ class TestFindTripLegs:
         assert legs1 is not None
         assert legs2 is not None
         # Both calls should produce identical legs since cache replays trip_id
-        assert [l["trip_id"] for l in legs1] == [l["trip_id"] for l in legs2]
+        assert [leg["trip_id"] for leg in legs1] == [leg["trip_id"] for leg in legs2]
 
     def test_single_stop_segment_returns_none(self, trip_db):
         # When stops has one element, first_stop == last_stop. The SQL requires
@@ -778,8 +788,9 @@ class TestFindTripLegs:
         period); the candidate ranked first has no trips on the travel date.
         _schedule_path must fall back to the other candidate instead of
         returning None (regression — found live with the June 2026 feed)."""
-        import routing.engine as eng
         from datetime import datetime
+
+        import routing.engine as eng
 
         # "00-FUTURE" sorts before "R1" on the coverage tie-break, so it is
         # tried first — and has no trips on 20260302.
@@ -795,15 +806,16 @@ class TestFindTripLegs:
 
         legs = eng._schedule_path(trip_db, G, ["S1", "S2", "S3"], datetime(2026, 3, 2, 7, 0, 0))
         assert legs is not None
-        assert all(l["route_id"] == "R1" for l in legs)
+        assert all(leg["route_id"] == "R1" for leg in legs)
 
     def test_schedule_path_treats_empty_legs_as_no_route(self, trip_db):
         # _find_trip_legs can theoretically return [] (empty, not None) for a
         # degenerate single-stop segment on a circular trip. _schedule_path must
         # handle this without raising IndexError on trip_legs[-1].
-        import routing.engine as eng
-        from unittest.mock import patch
         from datetime import datetime
+        from unittest.mock import patch
+
+        import routing.engine as eng
 
         G = _make_trip_graph()
 

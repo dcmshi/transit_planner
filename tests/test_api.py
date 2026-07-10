@@ -6,10 +6,10 @@ for every test.  Each test gets its own in-memory SQLite database via
 the db_session / client fixtures, so tests are fully isolated.
 """
 
-import pytest
 from datetime import datetime
-from unittest.mock import AsyncMock, patch, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -17,7 +17,6 @@ from sqlalchemy.pool import StaticPool
 
 from db.models import Base, Stop
 from db.session import get_session
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -443,8 +442,9 @@ class TestGetRoutes:
         assert mock_live.call_args.kwargs["scheduled_dt"] == datetime(2026, 2, 11, 8, 0, 0)
 
     def test_live_delay_adds_expected_times_same_day(self, client):
-        from config import AGENCY_TZ
         from datetime import datetime as _dt
+
+        from config import AGENCY_TZ
         today = _dt.now(AGENCY_TZ).strftime("%Y-%m-%d")
         with (
             patch("api.main.find_routes", return_value=[_FAKE_ROUTE]),
@@ -787,6 +787,7 @@ class TestRoutesCache:
 
     def test_expired_entry_returns_none(self, monkeypatch):
         from datetime import timedelta
+
         import api.main as main_mod
         from api.main import _get_cached_routes, _store_cached_routes
 
@@ -862,7 +863,6 @@ class TestRoutesCache:
     def test_different_params_not_shared(self, monkeypatch):
         """Different origin/destination get independent cache entries."""
         from api.main import _get_cached_routes, _routes_cache_key
-        import api.main as main_mod
 
         key_a = _routes_cache_key("UN", "GL", datetime(2026, 2, 17, 8, 0))
         key_b = _routes_cache_key("BR", "GL", datetime(2026, 2, 17, 8, 0))
@@ -878,6 +878,7 @@ class TestRouteCacheSingleFlight:
         import threading
         import time
         from unittest.mock import MagicMock
+
         import api.main as main_mod
 
         main_mod._clear_routes_cache()

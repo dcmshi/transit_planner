@@ -33,6 +33,12 @@ from reliability.historical import classify_time_bucket
 
 logger = logging.getLogger(__name__)
 
+
+def _today() -> date:
+    """Agency-local today (service days roll at agency-local midnight).
+    Separate function so tests can pin the date."""
+    return datetime.now(AGENCY_TZ).date()
+
 # ---------------------------------------------------------------------------
 # Synthetic prior rates — replace with real data once GTFS-RT is available.
 # Keys match the labels returned by classify_time_bucket().
@@ -106,9 +112,8 @@ def seed_from_static(
             f"service_id values are not YYYYMMDD dates: {exc}"
         ) from exc
 
-    # Start from today (agency-local — service days roll at local midnight)
-    # if it falls within the feed; otherwise use the feed start.
-    today = datetime.now(AGENCY_TZ).date()
+    # Start from today if it falls within the feed; otherwise use the feed start.
+    today = _today()
     window_start = max(db_min, today) if today <= db_max else db_min
     window_end = min(window_start + timedelta(days=window_days - 1), db_max)
 

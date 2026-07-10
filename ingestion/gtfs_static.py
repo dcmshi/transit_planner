@@ -14,7 +14,6 @@ import io
 import logging
 import zipfile
 from datetime import datetime
-from pathlib import Path
 
 import httpx
 import pandas as pd
@@ -22,7 +21,12 @@ from sqlalchemy.orm import Session
 
 from config import DATA_DIR, DATABASE_URL, GTFS_STATIC_URL
 from db.models import (
-    Route, ServiceCalendar, ServiceCalendarDate, Stop, StopTime, Trip,
+    Route,
+    ServiceCalendar,
+    ServiceCalendarDate,
+    Stop,
+    StopTime,
+    Trip,
 )
 
 try:
