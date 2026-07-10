@@ -136,7 +136,7 @@ def seed_from_static(
                 t.route_id,
                 st.stop_id,
                 t.service_id,
-                CAST(substr(st.departure_time, 1, 2) AS INT) % 24 AS dep_hour,
+                CAST(substr(st.departure_time, 1, 2) AS INT) AS dep_hour,
                 COUNT(*) AS trip_count
             FROM stop_times st
             JOIN trips t ON t.trip_id = st.trip_id
@@ -163,7 +163,11 @@ def seed_from_static(
 
     for route_id, stop_id, service_id, dep_hour, trip_count in rows:
         try:
-            service_dt = datetime.strptime(service_id, "%Y%m%d").replace(hour=dep_hour)
+            # timedelta (not .replace) so GTFS >24:00:00 departures roll
+            # into the next day — matching how the scorer and the RT
+            # observer classify the same departure.  The old % 24 bucketed
+            # a Friday 25:30 trip as Friday 01:30 instead of Saturday.
+            service_dt = datetime.strptime(service_id, "%Y%m%d") + timedelta(hours=dep_hour)
             bucket = classify_time_bucket(service_dt)
         except (ValueError, OverflowError):
             continue

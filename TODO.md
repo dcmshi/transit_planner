@@ -117,27 +117,31 @@ the earliest or the best.  Follow-up: with dominated routes pruned,
 `_fill_later_departures` would naturally surface later departures as
 the extra options, which is far more useful to a rider.
 
-### Smaller findings  [LOW]
+### Smaller findings  [LOW] — mostly fixed 2026-07-10
 
-- `total_travel_seconds` measures first-trip departure → last-trip
-  arrival, so leading/trailing *walk* legs add nothing to the reported
-  door-to-door duration (`routing/engine.py`).
-- LLM explanations are never cached — identical journeys re-run
-  Ollama/Gemini per request; the `find_routes` cache doesn't help.  A
-  small TTL cache keyed on the scored-route signature would do.
-- `search_stops` interpolates the user query into `ILIKE` without
-  escaping `%`/`_` — not injection (bound param), but a stray `%`
-  changes match semantics.
-- Rate limiting keys on `request.client.host`; behind any reverse proxy
-  all callers share one bucket (fine for the documented single-worker
-  local deployment — revisit with X-Forwarded-For if ever proxied).
-  *(2026-07-10: stale-bucket eviction and Retry-After added; the
-  proxy-IP caveat remains open by design.)*
-- `db/session.py` `get_session()` is a generator but is annotated
-  `-> Session`; should be `Iterator[Session]`.
-- `_parse_stops` aborts the whole ingest on a blank `stop_lat`/`stop_lon`
-  (`float("")`) — pre-commit, so previous data survives, but a targeted
-  skip-and-warn (like the trip/stop-time parsers) would be friendlier.
+- ✅ `search_stops` now escapes `%`/`_` (literal matching).
+- ✅ `get_session()` annotated `Iterator[Session]`; engine pool sized for
+  the threaded access pattern (`pool_size=15, max_overflow=25`) with
+  `pool_pre_ping` for DB-restart recovery.
+- ✅ Parser robustness: duplicate PKs deduplicated per feed file; blank
+  coordinates / exception_type / stop times skip-and-warn instead of
+  aborting; calendar tables cleared unconditionally so a feed that drops
+  `calendar_dates.txt` can't leave stale exceptions suppressing trips.
+- ✅ Seed buckets: >24:00:00 departures roll onto the next day
+  (matching the scorer) instead of `% 24` landing in an unread bucket.
+- ✅ LLM payload sanitises all feed-sourced strings (stop names,
+  journey), not just alert headers.
+- Open (by design / deferred):
+  - `total_travel_seconds` excludes leading/trailing walk legs from the
+    door-to-door duration (`routing/engine.py`) — semantics change,
+    revisit with the frontend.
+  - LLM explanations are never cached — a small TTL cache keyed on the
+    scored-route signature would do.
+  - Rate limiting keys on `request.client.host`; behind a reverse proxy
+    all callers share one bucket — revisit with X-Forwarded-For if ever
+    proxied.
+  - Decay uses a fixed `days_elapsed=1.0`; days the daily job doesn't
+    run simply don't decay (stretches the effective window slightly).
 
 ### Verified healthy in this pass
 

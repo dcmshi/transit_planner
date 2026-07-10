@@ -67,6 +67,23 @@ class TestSeedFromStatic:
         with pytest.raises(RuntimeError, match="No trips in database"):
             seed_from_static(db, window_days=7)
 
+    def test_post_midnight_departure_buckets_on_rolled_day(self, db):
+        """Regression: `% 24` bucketed a Friday 25:30 departure as Friday
+        01:30 (weekday_offpeak) — a bucket the scorer never reads for that
+        leg.  It must land on Saturday 01:30 → weekend, matching how the
+        scorer and RT observer classify the same departure."""
+        friday = "20260213"  # Friday 2026-02-13
+        _add_trip(db, "T_night", "R1", friday)
+        _add_stop_time(db, "T_night", "S1", 1, "25:30:00")
+        db.commit()
+
+        with patch("ingestion.seed_reliability._today", return_value=date(2026, 2, 13)):
+            written = seed_from_static(db, window_days=7)
+
+        assert written == 1
+        rec = db.query(ReliabilityRecord).one()
+        assert rec.time_bucket == "weekend"
+
     def test_calendar_removed_service_not_seeded(self, db):
         """Regression: trips removed for their date via calendar_dates
         exception_type=2 never run and must not contribute synthetic

@@ -470,6 +470,50 @@ class TestParseAndStore:
         assert removed is not None
         assert removed.date == "20260704"
 
+    def test_duplicate_primary_keys_deduplicated(self, db):
+        """Real GTFS zips occasionally repeat PKs — a duplicate must not
+        abort the ingest with an IntegrityError."""
+        buf = io.BytesIO()
+        with zipfile.ZipFile(io.BytesIO(_make_gtfs_zip())) as src, \
+             zipfile.ZipFile(buf, "w") as zf:
+            for name in src.namelist():
+                content = src.read(name).decode()
+                if name == "stops.txt":
+                    content += "S1,Dup Stop One,43.0,-79.0\n"
+                if name == "trips.txt":
+                    content += "T1,R1,20260211,Dup,0,\n"
+                zf.writestr(name, content)
+
+        parse_and_store(buf.getvalue(), db)  # must not raise
+        assert db.query(Stop).filter_by(stop_id="S1").count() == 1
+        assert db.query(Trip).filter_by(trip_id="T1").count() == 1
+
+    def test_blank_coordinates_and_times_skipped_not_fatal(self, db):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(io.BytesIO(_make_gtfs_zip())) as src, \
+             zipfile.ZipFile(buf, "w") as zf:
+            for name in src.namelist():
+                content = src.read(name).decode()
+                if name == "stops.txt":
+                    content += "S_BAD,No Coords,,\n"
+                if name == "stop_times.txt":
+                    content += "T1,S1,,,4\n"  # blank non-timepoint times
+                zf.writestr(name, content)
+
+        parse_and_store(buf.getvalue(), db)  # must not raise
+        assert db.query(Stop).filter_by(stop_id="S_BAD").count() == 0
+        # The two good stop_times survive; the blank one is skipped.
+        assert db.query(StopTime).count() == 2
+
+    def test_absent_calendar_dates_clears_stale_exceptions(self, db):
+        """Regression: if a future feed drops calendar_dates.txt, stale
+        exception_type=2 rows must not keep suppressing trips."""
+        parse_and_store(_make_gtfs_zip(), db)  # seeds 2 exceptions
+        assert db.query(ServiceCalendarDate).count() == 2
+
+        parse_and_store(_make_gtfs_zip(include_calendar_dates=False), db)
+        assert db.query(ServiceCalendarDate).count() == 0
+
     def test_all_weekly_service_ids_abort_ingest(self, db):
         """Regression guard: routing selects trips by service_id = travel
         date (GO feed convention).  A feed where no service_id is a

@@ -461,9 +461,12 @@ def search_stops(
 
     from db.models import Stop, StopTime, Trip
 
+    # Escape LIKE wildcards so a stray % or _ in the user's query matches
+    # literally instead of changing the pattern semantics.
+    escaped = query.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
     results = (
         session.query(Stop)
-        .filter(Stop.stop_name.ilike(f"%{query}%"))
+        .filter(Stop.stop_name.ilike(f"%{escaped}%", escape="\\"))
         .limit(20)
         .all()
     )

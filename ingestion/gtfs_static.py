@@ -74,6 +74,12 @@ def parse_and_store(zip_bytes: bytes, session: Session) -> None:
         # constraints on PostgreSQL when data already exists (re-ingest).
         session.query(StopTime).delete()
         session.query(Trip).delete()
+        # Calendar tables are cleared unconditionally: their parsers only
+        # run when the file is present in the zip, so a feed that drops
+        # calendar_dates.txt would otherwise leave stale exception_type=2
+        # rows suppressing trips forever.
+        session.query(ServiceCalendar).delete()
+        session.query(ServiceCalendarDate).delete()
         session.flush()
 
         _parse_stops(read("stops.txt"), session)
@@ -128,10 +134,18 @@ def _validate_service_id_convention(session: Session) -> None:
 
 def _parse_stops(df: pd.DataFrame, session: Session) -> None:
     session.query(Stop).delete()
+    # Real GTFS zips occasionally repeat primary keys — a duplicate would
+    # abort the whole ingest with an IntegrityError at commit.
+    df = df.drop_duplicates(subset="stop_id")
     stops = []
+    skipped = 0
     for row in df.to_dict("records"):
-        lat = float(row["stop_lat"])
-        lon = float(row["stop_lon"])
+        try:
+            lat = float(row["stop_lat"])
+            lon = float(row["stop_lon"])
+        except (ValueError, TypeError):
+            skipped += 1  # blank/garbage coordinates — skip, don't abort
+            continue
         stop = Stop(
             stop_id=row["stop_id"],
             stop_name=row["stop_name"],
@@ -142,12 +156,15 @@ def _parse_stops(df: pd.DataFrame, session: Session) -> None:
         if _HAS_POSTGIS:
             stop.geog = from_shape(Point(lon, lat), srid=4326)
         stops.append(stop)
+    if skipped:
+        logger.warning("Skipped %d stops with unparseable coordinates.", skipped)
     session.bulk_save_objects(stops)
-    logger.info("Loaded %d stops.", len(df))
+    logger.info("Loaded %d stops.", len(stops))
 
 
 def _parse_routes(df: pd.DataFrame, session: Session) -> None:
     session.query(Route).delete()
+    df = df.drop_duplicates(subset="route_id")
     routes = [
         Route(
             route_id=row["route_id"],
@@ -164,6 +181,7 @@ def _parse_routes(df: pd.DataFrame, session: Session) -> None:
 def _parse_trips(df: pd.DataFrame, session: Session) -> None:
     session.query(Trip).delete()
     session.flush()  # ensure route rows from _parse_routes are visible
+    df = df.drop_duplicates(subset="trip_id")
     valid_routes = {r[0] for r in session.query(Route.route_id).all()}
     trips = []
     skipped = 0
@@ -200,9 +218,16 @@ def _parse_stop_times(df: pd.DataFrame, session: Session) -> None:
     batch: list[StopTime] = []
     loaded = 0
     skipped = 0
+    blank_times = 0
     for row in df.itertuples(index=False):
         if row.trip_id not in valid_trips or row.stop_id not in valid_stops:
             skipped += 1
+            continue
+        # Non-timepoint rows may legally omit times; "" would corrupt graph
+        # weights (hms_to_seconds("") == 0) and crash PostgreSQL's CAST in
+        # the routing query — skip them.
+        if not row.arrival_time or not row.departure_time:
+            blank_times += 1
             continue
         batch.append(StopTime(
             trip_id=row.trip_id,
@@ -220,6 +245,8 @@ def _parse_stop_times(df: pd.DataFrame, session: Session) -> None:
         loaded += len(batch)
     if skipped:
         logger.warning("Skipped %d stop_times with invalid trip_id or stop_id.", skipped)
+    if blank_times:
+        logger.warning("Skipped %d stop_times with blank arrival/departure times.", blank_times)
     logger.info("Loaded %d stop times.", loaded)
 
 
@@ -245,15 +272,23 @@ def _parse_calendar(df: pd.DataFrame, session: Session) -> None:
 
 def _parse_calendar_dates(df: pd.DataFrame, session: Session) -> None:
     session.query(ServiceCalendarDate).delete()
-    session.bulk_save_objects([
-        ServiceCalendarDate(
+    exceptions = []
+    skipped = 0
+    for row in df.to_dict("records"):
+        try:
+            exception_type = int(row["exception_type"])
+        except (ValueError, TypeError):
+            skipped += 1  # blank/garbage exception_type — skip, don't abort
+            continue
+        exceptions.append(ServiceCalendarDate(
             service_id=row["service_id"],
             date=row["date"],
-            exception_type=int(row["exception_type"]),
-        )
-        for row in df.to_dict("records")
-    ])
-    logger.info("Loaded %d calendar date exceptions.", len(df))
+            exception_type=exception_type,
+        ))
+    if skipped:
+        logger.warning("Skipped %d calendar_dates rows with bad exception_type.", skipped)
+    session.bulk_save_objects(exceptions)
+    logger.info("Loaded %d calendar date exceptions.", len(exceptions))
 
 
 async def refresh_static_data(session: Session) -> None:

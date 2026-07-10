@@ -191,6 +191,17 @@ class TestStopsSearch:
         assert resp.status_code == 200
         assert resp.json() == []
 
+    def test_like_wildcards_matched_literally(self, client, db_session):
+        """A stray % or _ in the query must not change match semantics."""
+        db_session.add(Stop(stop_id="P1", stop_name="100% Ave",
+                            stop_lat=43.0, stop_lon=-79.0))
+        db_session.add(Stop(stop_id="P2", stop_name="100 Percent Rd",
+                            stop_lat=43.1, stop_lon=-79.1))
+        db_session.commit()
+
+        names = [s["stop_name"] for s in client.get("/stops?query=100%25").json()]
+        assert names == ["100% Ave"]  # literal %, not "starts with 100"
+
     def test_query_too_short_returns_422(self, client):
         resp = client.get("/stops?query=G")
         assert resp.status_code == 422

@@ -75,16 +75,16 @@ Strict rules — violating any rule is wrong:
 """.strip()
 
 
-# Alert text is external input (GTFS-RT feed) that ends up inside the LLM
-# prompt — flatten control characters and cap length as defence in depth
-# against prompt injection via crafted alert headers.
+# Alert text, stop names, and every other feed-sourced string end up inside
+# the LLM prompt — flatten control characters and cap length as defence in
+# depth against prompt injection via a crafted or compromised feed.
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]+")
-_MAX_ALERT_CHARS = 200
+_MAX_FEED_TEXT_CHARS = 200
 
 
-def _sanitise_alert_header(header: str) -> str:
-    cleaned = _CONTROL_CHARS_RE.sub(" ", header).strip()
-    return cleaned[:_MAX_ALERT_CHARS]
+def _sanitise_feed_text(value: str) -> str:
+    cleaned = _CONTROL_CHARS_RE.sub(" ", value or "").strip()
+    return cleaned[:_MAX_FEED_TEXT_CHARS]
 
 
 def _route_number(route_id: str) -> str:
@@ -130,8 +130,8 @@ def _build_llm_payload(
             if leg.get("kind") == "trip":
                 trip_id = leg.get("trip_id")
                 route_id = leg.get("route_id", "")
-                from_stop: str = leg["from_stop_name"]
-                to_stop: str = leg["to_stop_name"]
+                from_stop: str = _sanitise_feed_text(leg["from_stop_name"])
+                to_stop: str = _sanitise_feed_text(leg["to_stop_name"])
                 departs = _hhmm(leg["departure_time"])
                 arrives = _hhmm(leg["arrival_time"])
                 max_risk: float = leg["risk"]["risk_score"]
@@ -147,7 +147,7 @@ def _build_llm_payload(
                     and legs[j].get("trip_id") == trip_id
                 ):
                     nxt = legs[j]
-                    to_stop = nxt["to_stop_name"]
+                    to_stop = _sanitise_feed_text(nxt["to_stop_name"])
                     arrives = _hhmm(nxt["arrival_time"])
                     if nxt["risk"]["risk_score"] > max_risk:
                         max_risk = nxt["risk"]["risk_score"]
@@ -181,8 +181,8 @@ def _build_llm_payload(
                 metres = round(leg.get("distance_m", 0))
                 segments.append({
                     "type": "walk_transfer",
-                    "from": leg["from_stop_name"],
-                    "to": leg["to_stop_name"],
+                    "from": _sanitise_feed_text(leg["from_stop_name"]),
+                    "to": _sanitise_feed_text(leg["to_stop_name"]),
                     "duration": f"{minutes} min ({metres} m)",
                 })
                 i += 1
@@ -210,12 +210,12 @@ def _build_llm_payload(
             or (alert.get("alert") or {}).get("header_text")
         )
         if isinstance(header, str):
-            header = _sanitise_alert_header(header)
+            header = _sanitise_feed_text(header)
             if header and header not in alert_headers:
                 alert_headers.append(header)
 
     payload: dict[str, Any] = {
-        "journey": f"{origin_name} → {destination_name}",
+        "journey": f"{_sanitise_feed_text(origin_name)} → {_sanitise_feed_text(destination_name)}",
         "routes": simplified_routes,
         "active_alerts": alert_headers,
     }
