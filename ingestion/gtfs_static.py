@@ -10,6 +10,7 @@ Feed contents used:
   calendar_dates.txt → ServiceCalendarDate
 """
 
+import asyncio
 import io
 import logging
 import zipfile
@@ -258,4 +259,7 @@ def _parse_calendar_dates(df: pd.DataFrame, session: Session) -> None:
 async def refresh_static_data(session: Session) -> None:
     """Download and ingest a fresh copy of GTFS static data."""
     zip_bytes = await download_gtfs_zip()
-    parse_and_store(zip_bytes, session)
+    # parse_and_store is the heaviest stage of the whole refresh (pandas
+    # parse + ~2M-row insert) — run it in a worker thread so the event loop
+    # keeps serving /health, /ingest/status, and RT polls meanwhile.
+    await asyncio.to_thread(parse_and_store, zip_bytes, session)

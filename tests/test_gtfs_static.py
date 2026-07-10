@@ -507,6 +507,38 @@ class TestParseAndStore:
         assert "not YYYYMMDD dates" in caplog.text
         assert "ODD_SVC" in caplog.text
 
+    @pytest.mark.anyio
+    async def test_refresh_static_data_does_not_block_event_loop(self):
+        """Regression: parse_and_store must run in a worker thread — when it
+        ran on the loop, every request (incl. /health and /ingest/status)
+        hung for the full ~60s parse."""
+        import asyncio
+        import time as time_mod
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from ingestion.gtfs_static import refresh_static_data
+
+        loop_alive = asyncio.Event()
+
+        def slow_parse(zip_bytes, session):
+            time_mod.sleep(0.3)  # blocking work — must happen off the loop
+
+        async def heartbeat():
+            await asyncio.sleep(0.05)
+            loop_alive.set()
+
+        with (
+            patch("ingestion.gtfs_static.download_gtfs_zip",
+                  new=AsyncMock(return_value=b"zip")),
+            patch("ingestion.gtfs_static.parse_and_store", side_effect=slow_parse),
+        ):
+            hb = asyncio.get_running_loop().create_task(heartbeat())
+            await refresh_static_data(MagicMock())
+            # If the parse had blocked the loop, the 50ms heartbeat could
+            # not have fired before the 300ms parse finished.
+            assert loop_alive.is_set()
+            await hb
+
     def test_reingest_with_enforced_foreign_keys(self):
         """Re-ingest over existing data must not violate FK constraints.
 
