@@ -38,6 +38,7 @@ from api.schemas import (
     AlertResult,
     HealthResponse,
     IngestResponse,
+    IngestStatusResponse,
     RoutesResponse,
     SeedResponse,
     StopResult,
@@ -180,6 +181,41 @@ def _clear_routes_cache() -> None:
     logger.info("Route cache cleared.")
 
 
+# ---------------------------------------------------------------------------
+# Ingest job state — the manual endpoint and the daily scheduled refresh
+# share one slot so two full ingests can never run concurrently.  All
+# writers run on the event loop, so plain check-and-set is race-free.
+# ---------------------------------------------------------------------------
+_ingest_state: dict[str, Any] = {
+    "running": False,
+    "started_at": None,
+    "finished_at": None,
+    "last_status": None,   # "ok" | "error" | None (never run)
+    "last_message": None,
+}
+
+
+def _try_begin_ingest() -> bool:
+    """Claim the single ingest slot; False if an ingest is already running."""
+    if _ingest_state["running"]:
+        return False
+    _ingest_state.update(
+        running=True,
+        started_at=datetime.now(timezone.utc).isoformat(),
+        finished_at=None,
+    )
+    return True
+
+
+def _finish_ingest(status: str, message: str) -> None:
+    _ingest_state.update(
+        running=False,
+        finished_at=datetime.now(timezone.utc).isoformat(),
+        last_status=status,
+        last_message=message,
+    )
+
+
 async def _daily_gtfs_refresh() -> None:
     """
     Scheduled job: refresh GTFS static data, rebuild the graph, and
@@ -193,6 +229,9 @@ async def _daily_gtfs_refresh() -> None:
     Uses fill_gaps_only=True to preserve accumulated RT observations; new
     routes/stops that have no records yet still get synthetic priors.
     """
+    if not _try_begin_ingest():
+        logger.info("Daily GTFS refresh skipped — an ingest is already running.")
+        return
     logger.info("Daily GTFS static refresh starting.")
     db = SessionLocal()
     try:
@@ -206,8 +245,10 @@ async def _daily_gtfs_refresh() -> None:
         seeded = await asyncio.to_thread(seed_from_static, db, fill_gaps_only=True)
         logger.info("Daily GTFS static refresh complete: %d reliability records reseeded.", seeded)
         _clear_routes_cache()
+        _finish_ingest("ok", f"Daily refresh: {seeded} reliability records reseeded.")
     except Exception as exc:
         logger.error("Daily GTFS static refresh failed: %s", exc, exc_info=True)
+        _finish_ingest("error", str(exc))
     finally:
         db.close()
 
@@ -624,31 +665,64 @@ async def get_routes(
     return response
 
 
-@app.post("/ingest/gtfs-static", response_model=IngestResponse)
+async def _run_gtfs_ingest() -> None:
+    """
+    Background body of POST /ingest/gtfs-static: full static refresh, graph
+    rebuild, and full reseed (fill_gaps_only=False keeps synthetic priors in
+    sync with the updated schedule; the daily scheduler uses True to
+    preserve accumulated real observations).
+
+    Opens its own session — the request's session closes when the 202
+    returns.  The caller must have claimed the slot via _try_begin_ingest().
+    """
+    db = SessionLocal()
+    try:
+        await refresh_static_data(db)
+        await asyncio.to_thread(build_graph, db)
+        seeded = await asyncio.to_thread(seed_from_static, db, fill_gaps_only=False)
+        _clear_routes_cache()
+        msg = (
+            f"GTFS static data refreshed, graph rebuilt, "
+            f"and {seeded} reliability records reseeded."
+        )
+        logger.info("Manual ingest complete: %s", msg)
+        _finish_ingest("ok", msg)
+    except Exception as exc:
+        logger.error("Manual ingest failed: %s", exc, exc_info=True)
+        _finish_ingest("error", str(exc))
+    finally:
+        db.close()
+
+
+@app.post("/ingest/gtfs-static", response_model=IngestResponse, status_code=202)
 async def trigger_gtfs_ingest(
-    session: Session = Depends(get_session),
     _: None = Depends(_require_ingest_key),
 ) -> IngestResponse:
     """
-    Manually trigger a GTFS static data refresh, graph rebuild, and
-    reliability reseed.  (In production this runs on a daily schedule.)
+    Trigger a GTFS static data refresh, graph rebuild, and reliability
+    reseed in the background.  (In production this also runs on a daily
+    schedule.)
 
-    The reseed always runs as a full overwrite (fill_gaps_only=False) so
-    that synthetic priors stay in sync with the updated schedule.  Once
-    GTFS-RT data is flowing, the daily scheduler should switch to
-    fill_gaps_only=True to preserve accumulated real observations.
+    Returns 202 immediately — the full ingest takes ~60 s.  Poll
+    GET /ingest/status (or /health) for completion.  409 if an ingest is
+    already running.
     """
-    await refresh_static_data(session)
-    await asyncio.to_thread(build_graph, session)
-    seeded = await asyncio.to_thread(seed_from_static, session, fill_gaps_only=False)
-    _clear_routes_cache()
+    if not _try_begin_ingest():
+        raise HTTPException(
+            status_code=409,
+            detail="An ingest is already running — poll GET /ingest/status.",
+        )
+    asyncio.create_task(_run_gtfs_ingest())
     return {
-        "status": "ok",
-        "message": (
-            f"GTFS static data refreshed, graph rebuilt, "
-            f"and {seeded} reliability records reseeded."
-        ),
+        "status": "accepted",
+        "message": "GTFS ingest started in the background — poll GET /ingest/status.",
     }
+
+
+@app.get("/ingest/status", response_model=IngestStatusResponse)
+def ingest_status(_: None = Depends(_require_ingest_key)) -> IngestStatusResponse:
+    """State of the current/most recent ingest (manual or daily refresh)."""
+    return dict(_ingest_state)
 
 
 @app.post("/ingest/reliability-seed", response_model=SeedResponse)

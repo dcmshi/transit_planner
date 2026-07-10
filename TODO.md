@@ -148,13 +148,13 @@ vs a weighted sum once enough real observations accumulate.
 > disconnected stops instead of leaking `NetworkXNoPath` (which the API
 > surfaced as a 500 — now a proper 404).
 
-### Move `/ingest/gtfs-static` to a background task
+### ✅ Move `/ingest/gtfs-static` to a background task (done 2026-07-10)
 
-The endpoint holds the HTTP request open for the full ~60 s ingest and has
-no guard against two concurrent ingests racing.  Return `202` + a job id,
-run via the existing scheduler/`asyncio.to_thread`, and expose status on
-`/health` (or a `/ingest/status`).  Take a simple in-process lock so manual
-ingest and the daily refresh can't overlap.
+> Returns `202` immediately and runs `_run_gtfs_ingest` as an asyncio task
+> on its own session; `GET /ingest/status` (same optional API key) reports
+> running/last_status/last_message.  Manual ingest and the daily refresh
+> share a single slot — concurrent attempts get `409` / the daily job
+> skips its cycle.
 
 ### ✅ Surface GTFS-RT feed freshness in `/health` (done 2026-07-10)
 

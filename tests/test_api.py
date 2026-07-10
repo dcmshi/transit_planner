@@ -533,44 +533,57 @@ class TestGetRoutes:
 # POST /ingest/gtfs-static — auth
 # ---------------------------------------------------------------------------
 
+@pytest.fixture
+def _reset_ingest_state():
+    """Reset the module-level ingest slot before and after a test."""
+    import api.main as main_mod
+
+    def _reset():
+        main_mod._ingest_state.update(
+            running=False, started_at=None, finished_at=None,
+            last_status=None, last_message=None,
+        )
+
+    _reset()
+    yield
+    _reset()
+
+
 class TestIngestAuth:
     """
     The ingest endpoint is open when INGEST_API_KEY is unset (local dev)
     and requires a matching X-API-Key header when it is set.
+    The actual work runs in the background — auth tests stub it out.
     """
 
+    @pytest.fixture(autouse=True)
+    def _state(self, _reset_ingest_state):
+        yield
+
     def test_open_when_no_key_configured(self, client):
-        """No INGEST_API_KEY set → request succeeds without a header."""
+        """No INGEST_API_KEY set → request accepted without a header."""
         with (
             patch("api.main.INGEST_API_KEY", ""),
-            patch("api.main.refresh_static_data"),
-            patch("api.main.build_graph"),
-            patch("api.main.seed_from_static", return_value=0),
+            patch("api.main._run_gtfs_ingest", new_callable=AsyncMock),
         ):
             resp = client.post("/ingest/gtfs-static")
-        assert resp.status_code == 200
+        assert resp.status_code == 202
 
     def test_correct_key_accepted(self, client):
-        """Correct X-API-Key header → 200."""
+        """Correct X-API-Key header → 202."""
         with (
             patch("api.main.INGEST_API_KEY", "secret"),
-            patch("api.main.refresh_static_data"),
-            patch("api.main.build_graph"),
-            patch("api.main.seed_from_static", return_value=0),
+            patch("api.main._run_gtfs_ingest", new_callable=AsyncMock),
         ):
             resp = client.post(
                 "/ingest/gtfs-static",
                 headers={"X-API-Key": "secret"},
             )
-        assert resp.status_code == 200
+        assert resp.status_code == 202
 
     def test_wrong_key_rejected(self, client):
         """Wrong X-API-Key header → 401."""
-        with (
-            patch("api.main.INGEST_API_KEY", "secret"),
-            patch("api.main.refresh_static_data"),
-            patch("api.main.build_graph"),
-        ):
+        with patch("api.main.INGEST_API_KEY", "secret"):
             resp = client.post(
                 "/ingest/gtfs-static",
                 headers={"X-API-Key": "wrong"},
@@ -579,47 +592,111 @@ class TestIngestAuth:
 
     def test_missing_header_rejected(self, client):
         """No X-API-Key header when key is configured → 401."""
-        with (
-            patch("api.main.INGEST_API_KEY", "secret"),
-            patch("api.main.refresh_static_data"),
-            patch("api.main.build_graph"),
-        ):
+        with patch("api.main.INGEST_API_KEY", "secret"):
             resp = client.post("/ingest/gtfs-static")
         assert resp.status_code == 401
 
-    def test_reseed_chained_after_ingest(self, client):
-        """POST /ingest/gtfs-static calls seed_from_static with fill_gaps_only=False."""
+
+class TestIngestBackground:
+    """202 semantics, the single-slot guard, and the status endpoint."""
+
+    @pytest.fixture(autouse=True)
+    def _state(self, _reset_ingest_state):
+        yield
+
+    def test_returns_202_accepted(self, client):
         with (
             patch("api.main.INGEST_API_KEY", ""),
-            patch("api.main.refresh_static_data"),
-            patch("api.main.build_graph"),
-            patch("api.main.seed_from_static", return_value=42) as mock_seed,
+            patch("api.main._run_gtfs_ingest", new_callable=AsyncMock),
         ):
             resp = client.post("/ingest/gtfs-static")
+        assert resp.status_code == 202
+        assert resp.json()["status"] == "accepted"
 
-        assert resp.status_code == 200
-        mock_seed.assert_called_once()
+    def test_concurrent_ingest_rejected_409(self, client):
+        import api.main as main_mod
+        main_mod._ingest_state["running"] = True
+        with patch("api.main.INGEST_API_KEY", ""):
+            resp = client.post("/ingest/gtfs-static")
+        assert resp.status_code == 409
+
+    def test_status_endpoint_reports_state(self, client):
+        import api.main as main_mod
+        main_mod._ingest_state.update(
+            running=False, started_at="2026-07-10T12:00:00+00:00",
+            finished_at="2026-07-10T12:01:00+00:00",
+            last_status="ok", last_message="done",
+        )
+        with patch("api.main.INGEST_API_KEY", ""):
+            body = client.get("/ingest/status").json()
+        assert body["running"] is False
+        assert body["last_status"] == "ok"
+        assert body["last_message"] == "done"
+
+    @pytest.mark.anyio
+    async def test_run_ingest_chains_refresh_build_seed(self):
+        """The background body chains refresh → build → full reseed and
+        records success in the ingest state."""
+        import api.main as main_mod
+        from api.main import _run_gtfs_ingest
+
+        mock_session = MagicMock()
+        main_mod._ingest_state["running"] = True  # slot claimed by endpoint
+        with (
+            patch("api.main.SessionLocal", return_value=mock_session),
+            patch("api.main.refresh_static_data", new_callable=AsyncMock) as mock_refresh,
+            patch("api.main.build_graph") as mock_build,
+            patch("api.main.seed_from_static", return_value=42) as mock_seed,
+        ):
+            await _run_gtfs_ingest()
+
+        mock_refresh.assert_called_once_with(mock_session)
+        mock_build.assert_called_once_with(mock_session)
         _, kwargs = mock_seed.call_args
         assert kwargs.get("fill_gaps_only") is False
+        assert main_mod._ingest_state["running"] is False
+        assert main_mod._ingest_state["last_status"] == "ok"
+        assert "42" in main_mod._ingest_state["last_message"]
+        mock_session.close.assert_called_once()
 
-    def test_ingest_response_includes_seed_count(self, client):
-        """Response body reports how many reliability records were reseeded."""
+    @pytest.mark.anyio
+    async def test_run_ingest_records_error(self):
+        import api.main as main_mod
+        from api.main import _run_gtfs_ingest
+
+        main_mod._ingest_state["running"] = True
         with (
-            patch("api.main.INGEST_API_KEY", ""),
-            patch("api.main.refresh_static_data"),
-            patch("api.main.build_graph"),
-            patch("api.main.seed_from_static", return_value=99),
+            patch("api.main.SessionLocal", return_value=MagicMock()),
+            patch("api.main.refresh_static_data", new_callable=AsyncMock,
+                  side_effect=Exception("feed down")),
         ):
-            body = client.post("/ingest/gtfs-static").json()
+            await _run_gtfs_ingest()  # must not raise
 
-        assert "99" in body["message"]
-
+        assert main_mod._ingest_state["running"] is False
+        assert main_mod._ingest_state["last_status"] == "error"
+        assert "feed down" in main_mod._ingest_state["last_message"]
 
 # ---------------------------------------------------------------------------
 # _daily_gtfs_refresh job function
 # ---------------------------------------------------------------------------
 
 class TestDailyGtfsRefreshJob:
+
+    @pytest.fixture(autouse=True)
+    def _state(self, _reset_ingest_state):
+        yield
+
+    @pytest.mark.anyio
+    async def test_skipped_while_manual_ingest_running(self):
+        """The daily refresh and manual ingest share one slot."""
+        import api.main as main_mod
+        from api.main import _daily_gtfs_refresh
+
+        main_mod._ingest_state["running"] = True
+        with patch("api.main.refresh_static_data", new_callable=AsyncMock) as mock_refresh:
+            await _daily_gtfs_refresh()
+
+        mock_refresh.assert_not_called()
 
     @pytest.mark.anyio
     async def test_calls_refresh_build_seed(self):

@@ -135,8 +135,16 @@ class AlertResult(BaseModel):
 # ---------------------------------------------------------------------------
 
 class IngestResponse(BaseModel):
-    status: Literal["ok"]
+    status: Literal["accepted"]
     message: str
+
+
+class IngestStatusResponse(BaseModel):
+    running: bool
+    started_at: str | None
+    finished_at: str | None
+    last_status: Literal["ok", "error"] | None
+    last_message: str | None
 
 
 class SeedResponse(BaseModel):
