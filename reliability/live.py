@@ -35,6 +35,25 @@ MISSING_VEHICLE_RISK_BUMP = 0.08
 LATE_EVENING_RISK_BUMP = 0.05
 LATE_EVENING_START_SEC = 22 * 3600  # 22:00 — service thins out after this
 WEEKEND_RISK_BUMP = 0.03
+# Live running-late bumps (same-day trips only)
+DELAY_MINOR_SECONDS = 5 * 60
+DELAY_MAJOR_SECONDS = 15 * 60
+DELAY_RISK_BUMP_MINOR = 0.05
+DELAY_RISK_BUMP_MAJOR = 0.15
+
+
+def get_live_delay(trip_id: str, stop_id: str) -> int | None:
+    """
+    Best-known live delay in seconds for a trip at a stop (positive = late,
+    negative = early).  Prefers the stop's own RT override, falling back to
+    the trip's overall delay.  Returns None when the trip is absent from the
+    current trip-updates snapshot or is cancelled (a cancelled trip has no
+    meaningful expected time).
+    """
+    tu = trip_updates.get(trip_id)
+    if tu is None or tu.is_cancelled:
+        return None
+    return tu.stop_time_overrides.get(stop_id, tu.delay_seconds)
 
 
 def compute_live_risk(
@@ -79,9 +98,14 @@ def compute_live_risk(
     total_adjustment = 0.0
     modifiers: list[str] = []
 
+    # GTFS-RT snapshots describe *today's* runs, and trip_ids repeat across
+    # service days — per-trip live signals (cancellation, running late,
+    # same-day cancellations) must not leak onto future-dated queries.
+    is_same_day = scheduled_dt.date() == query_naive.date()
+
     # 1. Is this trip currently cancelled?
     tu = trip_updates.get(trip_id)
-    if tu and tu.is_cancelled:
+    if tu and tu.is_cancelled and is_same_day:
         return {
             "risk_score": 1.0,
             "risk_label": "High",
@@ -97,12 +121,23 @@ def compute_live_risk(
             modifiers.append(f"Service alert: {a.header}")
 
     # 3. Earlier same-day cancellations on this route
-    same_route_cancels = _same_route_cancellations(route_id)
-    if same_route_cancels:
-        total_adjustment += CANCELLATION_RISK_BUMP
-        modifiers.append(
-            f"{same_route_cancels} earlier cancellation(s) on route {route_id} today."
-        )
+    if is_same_day:
+        same_route_cancels = _same_route_cancellations(route_id)
+        if same_route_cancels:
+            total_adjustment += CANCELLATION_RISK_BUMP
+            modifiers.append(
+                f"{same_route_cancels} earlier cancellation(s) on route {route_id} today."
+            )
+
+    # 3b. Trip already running late right now
+    if is_same_day:
+        delay = get_live_delay(trip_id, stop_id)
+        if delay is not None and delay >= DELAY_MAJOR_SECONDS:
+            total_adjustment += DELAY_RISK_BUMP_MAJOR
+            modifiers.append(f"Trip is currently running ~{round(delay / 60)} min late.")
+        elif delay is not None and delay >= DELAY_MINOR_SECONDS:
+            total_adjustment += DELAY_RISK_BUMP_MINOR
+            modifiers.append(f"Trip is currently running ~{round(delay / 60)} min late.")
 
     # 4. Vehicle position missing near departure — full-datetime comparison
     #    so a "10 minutes past the hour" departure on a future date does not

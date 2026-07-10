@@ -328,6 +328,72 @@ class TestComputeLiveRisk:
         assert result["risk_score"] == pytest.approx(0.2, abs=1e-9)
         assert result["modifiers"] == []
 
+    def test_running_late_bumps_risk_tiered(self):
+        from reliability.live import DELAY_RISK_BUMP_MAJOR, DELAY_RISK_BUMP_MINOR
+
+        minor = TripUpdateState(trip_id="T1", route_id="R1", delay_seconds=6 * 60)
+        major = TripUpdateState(trip_id="T1", route_id="R1", delay_seconds=20 * 60)
+
+        with patch(f"{_LIVE}.trip_updates", {"T1": minor}), \
+             patch(f"{_LIVE}.service_alerts", []), \
+             patch(f"{_LIVE}.vehicle_positions", {"T1": {}}):
+            minor_result = _compute(hist=0.8)
+        with patch(f"{_LIVE}.trip_updates", {"T1": major}), \
+             patch(f"{_LIVE}.service_alerts", []), \
+             patch(f"{_LIVE}.vehicle_positions", {"T1": {}}):
+            major_result = _compute(hist=0.8)
+
+        assert minor_result["risk_score"] == pytest.approx(0.2 + DELAY_RISK_BUMP_MINOR, abs=1e-9)
+        assert major_result["risk_score"] == pytest.approx(0.2 + DELAY_RISK_BUMP_MAJOR, abs=1e-9)
+        assert any("late" in m.lower() for m in major_result["modifiers"])
+
+    def test_stop_override_takes_precedence_for_delay(self):
+        from reliability.live import DELAY_RISK_BUMP_MAJOR
+
+        # Overall delay small, but this stop's override is 20 min late.
+        tu = TripUpdateState(trip_id="T1", route_id="R1", delay_seconds=60,
+                             stop_time_overrides={"S1": 20 * 60})
+        with patch(f"{_LIVE}.trip_updates", {"T1": tu}), \
+             patch(f"{_LIVE}.service_alerts", []), \
+             patch(f"{_LIVE}.vehicle_positions", {"T1": {}}):
+            result = _compute(stop="S1", hist=0.8)
+
+        assert result["risk_score"] == pytest.approx(0.2 + DELAY_RISK_BUMP_MAJOR, abs=1e-9)
+
+    def test_live_signals_do_not_leak_onto_future_dates(self):
+        """Regression: trip_ids repeat across service days — today's
+        cancellation/delay must not mark tomorrow's run of the same
+        trip_id."""
+        cancelled = TripUpdateState(trip_id="T1", route_id="R1", is_cancelled=True)
+        query = datetime(2026, 2, 9, 13, 0)
+        tomorrow_dep = datetime(2026, 2, 10, 14, 0)
+        with patch(f"{_LIVE}.trip_updates", {"T1": cancelled}), \
+             patch(f"{_LIVE}.service_alerts", []), \
+             patch(f"{_LIVE}.vehicle_positions", {}):
+            result = compute_live_risk(
+                route_id="R1", stop_id="S1", trip_id="T1",
+                departure_time_str="14:00:00",
+                query_dt=query,
+                historical_reliability=0.8,
+                scheduled_dt=tomorrow_dep,
+            )
+
+        # Neither cancelled nor bumped by today's same-route cancellation.
+        assert result["is_cancelled"] is False
+        assert result["risk_score"] == pytest.approx(0.2, abs=1e-9)
+
+    def test_get_live_delay_lookup(self):
+        from reliability.live import get_live_delay
+
+        tu = TripUpdateState(trip_id="T1", route_id="R1", delay_seconds=120,
+                             stop_time_overrides={"S1": 300})
+        cancelled = TripUpdateState(trip_id="T2", route_id="R1", is_cancelled=True)
+        with patch(f"{_LIVE}.trip_updates", {"T1": tu, "T2": cancelled}):
+            assert get_live_delay("T1", "S1") == 300   # stop override wins
+            assert get_live_delay("T1", "S9") == 120   # falls back to trip delay
+            assert get_live_delay("T2", "S1") is None  # cancelled
+            assert get_live_delay("T9", "S1") is None  # unknown trip
+
     def test_risk_label_thresholds(self):
         """Verify Low < 0.33, Medium < 0.66, High ≥ 0.66."""
         with patch(f"{_LIVE}.trip_updates", {}), \

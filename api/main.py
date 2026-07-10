@@ -45,7 +45,7 @@ from config import (
 )
 from db.session import SessionLocal, get_session, init_db
 from graph.builder import build_graph, get_graph, get_last_built_at
-from gtfs_time import hms_to_seconds
+from gtfs_time import hms_to_seconds, seconds_to_hms
 from ingestion.gtfs_realtime import poll_all
 from ingestion.gtfs_static import refresh_static_data
 from ingestion.seed_reliability import seed_from_static
@@ -53,7 +53,7 @@ from llm.explainer import explain_routes
 from reliability.historical import (
     classify_time_bucket, decay_reliability_records, get_historical_reliability,
 )
-from reliability.live import compute_live_risk
+from reliability.live import compute_live_risk, get_live_delay
 from routing.engine import count_transfers, find_routes, total_travel_seconds, total_walk_metres
 
 logging.basicConfig(level=logging.INFO)
@@ -446,7 +446,20 @@ def _score_routes_blocking(
                 historical_reliability=hist,
                 scheduled_dt=leg_dt,
             )
-            scored_legs.append({**leg, "risk": live})
+            scored_leg = {**leg, "risk": live}
+            # Live expected times — same-day trips only (trip_ids repeat
+            # across service days; the RT snapshot describes today's run).
+            if leg_dt.date() == query_dt.date():
+                delay = get_live_delay(leg["trip_id"], leg["from_stop_id"])
+                if delay:
+                    scored_leg["live_delay_seconds"] = delay
+                    scored_leg["expected_departure"] = seconds_to_hms(
+                        hms_to_seconds(leg["departure_time"]) + delay
+                    )
+                    scored_leg["expected_arrival"] = seconds_to_hms(
+                        hms_to_seconds(leg["arrival_time"]) + delay
+                    )
+            scored_legs.append(scored_leg)
             route_risk_scores.append(live["risk_score"])
 
         overall_risk = max(route_risk_scores) if route_risk_scores else 0.0

@@ -39,6 +39,11 @@ class TripLeg(BaseModel):
     arrival_time: str     # HH:MM:SS — may exceed 24:00:00
     travel_seconds: int
     risk: LiveRisk | None
+    # Live GTFS-RT delay — present only for same-day trips currently in the
+    # trip-updates feed with a non-zero delay (positive = late).
+    live_delay_seconds: int | None = None
+    expected_departure: str | None = None  # scheduled + live delay, HH:MM:SS
+    expected_arrival: str | None = None
 
 
 class WalkLeg(BaseModel):

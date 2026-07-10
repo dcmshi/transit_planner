@@ -108,7 +108,15 @@ periodic decay job (multiply counters by α < 1 daily), or store per-day rows
 and aggregate over the window at read time.  Without this, one bad month
 permanently depresses a route's score.
 
-### Live delay data is captured but unused
+### ✅ Live delay data is captured but unused (done 2026-07-10)
+
+> Fixed: `get_live_delay` (stop override → trip delay) in
+> `reliability/live.py`; tiered risk bumps (+0.05 at ≥5 min, +0.15 at
+> ≥15 min); `live_delay_seconds` / `expected_departure` /
+> `expected_arrival` on same-day trip legs.  Bonus regression fix: all
+> per-trip live signals (cancellation, same-route cancellations, delay)
+> are now gated to same-day queries — trip_ids repeat across service days,
+> so today's cancellation no longer marks tomorrow's run.
 
 `TripUpdateState.delay_seconds` and `stop_time_overrides` are polled every
 30 s but never influence risk scoring or the response.  Two uses:

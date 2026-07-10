@@ -355,6 +355,43 @@ class TestGetRoutes:
         assert mock_hist.call_args.args[2] == "weekday_am_peak"
         assert mock_live.call_args.kwargs["scheduled_dt"] == datetime(2026, 2, 11, 8, 0, 0)
 
+    def test_live_delay_adds_expected_times_same_day(self, client):
+        from config import AGENCY_TZ
+        from datetime import datetime as _dt
+        today = _dt.now(AGENCY_TZ).strftime("%Y-%m-%d")
+        with (
+            patch("api.main.find_routes", return_value=[_FAKE_ROUTE]),
+            patch("api.main.get_historical_reliability", return_value=0.8),
+            patch("api.main.compute_live_risk", return_value=_FAKE_LIVE_RISK),
+            patch("api.main.get_live_delay", return_value=300),
+        ):
+            leg = client.get(
+                f"/routes?origin=UN&destination=GL"
+                f"&travel_date={today}&departure_time=08:00"
+            ).json()["routes"][0]["legs"][0]
+
+        assert leg["live_delay_seconds"] == 300
+        assert leg["expected_departure"] == "08:05:00"  # 08:00 + 5 min
+        assert leg["expected_arrival"] == "09:26:00"    # 09:21 + 5 min
+
+    def test_no_expected_times_on_future_dates(self, client):
+        """Regression: trip_ids repeat across service days — today's live
+        delay must not produce expected times for a future travel date."""
+        with (
+            patch("api.main.find_routes", return_value=[_FAKE_ROUTE]),
+            patch("api.main.get_historical_reliability", return_value=0.8),
+            patch("api.main.compute_live_risk", return_value=_FAKE_LIVE_RISK),
+            patch("api.main.get_live_delay", return_value=300),
+        ):
+            leg = client.get(
+                "/routes?origin=UN&destination=GL"
+                "&travel_date=2099-02-11&departure_time=08:00"
+            ).json()["routes"][0]["legs"][0]
+
+        assert leg["live_delay_seconds"] is None
+        assert leg["expected_departure"] is None
+        assert leg["expected_arrival"] is None
+
     def test_hhmm_departure_time_accepted(self, client):
         """HH:MM (without seconds) should be accepted."""
         with (
