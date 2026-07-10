@@ -47,8 +47,9 @@ docker compose up -d --build
 # 3. Pull the LLM model — one time only (~2 GB, persisted in a volume)
 docker compose exec ollama ollama pull llama3.2
 
-# 4. Load GTFS data on first boot (~60 s)
+# 4. Load GTFS data on first boot (returns 202; runs ~60 s in the background)
 curl -X POST http://localhost:8000/ingest/gtfs-static
+curl http://localhost:8000/ingest/status   # poll until last_status == "ok"
 
 # 5. Query routes
 curl "http://localhost:8000/routes?origin=UN&destination=GL"
@@ -83,8 +84,9 @@ ollama serve   # OLLAMA_BASE_URL default (localhost:11434) works fine outside Do
 # 4. Start the API (SQLite — no database setup needed)
 uv run uvicorn api.main:app --port 8000
 
-# 5. Load GTFS data (first run only; ~30 s)
+# 5. Load GTFS data (first run only; returns 202, ~30 s in the background)
 curl -X POST http://localhost:8000/ingest/gtfs-static
+curl http://localhost:8000/ingest/status   # poll until last_status == "ok"
 
 # 6. Query routes
 curl "http://localhost:8000/routes?origin=UN&destination=GL"
@@ -110,6 +112,7 @@ Return up to N reliability-scored routes between two stops.
 - `200` — routes found; body contains `routes` array (+ optional `explanation` string)
 - `404` — unknown stop ID, or no routes exist between the stops
 - `422` — invalid parameter format
+- `429` — per-IP rate limit exceeded (see `RATE_LIMIT_PER_MINUTE`)
 
 **Example response:**
 ```json
@@ -141,8 +144,12 @@ Each leg `risk` object contains:
 |-------|------|-------------|
 | `risk_score` | float 0–1 | Combined historical + live risk (higher = riskier) |
 | `risk_label` | string | `Low` (< 0.33) / `Medium` (< 0.66) / `High` |
-| `modifiers` | list[str] | Human-readable notes (alerts, cancellations, late evening, etc.) |
+| `modifiers` | list[str] | Human-readable notes (alerts, cancellations, running late, late evening, etc.) |
 | `is_cancelled` | bool | `true` if the trip is currently marked cancelled in GTFS-RT |
+
+Same-day trip legs that are currently in the GTFS-RT feed with a non-zero
+delay also carry `live_delay_seconds`, `expected_departure`, and
+`expected_arrival` (scheduled + live delay).
 
 ---
 
@@ -197,12 +204,27 @@ All counts are `0` (and timestamps `null`) before `/ingest/gtfs-static` has been
 
 ### `POST /ingest/gtfs-static`
 
-Trigger a full GTFS static data refresh and graph rebuild. Runs automatically
-on a daily schedule; call manually after first install.
+Trigger a full GTFS static data refresh and graph rebuild **in the
+background**. Runs automatically on a daily schedule; call manually after
+first install.
 
 If `INGEST_API_KEY` is set, the request must include `X-API-Key: <key>`.
 
-**Responses:** `200 {"status": "ok", ...}` on success; `401` if key is wrong/missing.
+**Responses:** `202 {"status": "accepted", ...}` — the ingest (~60 s) runs
+in the background; poll `GET /ingest/status` for completion. `401` if the
+key is wrong/missing; `409` if an ingest is already running.
+
+### `GET /ingest/status`
+
+State of the current or most recent ingest (manual or scheduled):
+`{running, started_at, finished_at, last_status, last_message}`.
+Requires the same optional `X-API-Key` as the ingest endpoints.
+
+### `GET /alerts`
+
+Active GTFS-RT service alerts (header, description, affected routes/stops,
+fetched_at) — lets a frontend show a disruption banner without requesting
+routes. Empty until RT polling is active.
 
 ---
 
@@ -252,16 +274,22 @@ curl -X POST "http://localhost:8000/ingest/reliability-seed?window_days=30"
 Risk is scored per leg, then the **maximum leg risk** is used as the route
 risk (ADR-006 — the weakest link dominates).
 
-**Historical prior** — rolling 14–30 day window per route / stop / time
-bucket:
+**Historical prior** — per route / stop / time bucket, decayed daily with a
+14-day half-life so stats always reflect the recent window:
 - `weekday_am_peak` (06:00–09:00)
 - `weekday_pm_peak` (15:00–19:00)
 - `weekday_offpeak`
 - `weekend`
 
-**Live modifiers** (applied on top of historical prior):
+Observations come from GTFS-RT: recorded departures with delays,
+cancellations, and **no-shows** (scheduled trips that never appeared in any
+RT feed during continuous polling coverage are swept as misses).
+
+**Live modifiers** (applied on top of historical prior; per-trip signals
+apply to same-day travel only):
 - Active service alert for this route or stop
 - Same-day cancellation on this trip
+- Trip currently running late (tiered: ≥5 min, ≥15 min)
 - Missing vehicle position near departure
 - Late-evening departure (after 22:00)
 
@@ -277,16 +305,23 @@ All settings are environment variables (see `.env.example`):
 |----------|---------|-------------|
 | `DATABASE_URL` | `sqlite:///data/transit.db` | SQLite for dev; set to PostgreSQL for prod |
 | `GTFS_STATIC_URL` | Metrolinx CDN | URL of GO GTFS ZIP |
+| `GTFS_REFRESH_HOURS` | `24` | Interval of the scheduled static refresh |
 | `GTFS_RT_API_KEY` | *(blank)* | Metrolinx Open Data API key; RT polling disabled if unset |
+| `GTFS_RT_POLL_SECONDS` | `30` | GTFS-RT poll interval (`0` = startup fetch only) |
+| `AGENCY_TZ` | `America/Toronto` | Agency-local timezone for all schedule-time comparisons |
 | `LLM_PROVIDER` | `ollama` | `ollama` (default, bundled in Docker) or `gemini` |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama URL; auto-set to `http://ollama:11434` inside Docker |
 | `OLLAMA_MODEL` | `llama3.2` | Ollama model (pull once: `docker compose exec ollama ollama pull llama3.2`) |
 | `GEMINI_API_KEY` | *(blank)* | Required when `LLM_PROVIDER=gemini` |
 | `GEMINI_MODEL` | `gemini-2.5-flash` | Gemini model name |
+| `INGEST_API_KEY` | *(blank)* | If set, `/ingest/*` requires `X-API-Key` header |
+| `RATE_LIMIT_PER_MINUTE` | `100` | Per-IP request cap on `/routes`, `/stops`, `/alerts` (`0` disables) |
+| `CORS_ORIGINS` | `http://localhost:3000` | Comma-separated allowed frontend origins |
 | `MAX_ROUTES` | `5` | Max candidate routes returned |
 | `MAX_TRANSFERS` | `2` | Hard cap on route changes |
 | `MIN_TRANSFER_MINUTES` | `10` | Minimum transfer buffer |
 | `MAX_WALK_METRES` | `500` | Walking transfer radius |
+| `WALK_SPEED_KPH` | `4.5` | Assumed walking speed for transfer durations |
 
 ---
 

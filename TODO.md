@@ -223,15 +223,12 @@ adopting Alembic instead of manual SQL.
 
 ## Docs
 
-### Config docs drift
+### ✅ Config docs drift (done 2026-07-10)
 
-- `.env.example` is missing `MAX_WALK_METRES` and `WALK_SPEED_KPH`
-  (both read by `config.py`).
-- README's configuration table omits `WALK_SPEED_KPH`,
-  `GTFS_REFRESH_HOURS`, `GTFS_RT_POLL_SECONDS`, `INGEST_API_KEY`, and
-  `CORS_ORIGINS`.
-
-One sync pass over `config.py` → `.env.example` → README.
+> `.env.example` and the README config table now cover every `config.py`
+> variable (incl. new `AGENCY_TZ` and `RATE_LIMIT_PER_MINUTE`); README API
+> docs updated for 202 ingest + `/ingest/status`, `/alerts`, 429s,
+> expected times, and the no-show / decay risk-model changes.
 
 ## Performance (later)
 
