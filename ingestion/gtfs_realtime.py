@@ -276,6 +276,20 @@ async def poll_all() -> None:
         )
 
 
+def get_rt_status() -> dict[str, Any]:
+    """Snapshot of RT polling health, surfaced on /health so an operator
+    can tell the feeds have been failing without reading logs."""
+    return {
+        "last_fetched_at": _last_fetched.isoformat() if _last_fetched else None,
+        "consecutive_failures": _consecutive_poll_failures,
+        "backing_off_until": _backoff_until.isoformat() if _backoff_until else None,
+        "polling_coverage_since": _polling_since.isoformat() if _polling_since else None,
+        "trip_updates": len(trip_updates),
+        "service_alerts": len(service_alerts),
+        "vehicle_positions": len(vehicle_positions),
+    }
+
+
 def _parse_scheduled_at(
     departure_time_str: str, service_id: str, trip_id: str = ""
 ) -> datetime | None:

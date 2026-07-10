@@ -112,6 +112,16 @@ class TestHealth:
         assert "records" in rel
         assert "last_seeded_at" in rel
 
+    def test_gtfs_rt_freshness_fields_present(self, client):
+        """Operators need feed health, not just a polling flag."""
+        rt = client.get("/health").json()["gtfs_rt"]
+        assert "last_fetched_at" in rt
+        assert "consecutive_failures" in rt
+        assert "backing_off_until" in rt
+        assert "polling_coverage_since" in rt
+        assert rt["trip_updates"] == 0  # nothing polled in tests
+        assert rt["consecutive_failures"] == 0
+
     def test_gtfs_rt_section_present(self, client):
         body = client.get("/health").json()
         assert "polling_active" in body["gtfs_rt"]
@@ -200,6 +210,40 @@ class TestStopsSearch:
 
         result = client.get("/stops?query=Guelph").json()[0]
         assert set(result.keys()) == {"stop_id", "stop_name", "lat", "lon", "routes_served"}
+
+
+# ---------------------------------------------------------------------------
+# GET /alerts
+# ---------------------------------------------------------------------------
+
+class TestAlerts:
+    @pytest.fixture(autouse=True)
+    def _clean_rt_state(self):
+        from ingestion.mock_realtime import clear_all
+        clear_all()
+        yield
+        clear_all()
+
+    def test_empty_when_no_alerts(self, client):
+        resp = client.get("/alerts")
+        assert resp.status_code == 200
+        assert resp.json() == []
+
+    def test_returns_active_alerts(self, client):
+        from ingestion.mock_realtime import inject_alert
+
+        inject_alert(
+            "A1", "Detour on Route 27", "Construction at Hwy 7",
+            route_ids=["R27"], stop_ids=["S1"],
+        )
+        body = client.get("/alerts").json()
+
+        assert len(body) == 1
+        assert body[0]["alert_id"] == "A1"
+        assert body[0]["header"] == "Detour on Route 27"
+        assert body[0]["affected_route_ids"] == ["R27"]
+        assert body[0]["affected_stop_ids"] == ["S1"]
+        assert body[0]["fetched_at"]  # ISO timestamp present
 
 
 # ---------------------------------------------------------------------------

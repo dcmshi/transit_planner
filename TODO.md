@@ -156,19 +156,16 @@ run via the existing scheduler/`asyncio.to_thread`, and expose status on
 `/health` (or a `/ingest/status`).  Take a simple in-process lock so manual
 ingest and the daily refresh can't overlap.
 
-### Surface GTFS-RT feed freshness in `/health`
+### ✅ Surface GTFS-RT feed freshness in `/health` (done 2026-07-10)
 
-`_last_fetched`, `_consecutive_poll_failures`, and `_backoff_until` exist in
-`ingestion/gtfs_realtime.py` but `/health` only reports `polling_active`.
-An operator can't tell that all three feeds have been failing for 30 min.
-Add `last_fetched_at`, `consecutive_failures`, and `backing_off_until`.
+> `get_rt_status()` merged into the `gtfs_rt` health section:
+> `last_fetched_at`, `consecutive_failures`, `backing_off_until`,
+> `polling_coverage_since`, and live entity counts.
 
-### `GET /alerts` endpoint
+### ✅ `GET /alerts` endpoint (done 2026-07-10)
 
-Active service alerts are only visible today via `?explain=true` or leg
-modifiers.  A thin read-only endpoint over `service_alerts` (header,
-description, affected routes/stops, fetched_at) would let a frontend show
-a banner without requesting routes.
+> Read-only, rate-limited endpoint over the in-memory `service_alerts`
+> snapshot (header, description, affected routes/stops, fetched_at).
 
 ### Security niceties
 

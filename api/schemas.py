@@ -99,6 +99,14 @@ class ReliabilityStats(BaseModel):
 class GtfsRtStats(BaseModel):
     polling_active: bool
     startup_fetch_only: bool
+    # Feed health — how fresh the RT data actually is.
+    last_fetched_at: str | None
+    consecutive_failures: int
+    backing_off_until: str | None
+    polling_coverage_since: str | None  # start of continuous coverage (no-show sweeps)
+    trip_updates: int
+    service_alerts: int
+    vehicle_positions: int
 
 
 class HealthResponse(BaseModel):
@@ -107,6 +115,19 @@ class HealthResponse(BaseModel):
     gtfs: GtfsStats
     reliability: ReliabilityStats
     gtfs_rt: GtfsRtStats
+
+
+# ---------------------------------------------------------------------------
+# GET /alerts
+# ---------------------------------------------------------------------------
+
+class AlertResult(BaseModel):
+    alert_id: str
+    header: str
+    description: str
+    affected_route_ids: list[str]
+    affected_stop_ids: list[str]
+    fetched_at: str
 
 
 # ---------------------------------------------------------------------------

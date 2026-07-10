@@ -34,6 +34,7 @@ from fastapi.security import APIKeyHeader
 from sqlalchemy.orm import Session
 
 from api.schemas import (
+    AlertResult,
     HealthResponse,
     IngestResponse,
     RoutesResponse,
@@ -48,7 +49,7 @@ from config import (
 from db.session import SessionLocal, get_session, init_db
 from graph.builder import build_graph, get_graph, get_last_built_at
 from gtfs_time import hms_to_seconds, seconds_to_hms
-from ingestion.gtfs_realtime import poll_all
+from ingestion.gtfs_realtime import get_rt_status, poll_all, service_alerts
 from ingestion.gtfs_static import refresh_static_data
 from ingestion.seed_reliability import seed_from_static
 from llm.explainer import explain_routes
@@ -378,6 +379,7 @@ def health(session: Session = Depends(get_session)) -> HealthResponse:
         "gtfs_rt": {
             "polling_active": GTFS_RT_API_KEY != "" and GTFS_RT_POLL_SECONDS > 0 and scheduler.running,
             "startup_fetch_only": GTFS_RT_API_KEY != "" and GTFS_RT_POLL_SECONDS == 0,
+            **get_rt_status(),
         },
     }
 
@@ -421,6 +423,23 @@ def search_stops(
             "routes_served": sorted(routes_by_stop[s.stop_id]),
         }
         for s in results
+    ]
+
+
+@app.get("/alerts", response_model=list[AlertResult])
+def get_alerts(_: None = Depends(_rate_limit)) -> list[AlertResult]:
+    """Active GTFS-RT service alerts — lets a frontend show a disruption
+    banner without requesting routes.  Empty until RT polling is active."""
+    return [
+        {
+            "alert_id": a.alert_id,
+            "header": a.header,
+            "description": a.description,
+            "affected_route_ids": a.affected_route_ids,
+            "affected_stop_ids": a.affected_stop_ids,
+            "fetched_at": a.fetched_at.isoformat(),
+        }
+        for a in service_alerts
     ]
 
 
@@ -584,7 +603,6 @@ async def get_routes(
     response: dict[str, Any] = {"routes": scored_routes}
 
     if explain:
-        from ingestion.gtfs_realtime import service_alerts
         alerts_payload = [
             {"header": a.header, "description": a.description,
              "routes": a.affected_route_ids, "stops": a.affected_stop_ids}
