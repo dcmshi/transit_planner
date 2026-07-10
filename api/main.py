@@ -45,6 +45,7 @@ from config import (
 )
 from db.session import SessionLocal, get_session, init_db
 from graph.builder import build_graph, get_graph, get_last_built_at
+from gtfs_time import hms_to_seconds
 from ingestion.gtfs_realtime import poll_all
 from ingestion.gtfs_static import refresh_static_data
 from ingestion.seed_reliability import seed_from_static
@@ -405,7 +406,7 @@ def _score_routes_blocking(
 
     # Agency-local naive wall clock — the same frame as schedule times.
     query_dt = datetime.now(AGENCY_TZ).replace(tzinfo=None)
-    time_bucket = classify_time_bucket(query_dt)
+    travel_day = departure_dt.date()
 
     scored_routes: list[dict[str, Any]] = []
     for route_legs in routes:
@@ -417,8 +418,14 @@ def _score_routes_blocking(
                 scored_legs.append(leg)
                 continue
 
+            # The leg's scheduled departure on the travel date — GTFS times
+            # may exceed 24:00:00, so timedelta rolls into the next day.
+            # Risk is keyed to when the bus runs, not when the query is made.
+            leg_dt = datetime(travel_day.year, travel_day.month, travel_day.day) + timedelta(
+                seconds=hms_to_seconds(leg["departure_time"])
+            )
             hist = get_historical_reliability(
-                leg["route_id"], leg["from_stop_id"], time_bucket, session
+                leg["route_id"], leg["from_stop_id"], classify_time_bucket(leg_dt), session
             )
             live = compute_live_risk(
                 route_id=leg["route_id"],
@@ -427,6 +434,7 @@ def _score_routes_blocking(
                 departure_time_str=leg["departure_time"],
                 query_dt=query_dt,
                 historical_reliability=hist,
+                scheduled_dt=leg_dt,
             )
             scored_legs.append({**leg, "risk": live})
             route_risk_scores.append(live["risk_score"])

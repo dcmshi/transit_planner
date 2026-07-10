@@ -271,6 +271,63 @@ class TestComputeLiveRisk:
 
         assert result["risk_score"] <= 1.0
 
+    def test_weekend_bump_uses_travel_date_not_query_date(self):
+        """Regression: a Friday query for Saturday travel gets the weekend
+        bump (old code keyed the bump to the query's weekday)."""
+        friday_query = datetime(2026, 2, 6, 14, 0)     # Friday
+        saturday_dep = datetime(2026, 2, 7, 14, 0)     # Saturday travel
+        with patch(f"{_LIVE}.trip_updates", {}), \
+             patch(f"{_LIVE}.service_alerts", []), \
+             patch(f"{_LIVE}.vehicle_positions", {}):
+            result = compute_live_risk(
+                route_id="R1", stop_id="S1", trip_id="T1",
+                departure_time_str="14:00:00",
+                query_dt=friday_query,
+                historical_reliability=0.8,
+                scheduled_dt=saturday_dep,
+            )
+
+        expected = pytest.approx(0.2 + WEEKEND_RISK_BUMP, abs=1e-9)
+        assert result["risk_score"] == expected
+        assert any("weekend" in m.lower() for m in result["modifiers"])
+
+    def test_no_weekend_bump_for_weekday_travel_queried_on_weekend(self):
+        saturday_query = datetime(2026, 2, 7, 14, 0)   # Saturday
+        monday_dep = datetime(2026, 2, 9, 14, 0)       # Monday travel
+        with patch(f"{_LIVE}.trip_updates", {}), \
+             patch(f"{_LIVE}.service_alerts", []), \
+             patch(f"{_LIVE}.vehicle_positions", {}):
+            result = compute_live_risk(
+                route_id="R1", stop_id="S1", trip_id="T1",
+                departure_time_str="14:00:00",
+                query_dt=saturday_query,
+                historical_reliability=0.8,
+                scheduled_dt=monday_dep,
+            )
+
+        assert result["risk_score"] == pytest.approx(0.2, abs=1e-9)
+        assert not any("weekend" in m.lower() for m in result["modifiers"])
+
+    def test_missing_vehicle_window_not_applied_to_future_dates(self):
+        """Regression: a trip departing 10 minutes past the query's wall
+        clock — but tomorrow — must not get the missing-vehicle bump (old
+        code compared seconds-past-midnight only)."""
+        query = datetime(2026, 2, 9, 13, 0)            # Monday 13:00
+        tomorrow_dep = datetime(2026, 2, 10, 13, 10)   # Tuesday 13:10
+        with patch(f"{_LIVE}.trip_updates", {}), \
+             patch(f"{_LIVE}.service_alerts", []), \
+             patch(f"{_LIVE}.vehicle_positions", {}):
+            result = compute_live_risk(
+                route_id="R1", stop_id="S1", trip_id="T1",
+                departure_time_str="13:10:00",
+                query_dt=query,
+                historical_reliability=0.8,
+                scheduled_dt=tomorrow_dep,
+            )
+
+        assert result["risk_score"] == pytest.approx(0.2, abs=1e-9)
+        assert result["modifiers"] == []
+
     def test_risk_label_thresholds(self):
         """Verify Low < 0.33, Medium < 0.66, High ≥ 0.66."""
         with patch(f"{_LIVE}.trip_updates", {}), \

@@ -44,9 +44,18 @@ def compute_live_risk(
     departure_time_str: str,  # HH:MM:SS scheduled departure
     query_dt: datetime,
     historical_reliability: float,
+    scheduled_dt: datetime | None = None,
 ) -> dict[str, Any]:
     """
     Compute the final risk score for a single trip leg.
+
+    Time-keyed modifiers (weekend, missing vehicle) are keyed off the leg's
+    scheduled departure datetime, not the moment the query is made — a
+    Friday query for Saturday travel must get the weekend bump, and a trip
+    departing "in 10 minutes" tomorrow must not get the missing-vehicle
+    bump.  Callers that know the travel date pass scheduled_dt (naive
+    agency-local); when omitted it falls back to anchoring the GTFS time on
+    query_dt's date (same-day semantics).
 
     Returns:
         {
@@ -56,6 +65,15 @@ def compute_live_risk(
           "is_cancelled": bool,
         }
     """
+    # Normalise to naive agency-local wall clock for datetime arithmetic.
+    query_naive = query_dt.replace(tzinfo=None) if query_dt.tzinfo else query_dt
+    if scheduled_dt is None:
+        scheduled_dt = datetime(
+            query_naive.year, query_naive.month, query_naive.day
+        ) + timedelta(seconds=_hms_to_seconds(departure_time_str))
+    elif scheduled_dt.tzinfo:
+        scheduled_dt = scheduled_dt.replace(tzinfo=None)
+
     # Start from the inverse of historical reliability
     base_risk = 1.0 - historical_reliability
     total_adjustment = 0.0
@@ -86,22 +104,24 @@ def compute_live_risk(
             f"{same_route_cancels} earlier cancellation(s) on route {route_id} today."
         )
 
-    # 4. Vehicle position missing near departure
-    dep_seconds = _hms_to_seconds(departure_time_str)
-    query_seconds = query_dt.hour * 3600 + query_dt.minute * 60 + query_dt.second
-    minutes_until_departure = (dep_seconds - query_seconds) / 60
+    # 4. Vehicle position missing near departure — full-datetime comparison
+    #    so a "10 minutes past the hour" departure on a future date does not
+    #    trigger the window.
+    minutes_until_departure = (scheduled_dt - query_naive).total_seconds() / 60
 
     if 0 < minutes_until_departure <= 15 and trip_id not in vehicle_positions:
         total_adjustment += MISSING_VEHICLE_RISK_BUMP
         modifiers.append("No vehicle position data found close to departure.")
 
-    # 5. Late-evening service
+    # 5. Late-evening service — from the GTFS time string so >24:00:00
+    #    post-midnight departures still count as late evening.
+    dep_seconds = _hms_to_seconds(departure_time_str)
     if dep_seconds >= LATE_EVENING_START_SEC:
         total_adjustment += LATE_EVENING_RISK_BUMP
         modifiers.append("Late-evening departure (after 22:00) — reduced service frequency.")
 
-    # 6. Weekend service
-    if query_dt.weekday() >= 5:
+    # 6. Weekend service — keyed to the travel day, not the query day.
+    if scheduled_dt.weekday() >= 5:
         total_adjustment += WEEKEND_RISK_BUMP
         modifiers.append("Weekend service — less frequent, higher no-show rate historically.")
 

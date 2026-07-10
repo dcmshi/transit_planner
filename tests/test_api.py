@@ -335,6 +335,26 @@ class TestGetRoutes:
         assert route["risk_label"] == "Low"
         assert route["risk_score"] == pytest.approx(0.2, abs=0.01)
 
+    def test_historical_bucket_uses_leg_departure_not_query_time(self, client):
+        """Regression: the historical-reliability bucket must come from the
+        leg's scheduled departure on the travel date (a 08:00 weekday leg →
+        weekday_am_peak), not from the wall clock at query time."""
+        with (
+            patch("api.main.find_routes", return_value=[_FAKE_ROUTE]),
+            patch("api.main.get_historical_reliability", return_value=0.8) as mock_hist,
+            patch("api.main.compute_live_risk", return_value=_FAKE_LIVE_RISK) as mock_live,
+        ):
+            resp = client.get(
+                "/routes?origin=UN&destination=GL"
+                "&travel_date=2026-02-11&departure_time=08:00"  # Wednesday
+            )
+
+        assert resp.status_code == 200
+        # _FAKE_ROUTE departs 08:00:00 on 2026-02-11 → weekday_am_peak,
+        # regardless of when this test happens to run.
+        assert mock_hist.call_args.args[2] == "weekday_am_peak"
+        assert mock_live.call_args.kwargs["scheduled_dt"] == datetime(2026, 2, 11, 8, 0, 0)
+
     def test_hhmm_departure_time_accepted(self, client):
         """HH:MM (without seconds) should be accepted."""
         with (

@@ -30,7 +30,14 @@ GTFS times are America/Toronto local, but the code mixes naive
 Fix: add a `TIMEZONE = ZoneInfo("America/Toronto")` config constant and use
 it for every point where "now" is compared against schedule times.
 
-### Risk is scored at query time, not travel time
+### ✅ Risk is scored at query time, not travel time (done 2026-07-10)
+
+> Fixed: `_score_routes_blocking` derives each leg's scheduled datetime from
+> the travel date + GTFS departure time (with >24:00:00 rollover) and uses it
+> for the historical bucket; `compute_live_risk` takes a `scheduled_dt` param
+> keying the weekend bump and the missing-vehicle window to the travel day
+> (full-datetime comparison).  Regression tests in `test_reliability.py` and
+> `test_api.py`.
 
 `_score_routes_blocking` (`api/main.py`) uses `query_dt = datetime.now()`
 for all scoring, ignoring the requested `travel_date`/`departure_time`:
