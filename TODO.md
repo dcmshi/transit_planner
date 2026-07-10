@@ -99,7 +99,12 @@ have pollers build the new dict and swap via a module-level holder
 object (readers grab a reference snapshot), or guard both sides with a
 lock, or iterate over `list(...)` copies inside the scoring path.
 
-### `/routes` returns strictly dominated routes  [MEDIUM]
+### ✅ `/routes` returns strictly dominated routes  [MEDIUM] (fixed 2026-07-10)
+
+> `_prune_dominated` in `api/main.py` drops any scored route that departs
+> no later, arrives no earlier, with no fewer transfers and no lower risk
+> than another (ties keep both), then sorts survivors by arrival time —
+> the response order is now earliest-arrival, not Yen's path weight.
 
 Live example (Sat 2026-07-11, GL → UN, departure 09:00): all five
 results depart 16:08; #1 arrives 17:35 with 0 transfers, #2–#5 all

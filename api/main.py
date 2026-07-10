@@ -512,6 +512,56 @@ def get_alerts(_: None = Depends(_rate_limit)) -> list[AlertResult]:
     ]
 
 
+def _prune_dominated(scored_routes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """
+    Drop routes strictly worse than another on every axis, then sort by
+    arrival time.
+
+    Route B is dominated by A when A departs no earlier (less waiting at
+    the origin), arrives no later, has no more transfers, and is no
+    riskier — with at least one axis strictly better.  Yen's + the
+    later-departure fill can produce e.g. four options that all leave with
+    option #1 but arrive hours later with two extra transfers; showing
+    them helps no rider.  Ties on every axis keep both routes.
+
+    Routes without trip legs (filtered upstream, handled defensively) are
+    incomparable — always kept, appended last.
+    """
+    comparable: list[tuple[tuple[int, int, int, float], dict[str, Any]]] = []
+    incomparable: list[dict[str, Any]] = []
+    for route in scored_routes:
+        trip_legs = [leg for leg in route["legs"] if leg["kind"] == "trip"]
+        if not trip_legs:
+            incomparable.append(route)
+            continue
+        comparable.append((
+            (
+                hms_to_seconds(trip_legs[0]["departure_time"]),
+                hms_to_seconds(trip_legs[-1]["arrival_time"]),
+                route["transfers"],
+                route["risk_score"],
+            ),
+            route,
+        ))
+
+    survivors: list[tuple[tuple[int, int, int, float], dict[str, Any]]] = []
+    for i, (m_i, route) in enumerate(comparable):
+        dep_i, arr_i, tr_i, risk_i = m_i
+        dominated = any(
+            dep_j >= dep_i and arr_j <= arr_i and tr_j <= tr_i and risk_j <= risk_i
+            and (dep_j > dep_i or arr_j < arr_i or tr_j < tr_i or risk_j < risk_i)
+            for j, ((dep_j, arr_j, tr_j, risk_j), _r) in enumerate(comparable)
+            if j != i
+        )
+        if not dominated:
+            survivors.append((m_i, route))
+
+    # Earliest arrival first (ties by risk, then transfers) — Yen's path
+    # weight is not a meaningful presentation order for riders.
+    survivors.sort(key=lambda mr: (mr[0][1], mr[0][3], mr[0][2]))
+    return [route for _m, route in survivors] + incomparable
+
+
 def _score_routes_blocking(
     origin: str,
     destination: str,
@@ -631,7 +681,7 @@ def _score_routes_blocking(
             "risk_label": risk_label,
         })
 
-    return scored_routes
+    return _prune_dominated(scored_routes)
 
 
 @app.get("/routes", response_model=RoutesResponse)

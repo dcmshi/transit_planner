@@ -215,6 +215,67 @@ class TestStopsSearch:
 
 
 # ---------------------------------------------------------------------------
+# Dominance pruning
+# ---------------------------------------------------------------------------
+
+def _scored_route(dep, arr, transfers=0, risk=0.2):
+    return {
+        "legs": [{"kind": "trip", "departure_time": dep, "arrival_time": arr}],
+        "transfers": transfers,
+        "risk_score": risk,
+    }
+
+
+class TestDominancePruning:
+    def test_strictly_dominated_route_dropped(self):
+        """Regression (live example): options departing together where one
+        arrives 3h later with 2 extra transfers helped no rider."""
+        from api.main import _prune_dominated
+
+        best = _scored_route("16:08:00", "17:35:00", transfers=0)
+        worse = _scored_route("16:08:00", "20:35:00", transfers=2)
+        assert _prune_dominated([worse, best]) == [best]
+
+    def test_tradeoff_routes_both_kept(self):
+        from api.main import _prune_dominated
+
+        early_risky = _scored_route("16:00:00", "17:00:00", risk=0.6)
+        later_safe = _scored_route("16:30:00", "17:30:00", risk=0.2)
+        assert len(_prune_dominated([early_risky, later_safe])) == 2
+
+    def test_identical_routes_both_kept(self):
+        from api.main import _prune_dominated
+
+        a = _scored_route("16:00:00", "17:00:00")
+        b = _scored_route("16:00:00", "17:00:00")
+        assert len(_prune_dominated([a, b])) == 2  # ties don't dominate
+
+    def test_survivors_sorted_by_arrival(self):
+        from api.main import _prune_dominated
+
+        late = _scored_route("18:00:00", "19:00:00")
+        early = _scored_route("16:00:00", "17:00:00")
+        result = _prune_dominated([late, early])
+        assert result == [early, late]
+
+    def test_endpoint_drops_dominated_route(self, client):
+        dominated_route = [{**_FAKE_ROUTE[0], "arrival_time": "11:30:00"}]
+        with (
+            patch("api.main.find_routes", return_value=[_FAKE_ROUTE, dominated_route]),
+            patch("api.main.get_historical_reliability_batch", return_value={}),
+            patch("api.main.compute_live_risk", return_value=_FAKE_LIVE_RISK),
+        ):
+            body = client.get(
+                "/routes?origin=UN&destination=GL"
+                "&travel_date=2026-02-11&departure_time=08:00"
+            ).json()
+
+        # Same departure/transfers/risk, arrives 2h later → pruned.
+        assert len(body["routes"]) == 1
+        assert body["routes"][0]["legs"][0]["arrival_time"] == "09:21:00"
+
+
+# ---------------------------------------------------------------------------
 # GET /alerts
 # ---------------------------------------------------------------------------
 
