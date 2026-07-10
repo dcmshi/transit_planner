@@ -114,7 +114,7 @@ class ObservedTrip(Base):
     __tablename__ = "observed_trips"
 
     trip_id = Column(String, primary_key=True)
-    recorded_date = Column(String, primary_key=True)  # YYYYMMDD (UTC)
+    recorded_date = Column(String, primary_key=True)  # YYYYMMDD (agency-local)
 
 
 class ReliabilityRecord(Base):

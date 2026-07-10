@@ -27,6 +27,7 @@ from datetime import date, datetime, timedelta, timezone
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from config import AGENCY_TZ
 from db.models import ReliabilityRecord
 from reliability.historical import classify_time_bucket
 
@@ -105,8 +106,9 @@ def seed_from_static(
             f"service_id values are not YYYYMMDD dates: {exc}"
         ) from exc
 
-    # Start from today if it falls within the feed; otherwise use the feed start.
-    today = datetime.now(timezone.utc).date()
+    # Start from today (agency-local — service days roll at local midnight)
+    # if it falls within the feed; otherwise use the feed start.
+    today = datetime.now(AGENCY_TZ).date()
     window_start = max(db_min, today) if today <= db_max else db_min
     window_end = min(window_start + timedelta(days=window_days - 1), db_max)
 

@@ -39,7 +39,7 @@ from api.schemas import (
     StopResult,
 )
 from config import (
-    CORS_ORIGINS, GTFS_REFRESH_HOURS, GTFS_RT_ALERTS_URL, GTFS_RT_API_KEY,
+    AGENCY_TZ, CORS_ORIGINS, GTFS_REFRESH_HOURS, GTFS_RT_ALERTS_URL, GTFS_RT_API_KEY,
     GTFS_RT_POLL_SECONDS, GTFS_RT_TRIP_UPDATES_URL, GTFS_RT_VEHICLE_POSITIONS_URL,
     GTFS_STATIC_URL, INGEST_API_KEY, MAX_ROUTES,
 )
@@ -403,7 +403,8 @@ def _score_routes_blocking(
     if not routes:
         raise HTTPException(status_code=404, detail="No routes found between these stops.")
 
-    query_dt = datetime.now()
+    # Agency-local naive wall clock — the same frame as schedule times.
+    query_dt = datetime.now(AGENCY_TZ).replace(tzinfo=None)
     time_bucket = classify_time_bucket(query_dt)
 
     scored_routes: list[dict[str, Any]] = []
@@ -474,15 +475,17 @@ async def get_routes(
             detail="Origin and destination must be different stops.",
         )
 
-    # Parse departure datetime, defaulting to now.
+    # Parse departure datetime, defaulting to now in the agency's timezone.
+    # departure_dt stays naive agency-local wall clock — the same frame as
+    # GTFS schedule times.
     try:
-        base_date = Date.fromisoformat(travel_date) if travel_date else datetime.now().date()
+        base_date = Date.fromisoformat(travel_date) if travel_date else datetime.now(AGENCY_TZ).date()
         if departure_time:
             parts = departure_time.split(":")
             h, m, s = int(parts[0]), int(parts[1]), int(parts[2]) if len(parts) > 2 else 0
             departure_dt = datetime(base_date.year, base_date.month, base_date.day, h, m, s)
         else:
-            now = datetime.now()
+            now = datetime.now(AGENCY_TZ)
             departure_dt = datetime(base_date.year, base_date.month, base_date.day,
                                     now.hour, now.minute, now.second)
     except (ValueError, IndexError) as exc:

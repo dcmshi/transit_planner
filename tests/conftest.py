@@ -1,0 +1,18 @@
+"""
+Pin the unit-test environment before any application module is imported.
+
+config.py reads .env at import time via load_dotenv(), so a developer's
+local .env (e.g. one pointing DATABASE_URL at the Docker PostgreSQL) would
+otherwise leak into the unit suite — the PostGIS Geography column on Stop
+cannot be created on the SQLite databases these tests build.
+
+This conftest runs before config.py is imported and before load_dotenv()
+executes; load_dotenv never overrides variables that are already set, so
+the setdefault below beats .env while still respecting an explicit shell
+export (which is how tests/integration/ opts in to PostgreSQL:
+DATABASE_URL=postgresql+... uv run pytest tests/integration/ -q).
+"""
+
+import os
+
+os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")

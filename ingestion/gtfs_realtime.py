@@ -22,6 +22,7 @@ from google.transit import gtfs_realtime_pb2
 from sqlalchemy.orm import Session
 
 from config import (
+    AGENCY_TZ,
     GTFS_RT_ALERTS_URL,
     GTFS_RT_API_KEY,
     GTFS_RT_POLL_SECONDS,
@@ -257,14 +258,17 @@ def _parse_scheduled_at(
 ) -> datetime | None:
     """Convert GTFS departure_time string + service_id (YYYYMMDD) to a datetime.
 
-    Handles GTFS times > 24:00:00 (post-midnight trips) via timedelta.
+    GTFS times are agency-local wall clock, so the result is anchored to
+    AGENCY_TZ (aware) — comparing it against UTC "now" then converts
+    correctly.  Handles GTFS times > 24:00:00 (post-midnight trips) via
+    timedelta on the naive wall clock before attaching the zone.
     Returns None (and logs a warning) on malformed input — the caller skips
     the observation, so silence here would hide dropped data.
     """
     try:
         h, m, s = (int(x) for x in departure_time_str.split(":"))
-        base = datetime.strptime(service_id, "%Y%m%d").replace(tzinfo=timezone.utc)
-        return base + timedelta(hours=h, minutes=m, seconds=s)
+        naive = datetime.strptime(service_id, "%Y%m%d") + timedelta(hours=h, minutes=m, seconds=s)
+        return naive.replace(tzinfo=AGENCY_TZ)
     except (ValueError, AttributeError):
         logger.warning(
             "_parse_scheduled_at: could not parse departure_time=%r service_id=%r "
@@ -288,7 +292,8 @@ def observe_departures(session: Session) -> int:
 
     from db.models import ObservedTrip, StopTime, Trip
 
-    today = datetime.now(timezone.utc).date().strftime("%Y%m%d")
+    # Service days roll over at agency-local midnight, not UTC midnight.
+    today = datetime.now(AGENCY_TZ).date().strftime("%Y%m%d")
     if today != _recorded_date:
         # Stale or empty in-memory state (new day, or fresh process after a
         # restart) — reload today's dedup markers from the DB so already

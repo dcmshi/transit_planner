@@ -13,6 +13,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from config import AGENCY_TZ
 from db.models import Base, Route, Stop, StopTime, Trip
 import ingestion.gtfs_realtime as rt_mod
 from ingestion.gtfs_realtime import (
@@ -45,14 +46,15 @@ def obs_db():
     session.add(Stop(stop_id="S2", stop_name="Stop 2", stop_lat=43.1, stop_lon=-79.1))
     session.add(Route(route_id="R1", route_short_name="1", route_long_name="Test", route_type=3))
 
-    # Trip that ran yesterday at 08:00 and 08:30 (service_id = yesterday's date)
-    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y%m%d")
+    # Trip that ran yesterday at 08:00 and 08:30 (service_id = yesterday's date,
+    # agency-local — service days roll at agency midnight)
+    yesterday = (datetime.now(AGENCY_TZ) - timedelta(days=1)).strftime("%Y%m%d")
     session.add(Trip(trip_id="T_past", route_id="R1", service_id=yesterday, trip_headsign="GL", direction_id=0))
     session.add(StopTime(trip_id="T_past", stop_id="S1", stop_sequence=1, departure_time="08:00:00", arrival_time="08:00:00"))
     session.add(StopTime(trip_id="T_past", stop_id="S2", stop_sequence=2, departure_time="08:30:00", arrival_time="08:30:00"))
 
     # Trip scheduled far in the future (tomorrow at 23:00)
-    tomorrow = (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%Y%m%d")
+    tomorrow = (datetime.now(AGENCY_TZ) + timedelta(days=1)).strftime("%Y%m%d")
     session.add(Trip(trip_id="T_future", route_id="R1", service_id=tomorrow, trip_headsign="GL", direction_id=0))
     session.add(StopTime(trip_id="T_future", stop_id="S1", stop_sequence=1, departure_time="23:00:00", arrival_time="23:00:00"))
     session.add(StopTime(trip_id="T_future", stop_id="S2", stop_sequence=2, departure_time="23:30:00", arrival_time="23:30:00"))
@@ -103,7 +105,7 @@ class TestObserveDepartures:
         assert "T_past" in rt_mod._recorded_today
 
     def test_already_recorded_trip_is_skipped(self, obs_db):
-        today = datetime.now(timezone.utc).strftime("%Y%m%d")
+        today = datetime.now(AGENCY_TZ).strftime("%Y%m%d")
         rt_mod._recorded_today = {"T_past"}
         rt_mod._recorded_date = today
         rt_mod.trip_updates["T_past"] = TripUpdateState(
@@ -226,6 +228,50 @@ class TestObserveDepartures:
         observe_departures(obs_db)  # empty trip_updates; triggers rollover
 
         assert obs_db.query(ObservedTrip).filter_by(recorded_date="19990101").count() == 0
+
+
+# ---------------------------------------------------------------------------
+# Timezone handling — GTFS times are agency-local (America/Toronto), while
+# the process clock is typically UTC.
+# ---------------------------------------------------------------------------
+
+class TestTimezoneHandling:
+    def test_parse_scheduled_at_is_agency_local(self):
+        dt = rt_mod._parse_scheduled_at("15:30:00", "20260710")
+        assert dt is not None
+        assert dt.tzinfo is not None
+        # Wall clock preserved, anchored to the agency zone (EDT on this date).
+        assert (dt.hour, dt.minute) == (15, 30)
+        assert dt.utcoffset() == datetime(2026, 7, 10, 15, 30, tzinfo=AGENCY_TZ).utcoffset()
+
+    def test_parse_scheduled_at_past_midnight_rolls_wall_clock(self):
+        dt = rt_mod._parse_scheduled_at("25:15:00", "20260710")
+        assert (dt.day, dt.hour, dt.minute) == (11, 1, 15)
+        assert dt.tzinfo is not None
+
+    def test_trip_departing_soon_is_not_recorded_early(self, obs_db):
+        """Regression: a trip due 1 h from now (agency-local) must not be
+        treated as already departed just because UTC is hours ahead of the
+        agency's wall clock (the old code compared the naive schedule time
+        directly against UTC)."""
+        dep_local = datetime.now(AGENCY_TZ) + timedelta(hours=1)
+        obs_db.add(Trip(trip_id="T_soon", route_id="R1",
+                        service_id=dep_local.strftime("%Y%m%d"),
+                        trip_headsign="GL", direction_id=0))
+        obs_db.add(StopTime(trip_id="T_soon", stop_id="S1", stop_sequence=1,
+                            departure_time=dep_local.strftime("%H:%M:%S"),
+                            arrival_time=dep_local.strftime("%H:%M:%S")))
+        obs_db.commit()
+
+        rt_mod.trip_updates["T_soon"] = TripUpdateState(
+            trip_id="T_soon", route_id="R1", is_cancelled=False,
+            stop_time_overrides={"S1": 60},
+        )
+        with patch("ingestion.gtfs_realtime.record_observed_departure") as mock_record:
+            count = observe_departures(obs_db)
+
+        assert count == 0
+        mock_record.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

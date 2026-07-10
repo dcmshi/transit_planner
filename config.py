@@ -1,10 +1,16 @@
 from pathlib import Path
+from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 import os
 
 load_dotenv()
 
 BASE_DIR = Path(__file__).parent
+
+# Agency-local timezone. GTFS times are wall-clock local to the transit
+# agency, while containers typically run UTC — every "now" that is compared
+# against schedule times must be taken in this zone, never naive.
+AGENCY_TZ = ZoneInfo(os.getenv("AGENCY_TZ", "America/Toronto"))
 
 # Data directory (gitignored)
 DATA_DIR = BASE_DIR / "data"

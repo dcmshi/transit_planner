@@ -6,7 +6,14 @@ each section; nothing here is blocking the current live stack.  See
 
 ## Correctness
 
-### Timezone handling — schedule times vs container UTC
+### ✅ Timezone handling — schedule times vs container UTC (done 2026-07-10)
+
+> Fixed: `AGENCY_TZ` (`America/Toronto`, overridable via `AGENCY_TZ` env) in
+> `config.py`; `/routes` defaults and `query_dt` now agency-local;
+> `_parse_scheduled_at` returns agency-anchored aware datetimes; service-day
+> rollover in `observe_departures` and the seed window use the agency date.
+> `tests/conftest.py` added so the unit suite no longer inherits `.env`'s
+> `DATABASE_URL`.  Regression tests in `TestTimezoneHandling`.
 
 GTFS times are America/Toronto local, but the code mixes naive
 `datetime.now()` (container-local = UTC in Docker) and UTC with them:

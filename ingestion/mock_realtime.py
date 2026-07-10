@@ -11,7 +11,7 @@ production environment with real user traffic.
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 from ingestion.gtfs_realtime import (
     ServiceAlertState,
@@ -128,7 +128,7 @@ def inject_vehicle_position(
     vehicle_positions[trip_id] = {
         "lat": lat,
         "lon": lon,
-        "timestamp": timestamp if timestamp is not None else int(datetime.utcnow().timestamp()),
+        "timestamp": timestamp if timestamp is not None else int(datetime.now(timezone.utc).timestamp()),
     }
     logger.debug("Mock: injected vehicle position for trip %s at (%.4f, %.4f).", trip_id, lat, lon)
 
