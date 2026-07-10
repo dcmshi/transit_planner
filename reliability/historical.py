@@ -17,22 +17,20 @@ Reliability score (0–1, higher = more reliable) is derived from:
 """
 
 import logging
-from datetime import datetime, time, timezone
+from datetime import datetime, timezone
 
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from config import AGENCY_TZ
 from db.models import ReliabilityRecord
 
 logger = logging.getLogger(__name__)
 
-# Rolling window length in days
+# Rolling-window half-life in days: counters decay by 50% over this span
+# (see decay_reliability_records), so stats always reflect roughly the last
+# couple of window lengths rather than accumulating forever.
 WINDOW_DAYS = 14
-
-# Time bucket definitions (start_hour inclusive, end_hour exclusive, weekday-only)
-_BUCKETS = [
-    ("weekday_am_peak", 6, 9),
-    ("weekday_pm_peak", 15, 19),
-]
 
 
 def classify_time_bucket(dt: datetime) -> str:
@@ -142,3 +140,49 @@ def record_observed_departure(
 
     record.window_end_date = date_str
     record.updated_at = datetime.now(timezone.utc).isoformat()
+
+
+# Agency-local date of the last decay run — guards against the daily job
+# firing more than once per day (e.g. GTFS_REFRESH_HOURS < 24).  In-memory
+# only: a same-day restart plus refresh could decay twice, which slightly
+# shortens the effective half-life for that one day — harmless.
+_last_decay_date: str = ""
+
+
+def decay_reliability_records(session: Session, days_elapsed: float = 1.0) -> int:
+    """
+    Apply exponential age-decay to all reliability counters.
+
+    Called once per day by the daily GTFS refresh job.  Counters halve over
+    WINDOW_DAYS days, so a bad month fades instead of permanently
+    depressing a route's score.  All four counters are scaled by the same
+    factor, which preserves observed_rate / cancel_rate / avg-delay exactly —
+    decay changes nothing by itself; it makes *new* observations weigh more
+    against the shrunken denominator.
+
+    Returns the number of rows updated (0 when skipped as already run today).
+    """
+    global _last_decay_date
+
+    today = datetime.now(AGENCY_TZ).strftime("%Y%m%d")
+    if today == _last_decay_date:
+        return 0
+
+    factor = 0.5 ** (days_elapsed / WINDOW_DAYS)
+    result = session.execute(
+        text("""
+            UPDATE reliability_records SET
+                scheduled_departures = CAST(ROUND(scheduled_departures * :f) AS INT),
+                observed_departures  = CAST(ROUND(observed_departures  * :f) AS INT),
+                total_delay_seconds  = CAST(ROUND(total_delay_seconds  * :f) AS INT),
+                cancellation_count   = CAST(ROUND(cancellation_count   * :f) AS INT)
+        """),
+        {"f": factor},
+    )
+    session.commit()
+    _last_decay_date = today
+    logger.info(
+        "Reliability decay applied: %d records scaled by %.4f (half-life %d days).",
+        result.rowcount, factor, WINDOW_DAYS,
+    )
+    return result.rowcount

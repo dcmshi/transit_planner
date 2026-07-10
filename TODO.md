@@ -92,7 +92,14 @@ static schedule against `trip_updates`/`vehicle_positions`: a scheduled
 departure with no RT evidence by departure + grace period gets recorded as
 a miss (scheduled += 1, observed += 0).
 
-### Rolling window is not enforced
+### ✅ Rolling window is not enforced (done 2026-07-10)
+
+> Fixed with exponential decay: `decay_reliability_records` in
+> `reliability/historical.py` scales all four counters by
+> `0.5 ** (days / WINDOW_DAYS)` once per agency day, called from the daily
+> refresh before the gap-fill reseed.  Uniform scaling preserves the score;
+> new observations weigh more against the shrunken denominators.  Dead
+> `_BUCKETS` constant removed; `WINDOW_DAYS` now meaningful (half-life).
 
 `ReliabilityRecord` counters accumulate forever; `window_start/end_date` are
 recorded but nothing ever ages data out.  `WINDOW_DAYS = 14` and `_BUCKETS`

@@ -507,12 +507,14 @@ class TestDailyGtfsRefreshJob:
             patch("api.main.SessionLocal", return_value=mock_session),
             patch("api.main.refresh_static_data", new_callable=AsyncMock) as mock_refresh,
             patch("api.main.build_graph") as mock_build,
+            patch("api.main.decay_reliability_records", return_value=3) as mock_decay,
             patch("api.main.seed_from_static", return_value=5) as mock_seed,
         ):
             await _daily_gtfs_refresh()
 
         mock_refresh.assert_called_once_with(mock_session)
         mock_build.assert_called_once_with(mock_session)
+        mock_decay.assert_called_once_with(mock_session)
         mock_seed.assert_called_once_with(mock_session, fill_gaps_only=True)
 
     @pytest.mark.anyio

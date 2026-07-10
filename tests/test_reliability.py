@@ -362,6 +362,63 @@ def hist_db():
 
 
 # ---------------------------------------------------------------------------
+# decay_reliability_records — rolling-window enforcement
+# ---------------------------------------------------------------------------
+
+class TestDecayReliabilityRecords:
+    @pytest.fixture(autouse=True)
+    def _reset_decay_guard(self):
+        import reliability.historical as hist_mod
+        hist_mod._last_decay_date = ""
+        yield
+        hist_mod._last_decay_date = ""
+
+    def _seed(self, db, scheduled=100, observed=80, delay=6000, cancels=4):
+        db.add(ReliabilityRecord(
+            route_id="R1", stop_id="S1", time_bucket="weekday_am_peak",
+            scheduled_departures=scheduled, observed_departures=observed,
+            cancellation_count=cancels, total_delay_seconds=delay,
+        ))
+        db.commit()
+
+    def test_counters_halve_after_one_half_life(self, hist_db):
+        from reliability.historical import WINDOW_DAYS, decay_reliability_records
+
+        self._seed(hist_db)
+        updated = decay_reliability_records(hist_db, days_elapsed=WINDOW_DAYS)
+
+        assert updated == 1
+        rec = hist_db.query(ReliabilityRecord).one()
+        assert rec.scheduled_departures == 50
+        assert rec.observed_departures == 40
+        assert rec.total_delay_seconds == 3000
+        assert rec.cancellation_count == 2
+
+    def test_decay_preserves_score(self, hist_db):
+        """Uniform scaling keeps observed_rate/cancel_rate/avg-delay — the
+        score must not change just because time passed."""
+        from reliability.historical import WINDOW_DAYS, decay_reliability_records
+
+        self._seed(hist_db)
+        before = get_historical_reliability("R1", "S1", "weekday_am_peak", hist_db)
+        decay_reliability_records(hist_db, days_elapsed=WINDOW_DAYS)
+        after = get_historical_reliability("R1", "S1", "weekday_am_peak", hist_db)
+
+        assert after == pytest.approx(before, abs=0.02)  # integer rounding only
+
+    def test_decay_runs_at_most_once_per_day(self, hist_db):
+        from reliability.historical import decay_reliability_records
+
+        self._seed(hist_db)
+        assert decay_reliability_records(hist_db) == 1
+        assert decay_reliability_records(hist_db) == 0  # same-day guard
+
+        rec = hist_db.query(ReliabilityRecord).one()
+        # One day of decay only (factor 0.5**(1/14) ≈ 0.9517)
+        assert rec.scheduled_departures == 95
+
+
+# ---------------------------------------------------------------------------
 # get_historical_reliability
 # ---------------------------------------------------------------------------
 

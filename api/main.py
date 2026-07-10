@@ -50,7 +50,9 @@ from ingestion.gtfs_realtime import poll_all
 from ingestion.gtfs_static import refresh_static_data
 from ingestion.seed_reliability import seed_from_static
 from llm.explainer import explain_routes
-from reliability.historical import classify_time_bucket, get_historical_reliability
+from reliability.historical import (
+    classify_time_bucket, decay_reliability_records, get_historical_reliability,
+)
 from reliability.live import compute_live_risk
 from routing.engine import count_transfers, find_routes, total_travel_seconds, total_walk_metres
 
@@ -145,6 +147,9 @@ async def _daily_gtfs_refresh() -> None:
         # build_graph and seed_from_static are CPU/DB-bound sync calls; run
         # them in a worker thread so the event loop keeps serving requests.
         await asyncio.to_thread(build_graph, db)
+        # Age out old reliability counters (half-life WINDOW_DAYS) before
+        # reseeding fills any gaps at full synthetic strength.
+        await asyncio.to_thread(decay_reliability_records, db)
         seeded = await asyncio.to_thread(seed_from_static, db, fill_gaps_only=True)
         logger.info("Daily GTFS static refresh complete: %d reliability records reseeded.", seeded)
         _clear_routes_cache()
