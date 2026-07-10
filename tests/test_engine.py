@@ -113,14 +113,14 @@ class TestFindRoutesNoPath:
         H = nx.DiGraph()
         H.add_nodes_from(G.nodes(data=True))
 
-        old = builder_mod._graph, builder_mod._digraph
-        builder_mod._graph, builder_mod._digraph = G, H
+        old = builder_mod._graphs
+        builder_mod._graphs = (G, H)
         try:
             routes = find_routes(
                 "A", "B", departure_dt=datetime(2026, 2, 11, 8, 0), session=None
             )
         finally:
-            builder_mod._graph, builder_mod._digraph = old
+            builder_mod._graphs = old
 
         assert routes == []
 
@@ -654,16 +654,23 @@ class TestPickLongestRoute:
         result = _pick_longest_route(G, ["X", "A", "B", "C", "D"], 1)
         assert result == "R1"
 
-    def test_only_min_weight_edges_are_candidates(self):
-        # R1 has weight 10, R2 has weight 0 — only R2 qualifies despite shorter coverage
+    def test_coverage_beats_weight_and_all_routes_are_candidates(self):
+        """All trip routes on the segment are candidates (not just those
+        tied at the minimum weight — see the 2026-07-10 eighth-pass fix),
+        ranked by corridor coverage first, then weight."""
+        from routing.engine import _rank_routes_by_coverage
+
         G = nx.MultiDiGraph()
         for node in ("A", "B", "C"):
             G.add_node(node, name=f"Stop {node}")
         G.add_edge("A", "B", route_id="R1", weight=10, kind="trip")
         G.add_edge("B", "C", route_id="R1", weight=10, kind="trip")
         G.add_edge("A", "B", route_id="R2", weight=0, kind="trip")
-        result = _pick_longest_route(G, ["A", "B", "C"], 0)
-        assert result == "R2"
+
+        # R1 covers both pairs (despite the higher weight); R2 terminates
+        # after one pair but stays in the ranking as a fallback.
+        assert _rank_routes_by_coverage(G, ["A", "B", "C"], 0) == ["R1", "R2"]
+        assert _pick_longest_route(G, ["A", "B", "C"], 0) == "R1"
 
 
 # ---------------------------------------------------------------------------
@@ -807,6 +814,54 @@ class TestFindTripLegs:
         legs = eng._schedule_path(trip_db, G, ["S1", "S2", "S3"], datetime(2026, 3, 2, 7, 0, 0))
         assert legs is not None
         assert all(leg["route_id"] == "R1" for leg in legs)
+
+    def test_slower_route_tried_when_faster_has_no_service(self, trip_db):
+        """Regression: only routes tied at the minimum edge weight were
+        candidates, so a schedule period with even slightly different run
+        times (weight 600 vs 900) was the sole candidate — and when it had
+        no trips on the travel date, the whole path died despite a valid
+        slower alternative."""
+        from datetime import datetime
+
+        import routing.engine as eng
+
+        trip_db.add(Route(route_id="R_fast", route_short_name="9",
+                          route_long_name="No service today", route_type=3))
+        trip_db.commit()
+
+        G = _make_trip_graph()  # R1 edges at weight 1800, has service
+        G.add_edge("S1", "S2", route_id="R_fast", weight=600, kind="trip")
+        G.add_edge("S2", "S3", route_id="R_fast", weight=600, kind="trip")
+
+        ranked = eng._rank_routes_by_coverage(G, ["S1", "S2", "S3"], 0)
+        assert ranked == ["R_fast", "R1"]  # both candidates, fastest first
+
+        legs = eng._schedule_path(trip_db, G, ["S1", "S2", "S3"],
+                                  datetime(2026, 3, 2, 7, 0, 0))
+        assert legs is not None
+        assert all(leg["route_id"] == "R1" for leg in legs)
+
+    def test_express_variant_falls_through_to_local(self, trip_db):
+        """Regression: _find_trip_legs selected the single earliest trip
+        and gave up if it skipped an intermediate stop — an express leaving
+        just before a valid local killed every local-stop itinerary."""
+        # Express T_exp at 07:30 serves S1 and S3 only (skips S2).
+        trip_db.add(Trip(trip_id="T_exp", route_id="R1", service_id="20260302",
+                         trip_headsign="Express", direction_id=0))
+        trip_db.add(StopTime(trip_id="T_exp", stop_id="S1", stop_sequence=1,
+                             departure_time="07:30:00", arrival_time="07:30:00"))
+        trip_db.add(StopTime(trip_id="T_exp", stop_id="S3", stop_sequence=2,
+                             departure_time="08:15:00", arrival_time="08:15:00"))
+        trip_db.commit()
+
+        G = _make_trip_graph()
+        # T1 (the 08:00 local serving S1,S2,S3) must be found even though
+        # the 07:30 express matches the first/last-stop query first.
+        legs = _find_trip_legs(trip_db, G, "R1", ["S1", "S2", "S3"], 0, "20260302")
+
+        assert legs is not None
+        assert all(leg["trip_id"] == "T1" for leg in legs)
+        assert legs[0]["departure_time"] == "08:00:00"
 
     def test_schedule_path_treats_empty_legs_as_no_route(self, trip_db):
         # _find_trip_legs can theoretically return [] (empty, not None) for a

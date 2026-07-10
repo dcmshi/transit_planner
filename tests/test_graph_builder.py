@@ -214,14 +214,28 @@ def graph_db():
 class TestGetGraphBeforeBuild:
 
     def test_get_graph_raises_before_build(self):
-        builder_mod._graph = None
+        builder_mod._graphs = None
         with pytest.raises(RuntimeError, match="not been built"):
             get_graph()
 
     def test_get_projected_graph_raises_before_build(self):
-        builder_mod._digraph = None
+        builder_mod._graphs = None
         with pytest.raises(RuntimeError, match="not been built"):
             get_projected_graph()
+
+    def test_graph_and_projection_swap_as_one_pair(self, graph_db):
+        """Regression: the graph and its projection were stored in two
+        separate globals, so a rebuild could hand a concurrent reader the
+        old graph paired with the new projection."""
+        from graph.builder import get_graphs
+
+        build_graph(graph_db)
+        g1, h1 = get_graphs()
+        build_graph(graph_db)  # rebuild swaps both atomically
+        g2, h2 = get_graphs()
+
+        assert g1 is not g2 and h1 is not h2   # new build, new pair
+        assert get_graphs()[0] is g2           # consistent repeated reads
 
 
 class TestBuildGraph:

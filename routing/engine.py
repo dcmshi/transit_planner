@@ -42,12 +42,17 @@ from sqlalchemy.orm import Session
 
 from config import MAX_ROUTES, MAX_TRANSFERS, MIN_TRANSFER_MINUTES
 from db.models import StopTime
-from graph.builder import get_graph, get_projected_graph
+from graph.builder import get_graphs
 from gtfs_time import hms_to_seconds as _hms_to_seconds
 
 logger = logging.getLogger(__name__)
 
 Route = list[dict[str, Any]]
+
+# How many successive departures _find_trip_legs will try when the earliest
+# matching trip turns out to be an express/short-turn variant that skips an
+# intermediate stop of the segment.
+_MAX_TRIP_ATTEMPTS = 5
 
 
 class _RouteQueryCache:
@@ -104,17 +109,14 @@ def find_routes(
     Returns an empty list (rather than raising) when the stops are both in
     the graph but no path connects them.
     """
-    G = get_graph()
+    # One atomic read of the (graph, projection) pair — two separate reads
+    # could straddle a rebuild and mix builds.
+    G, H = get_graphs()
 
     if origin_stop_id not in G:
         raise ValueError(f"Origin stop '{origin_stop_id}' not found in graph.")
     if destination_stop_id not in G:
         raise ValueError(f"Destination stop '{destination_stop_id}' not found in graph.")
-
-    # shortest_simple_paths (Yen's algorithm) does not support MultiDiGraph.
-    # Use the pre-computed DiGraph projection (min-weight edge per u→v pair)
-    # built and cached by build_graph() to avoid O(E) work on every call.
-    H = get_projected_graph()
 
     # Hard cap on total candidate paths examined — prevents hanging on graphs
     # with many walk edges.  15× gives a good balance: enough candidates to
@@ -179,32 +181,37 @@ def _rank_routes_by_coverage(
     order is deterministic).
 
     Coverage ranking breaks ties that arise when multiple routes share the
-    same corridor with identical (often zero-second) edge weights.  Without
-    look-ahead, the arbitrary dict ordering of min() can select a short-haul
-    route that terminates before the intended transfer point.  Returning the
-    full ranking (rather than just the winner) lets _schedule_path fall back
-    to the next candidate when the best-covering route has no trips on the
-    requested date — GTFS feeds publish one route_id per schedule period, so
-    a corridor is often covered by both a current and a future route_id.
+    same corridor.  Without look-ahead, an arbitrary pick can select a
+    short-haul route that terminates before the intended transfer point.
+    Returning the full ranking (rather than just the winner) lets
+    _schedule_path fall back to the next candidate when the best-ranked
+    route has no trips on the requested date — GTFS feeds publish one
+    route_id per schedule period, so a corridor is often covered by both a
+    current and a future route_id.
+
+    Every trip route on the segment is a candidate, not just those tied at
+    the minimum edge weight: a schedule period whose run times differ by
+    even a minute (or a slower parallel route) must still be tried when
+    the fastest route has no service on the travel date — otherwise the
+    whole path dies even though a valid trip exists.
     """
     u, v = node_path[start], node_path[start + 1]
     edges = G.get_edge_data(u, v) or {}
-    min_weight = min(
-        (e.get("weight", float("inf")) for e in edges.values()),
-        default=float("inf"),
-    )
-    candidates = {
-        e["route_id"]
-        for e in edges.values()
-        if e.get("kind") == "trip" and e.get("weight", float("inf")) == min_weight
-    }
-    if not candidates:
+    weight_by_route: dict[str, float] = {}
+    for e in edges.values():
+        if e.get("kind") != "trip":
+            continue
+        w = e.get("weight", float("inf"))
+        rid = e["route_id"]
+        if rid not in weight_by_route or w < weight_by_route[rid]:
+            weight_by_route[rid] = w
+    if not weight_by_route:
         raise RuntimeError(
             f"_rank_routes_by_coverage: no trip edges between {u!r} and {v!r} in node path"
         )
 
-    ranked: list[tuple[int, str]] = []
-    for route_id in candidates:
+    ranked: list[tuple[int, float, str]] = []
+    for route_id, weight in weight_by_route.items():
         count = 0
         for j in range(start, len(node_path) - 1):
             a, b = node_path[j], node_path[j + 1]
@@ -215,9 +222,10 @@ def _rank_routes_by_coverage(
             ):
                 break
             count += 1
-        ranked.append((count, route_id))
-    ranked.sort(key=lambda rc: (-rc[0], rc[1]))
-    return [route_id for _count, route_id in ranked]
+        ranked.append((count, weight, route_id))
+    # Longest coverage first, then fastest, then route_id for determinism.
+    ranked.sort(key=lambda rc: (-rc[0], rc[1], rc[2]))
+    return [route_id for _count, _weight, route_id in ranked]
 
 
 def _pick_longest_route(G: nx.MultiDiGraph, node_path: list[str], start: int) -> str:
@@ -330,78 +338,98 @@ def _find_trip_legs(
     Then fetches actual stop times for every stop in the list from that trip
     and assembles leg dicts with real scheduled departure/arrival times.
 
-    Returns None if no such trip exists or if the trip does not serve every
-    stop in the list.
+    A route_id can mix stopping patterns (express and local variants): when
+    the earliest matching trip skips an intermediate stop, later departures
+    are tried (up to _MAX_TRIP_ATTEMPTS) instead of abandoning the segment —
+    otherwise an express leaving just before a valid local would kill every
+    local-stop itinerary on the corridor.
+
+    Returns None if no departure serves every stop in the list.
 
     The optional cache avoids redundant DB round-trips across multiple calls
     within a single find_routes() invocation:
       - trip_select: keyed by (route_id, first, last, date, not_before)
       - stop_times:  keyed by trip_id → full {stop_id: StopTime} dict
     """
-    trip_key = (route_id, stops[0], stops[-1], service_date, not_before_sec)
+    stop_map: dict[str, StopTime] | None = None
+    trip_id: str | None = None
+    attempt_nb = not_before_sec
 
-    if cache is not None and trip_key in cache.trip_select:
-        trip_id = cache.trip_select[trip_key]
-    else:
-        row = session.execute(
-            text("""
-                SELECT st_first.trip_id
-                FROM stop_times st_first
-                JOIN trips t ON t.trip_id = st_first.trip_id
-                JOIN stop_times st_last
-                  ON st_last.trip_id  = st_first.trip_id
-                 AND st_last.stop_id  = :last_stop
-                 AND st_last.stop_sequence > st_first.stop_sequence
-                WHERE st_first.stop_id  = :first_stop
-                  AND t.route_id        = :route_id
-                  AND t.service_id      = :service_date
-                  AND NOT EXISTS (
-                        SELECT 1 FROM service_calendar_dates scd
-                        WHERE scd.service_id   = t.service_id
-                          AND scd.date         = :service_date
-                          AND scd.exception_type = 2
-                      )
-                  AND (
-                        CAST(substr(st_first.departure_time, 1, 2) AS INT) * 3600
-                      + CAST(substr(st_first.departure_time, 4, 2) AS INT) * 60
-                      + CAST(substr(st_first.departure_time, 7, 2) AS INT)
-                    ) >= :not_before
-                ORDER BY st_first.departure_time ASC
-                LIMIT 1
-            """),
-            {
-                "first_stop":   stops[0],
-                "last_stop":    stops[-1],
-                "route_id":     route_id,
-                "service_date": service_date,
-                "not_before":   not_before_sec,
-            },
-        ).fetchone()
-        trip_id = row[0] if row else None
-        if cache is not None:
-            cache.trip_select[trip_key] = trip_id
+    for _attempt in range(_MAX_TRIP_ATTEMPTS):
+        trip_key = (route_id, stops[0], stops[-1], service_date, attempt_nb)
 
-    if trip_id is None:
-        return None
+        if cache is not None and trip_key in cache.trip_select:
+            trip_id = cache.trip_select[trip_key]
+        else:
+            row = session.execute(
+                text("""
+                    SELECT st_first.trip_id
+                    FROM stop_times st_first
+                    JOIN trips t ON t.trip_id = st_first.trip_id
+                    JOIN stop_times st_last
+                      ON st_last.trip_id  = st_first.trip_id
+                     AND st_last.stop_id  = :last_stop
+                     AND st_last.stop_sequence > st_first.stop_sequence
+                    WHERE st_first.stop_id  = :first_stop
+                      AND t.route_id        = :route_id
+                      AND t.service_id      = :service_date
+                      AND NOT EXISTS (
+                            SELECT 1 FROM service_calendar_dates scd
+                            WHERE scd.service_id   = t.service_id
+                              AND scd.date         = :service_date
+                              AND scd.exception_type = 2
+                          )
+                      AND (
+                            CAST(substr(st_first.departure_time, 1, 2) AS INT) * 3600
+                          + CAST(substr(st_first.departure_time, 4, 2) AS INT) * 60
+                          + CAST(substr(st_first.departure_time, 7, 2) AS INT)
+                        ) >= :not_before
+                    ORDER BY st_first.departure_time ASC
+                    LIMIT 1
+                """),
+                {
+                    "first_stop":   stops[0],
+                    "last_stop":    stops[-1],
+                    "route_id":     route_id,
+                    "service_date": service_date,
+                    "not_before":   attempt_nb,
+                },
+            ).fetchone()
+            trip_id = row[0] if row else None
+            if cache is not None:
+                cache.trip_select[trip_key] = trip_id
 
-    # Fetch all stop times for this trip once; cache by trip_id.
-    if cache is not None and trip_id in cache.stop_times:
-        full_stop_map = cache.stop_times[trip_id]
-    else:
-        stop_rows = (
-            session.query(StopTime)
-            .filter(StopTime.trip_id == trip_id)
-            .order_by(StopTime.stop_sequence)
-            .all()
-        )
-        full_stop_map = {st.stop_id: st for st in stop_rows}
-        if cache is not None:
-            cache.stop_times[trip_id] = full_stop_map
+        if trip_id is None:
+            return None  # no further departures on this route today
 
-    stop_map: dict[str, StopTime] = {s: full_stop_map[s] for s in stops if s in full_stop_map}
+        # Fetch all stop times for this trip once; cache by trip_id.
+        if cache is not None and trip_id in cache.stop_times:
+            full_stop_map = cache.stop_times[trip_id]
+        else:
+            stop_rows = (
+                session.query(StopTime)
+                .filter(StopTime.trip_id == trip_id)
+                .order_by(StopTime.stop_sequence)
+                .all()
+            )
+            full_stop_map = {st.stop_id: st for st in stop_rows}
+            if cache is not None:
+                cache.stop_times[trip_id] = full_stop_map
 
-    # Verify every stop in our segment is covered by this trip.
-    if any(stop not in stop_map for stop in stops):
+        candidate = {s: full_stop_map[s] for s in stops if s in full_stop_map}
+        if all(stop in candidate for stop in stops):
+            stop_map = candidate
+            break
+
+        # Express/short-turn variant skipping an intermediate stop — advance
+        # past this departure and try the next one.  (The SQL guarantees
+        # stops[0] is served, so the departure time is always available.)
+        first_st = full_stop_map.get(stops[0])
+        if first_st is None:
+            return None
+        attempt_nb = _hms_to_seconds(first_st.departure_time) + 1
+
+    if stop_map is None or trip_id is None:
         return None
 
     legs: Route = []

@@ -7,6 +7,17 @@ e2e suite).  Items ordered by priority within each section; see
 
 ## Eighth pass — open findings (2026-07-10)
 
+### ✅ Routing-engine batch (fixed 2026-07-10)
+
+> Three fresh-sweep findings: `_rank_routes_by_coverage` now considers
+> every trip route on a segment (not just min-weight ties), so a schedule
+> period with different run times still falls back to the route that has
+> service; `_find_trip_legs` retries up to 5 later departures when the
+> earliest match is an express/short-turn variant skipping an intermediate
+> stop; and the graph + Yen's projection now swap atomically as one tuple
+> (`get_graphs()`), so a request can no longer pair builds across a rebuild
+> (which returned an empty result that the negative cache then amplified).
+
 ### ✅ Observation-pipeline batch (fixed 2026-07-10)
 
 > Four adversarial-review findings fixed together: no-show coverage now

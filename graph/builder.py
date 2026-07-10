@@ -31,17 +31,28 @@ from gtfs_time import hms_to_seconds as _hms_to_seconds
 
 logger = logging.getLogger(__name__)
 
-# Module-level cached graph and build timestamp
-_graph: Optional[nx.MultiDiGraph] = None
-_digraph: Optional[nx.DiGraph] = None       # min-weight DiGraph projection of _graph
+# Module-level cached (MultiDiGraph, DiGraph-projection) pair and build
+# timestamp.  The pair lives in ONE attribute so a rebuild swaps both
+# atomically — assigning two separate globals let a request in a worker
+# thread pair the old graph with the new projection, making every path
+# unschedulable for that request.
+_graphs: Optional[tuple[nx.MultiDiGraph, nx.DiGraph]] = None
 _last_built_at: Optional[datetime] = None
+
+
+def get_graphs() -> tuple[nx.MultiDiGraph, nx.DiGraph]:
+    """Return the cached (graph, projection) pair from one consistent build.
+
+    Raises if the graph has not yet been built.
+    """
+    if _graphs is None:
+        raise RuntimeError("Transit graph has not been built yet. Call build_graph() first.")
+    return _graphs
 
 
 def get_graph() -> nx.MultiDiGraph:
     """Return the cached transit graph. Raises if not yet built."""
-    if _graph is None:
-        raise RuntimeError("Transit graph has not been built yet. Call build_graph() first.")
-    return _graph
+    return get_graphs()[0]
 
 
 def get_projected_graph() -> nx.DiGraph:
@@ -50,9 +61,7 @@ def get_projected_graph() -> nx.DiGraph:
     Used by the routing engine for Yen's algorithm, which requires a DiGraph.
     Raises if the graph has not yet been built.
     """
-    if _digraph is None:
-        raise RuntimeError("Transit graph has not been built yet. Call build_graph() first.")
-    return _digraph
+    return get_graphs()[1]
 
 
 def get_last_built_at() -> Optional[datetime]:
@@ -65,7 +74,7 @@ def build_graph(session: Session) -> nx.MultiDiGraph:
     Construct and cache the full transit + walking graph from the database.
     Returns the graph and stores it in the module-level cache.
     """
-    global _graph, _digraph, _last_built_at
+    global _graphs, _last_built_at
     G = nx.MultiDiGraph()
 
     stops = session.query(Stop).all()
@@ -81,8 +90,7 @@ def build_graph(session: Session) -> nx.MultiDiGraph:
         if not H.has_edge(u, v) or H[u][v]["weight"] > w:
             H.add_edge(u, v, weight=w)
 
-    _graph = G
-    _digraph = H
+    _graphs = (G, H)  # single assignment — readers always get a matched pair
     _last_built_at = datetime.now(timezone.utc)
 
     missing_names = [n for n, d in G.nodes(data=True) if not d.get("name")]
