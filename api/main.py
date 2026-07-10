@@ -20,6 +20,7 @@ Endpoints (v1):
 
 import asyncio
 import logging
+import secrets
 import threading
 import time
 from collections import deque
@@ -74,7 +75,8 @@ def _require_ingest_key(key: str | None = Security(_ingest_key_header)) -> None:
     """
     if not INGEST_API_KEY:
         return  # no key configured → open
-    if key != INGEST_API_KEY:
+    # Constant-time comparison — != leaks key length/prefix via timing.
+    if key is None or not secrets.compare_digest(key, INGEST_API_KEY):
         raise HTTPException(status_code=401, detail="Invalid or missing X-API-Key header.")
 
 scheduler = AsyncIOScheduler()

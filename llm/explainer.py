@@ -245,6 +245,7 @@ async def _post_llm_request(
     payload: dict[str, Any],
     provider: str,
     unreachable_msg: str,
+    headers: dict[str, str] | None = None,
 ) -> httpx.Response | str:
     """
     POST to an LLM backend with the shared error handling.
@@ -254,7 +255,7 @@ async def _post_llm_request(
     """
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.post(url, json=payload)
+            resp = await client.post(url, json=payload, headers=headers)
             resp.raise_for_status()
             return resp
     except httpx.ConnectError:
@@ -320,7 +321,9 @@ async def _explain_gemini(llm_input: dict[str, Any]) -> str:
             "Set it in your .env file to enable Gemini explanations."
         )
 
-    url = f"{_GEMINI_BASE}/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+    # Key goes in the x-goog-api-key header, never the URL — URLs leak into
+    # access logs, proxies, and exception messages.
+    url = f"{_GEMINI_BASE}/{GEMINI_MODEL}:generateContent"
     payload = {
         "systemInstruction": {
             "parts": [{"text": SYSTEM_PROMPT}],
@@ -342,6 +345,7 @@ async def _explain_gemini(llm_input: dict[str, Any]) -> str:
         payload,
         provider="Gemini API",
         unreachable_msg="Explanation unavailable: could not reach the Gemini API.",
+        headers={"x-goog-api-key": GEMINI_API_KEY},
     )
     if isinstance(result, str):
         return result

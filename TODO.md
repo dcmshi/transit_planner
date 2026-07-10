@@ -167,12 +167,10 @@ ingest and the daily refresh can't overlap.
 > Read-only, rate-limited endpoint over the in-memory `service_alerts`
 > snapshot (header, description, affected routes/stops, fetched_at).
 
-### Security niceties
+### ✅ Security niceties (done 2026-07-10)
 
-- `_require_ingest_key` uses `!=`; switch to `secrets.compare_digest`.
-- Gemini key is passed as a `?key=` URL query param (`llm/explainer.py`);
-  use the `x-goog-api-key` header instead so the key can't leak into URL
-  logging anywhere.
+> `_require_ingest_key` uses `secrets.compare_digest`; Gemini key moved
+> from the `?key=` URL param to the `x-goog-api-key` header.
 
 ## Developer experience
 

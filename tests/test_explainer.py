@@ -393,7 +393,11 @@ class TestExplainGemini:
 
         called_url = mock_client.post.call_args[0][0]
         assert "gemini-2.5-flash" in called_url
-        assert "key=test-key" in called_url
+        # The API key travels in the x-goog-api-key header, never the URL —
+        # URLs end up in access logs and proxies.
+        assert "test-key" not in called_url
+        headers = mock_client.post.call_args.kwargs["headers"]
+        assert headers["x-goog-api-key"] == "test-key"
 
     @pytest.mark.anyio
     async def test_missing_api_key_returns_fallback(self):
