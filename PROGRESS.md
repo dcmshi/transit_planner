@@ -383,6 +383,46 @@ issues invisible to the SQLite unit suite.  295 tests passing.
 
 ---
 
+## Seventh & Eighth Audit Passes (2026-07-10)
+
+Two passes in one day; every finding is catalogued (with fix notes) in
+`TODO.md`.  Suite grew 295 → 364 tests; ruff + GitHub Actions CI added.
+
+**Seventh pass (full backlog burn-down):** agency-timezone anchoring
+(`AGENCY_TZ`), risk keyed to travel time instead of query time, service_id
+date-convention validation at ingest, no-show detection, 14-day
+exponential decay, live-delay bumps + expected times, per-IP rate
+limiting, bounded route cache + negative caching, background 202 ingest
+with `/ingest/status`, RT feed health in `/health`, `GET /alerts`,
+security niceties, config-docs sync, batched reliability lookups, chunked
+stop_times ingest.
+
+**Eighth pass (two independent adversarial reviewers over the seventh's
+work + fresh full-repo sweep):** float reliability counters (integer
+ROUND froze every counter ≤ 10 — one no-show scored risk 1.0 forever),
+`parse_and_store` moved off the event loop, corridor fallback no longer
+limited to min-weight ties, express-variant retry in `_find_trip_legs`,
+atomic graph-pair swap, no-show coverage keyed to the trip-updates feed,
+service-date dedup markers (midnight double-count), calendar_dates
+removals excluded from no-show/seed, copy-on-read RT snapshots,
+service-day live-signal gating, dominance pruning + arrival-sorted
+results, rate-limit bucket eviction + ingest-task lifetime, unit suite
+pinned off the live RT API, parser robustness batch, pool sizing, LLM
+feed-string sanitisation.
+
+### Verified against the live stack (2026-07-10)
+
+- RT pipeline: 219 trip updates / 22 alerts per cycle; coverage armed;
+  285 records seed→mixed within minutes; Postgres counters migrated to
+  DOUBLE PRECISION in place
+- Routing: UN→GL dominance-pruned and arrival-sorted; agency-local "now"
+  defaults confirmed (evening query returned 21:34 / 22:34 departures,
+  including a 24:05:00 post-midnight arrival)
+- Ingest: 202 + 409-guard + `/ingest/status` exercised live; 5 198
+  records reseeded
+
+---
+
 ## Environment Setup
 
 ```bash
