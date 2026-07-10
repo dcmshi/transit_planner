@@ -390,8 +390,15 @@ class TestParseCalendarDates:
 # parse_and_store — integration via in-memory zip
 # ---------------------------------------------------------------------------
 
-def _make_gtfs_zip(include_calendar=True, include_calendar_dates=True) -> bytes:
-    """Build a minimal in-memory GTFS zip for integration tests."""
+def _make_gtfs_zip(include_calendar=True, include_calendar_dates=True,
+                   service_id="20260211") -> bytes:
+    """Build a minimal in-memory GTFS zip for integration tests.
+
+    service_id defaults to a YYYYMMDD date, matching the GO feed convention
+    that parse_and_store validates (routing selects trips by
+    service_id = travel date).  Pass a non-date value to exercise the
+    convention-change failure path.
+    """
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as zf:
         zf.writestr("stops.txt",
@@ -405,8 +412,8 @@ def _make_gtfs_zip(include_calendar=True, include_calendar_dates=True) -> bytes:
         )
         zf.writestr("trips.txt",
             "trip_id,route_id,service_id,trip_headsign,direction_id,shape_id\n"
-            "T1,R1,SVC1,Guelph,0,\n"
-            "T_orphan,MISSING_ROUTE,SVC1,,0,\n"
+            f"T1,R1,{service_id},Guelph,0,\n"
+            f"T_orphan,MISSING_ROUTE,{service_id},,0,\n"
         )
         zf.writestr("stop_times.txt",
             "trip_id,stop_id,arrival_time,departure_time,stop_sequence\n"
@@ -418,13 +425,13 @@ def _make_gtfs_zip(include_calendar=True, include_calendar_dates=True) -> bytes:
             zf.writestr("calendar.txt",
                 "service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,"
                 "start_date,end_date\n"
-                "SVC1,1,1,1,1,1,0,0,20260101,20261231\n"
+                f"{service_id},1,1,1,1,1,0,0,20260101,20261231\n"
             )
         if include_calendar_dates:
             zf.writestr("calendar_dates.txt",
                 "service_id,date,exception_type\n"
-                "SVC1,20260704,2\n"  # service removed (holiday)
-                "SVC1,20260101,1\n"  # service added
+                f"{service_id},20260704,2\n"  # service removed (holiday)
+                f"{service_id},20260101,1\n"  # service added
             )
     return buf.getvalue()
 
@@ -463,6 +470,43 @@ class TestParseAndStore:
         removed = db.query(ServiceCalendarDate).filter_by(exception_type=2).first()
         assert removed is not None
         assert removed.date == "20260704"
+
+    def test_all_weekly_service_ids_abort_ingest(self, db):
+        """Regression guard: routing selects trips by service_id = travel
+        date (GO feed convention).  A feed where no service_id is a
+        YYYYMMDD date would make every route query silently 404 — ingest
+        must abort instead of committing unroutable data."""
+        with pytest.raises(ValueError, match="YYYYMMDD"):
+            parse_and_store(_make_gtfs_zip(service_id="WEEKLY_SVC"), db)
+
+    def test_aborted_ingest_preserves_previous_data(self, db):
+        parse_and_store(_make_gtfs_zip(), db)  # good ingest first
+        with pytest.raises(ValueError):
+            parse_and_store(_make_gtfs_zip(service_id="WEEKLY_SVC"), db)
+        db.rollback()
+        # The failed ingest never committed — the original data survives.
+        assert db.query(Trip).count() == 1
+        assert db.query(Trip).first().service_id == "20260211"
+
+    def test_isolated_non_date_service_id_warns_but_ingests(self, db, caplog):
+        """A handful of odd service_ids must not kill the whole feed."""
+        import logging as _logging
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(io.BytesIO(_make_gtfs_zip())) as src, \
+             zipfile.ZipFile(buf, "w") as zf:
+            for name in src.namelist():
+                content = src.read(name).decode()
+                if name == "trips.txt":
+                    content += "T2,R1,ODD_SVC,,0,\n"
+                zf.writestr(name, content)
+
+        with caplog.at_level(_logging.WARNING, logger="ingestion.gtfs_static"):
+            parse_and_store(buf.getvalue(), db)
+
+        assert db.query(Trip).count() == 2  # both trips ingested
+        assert "not YYYYMMDD dates" in caplog.text
+        assert "ODD_SVC" in caplog.text
 
     def test_reingest_with_enforced_foreign_keys(self):
         """Re-ingest over existing data must not violate FK constraints.

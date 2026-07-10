@@ -55,7 +55,13 @@ for all scoring, ignoring the requested `travel_date`/`departure_time`:
 Fix: classify the bucket per leg from its scheduled departure + travel
 date; gate the vehicle-position check on travel_date == today.
 
-### Routing hard-assumes `service_id` == YYYYMMDD
+### ✅ Routing hard-assumes `service_id` == YYYYMMDD — now validated (done 2026-07-10)
+
+> Mitigated: `_validate_service_id_convention` in `ingestion/gtfs_static.py`
+> aborts the ingest (pre-commit, so previous data survives) when *no*
+> service_id parses as YYYYMMDD, and warns when isolated values don't.
+> Full ServiceCalendar-based service-date resolution remains future work if
+> the feed ever actually changes convention.
 
 `_find_trip_legs` filters trips with `t.service_id = :service_date` and only
 honours `calendar_dates` `exception_type = 2` (removed).  `calendar.txt`

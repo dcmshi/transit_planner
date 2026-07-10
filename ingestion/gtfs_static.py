@@ -13,6 +13,7 @@ Feed contents used:
 import io
 import logging
 import zipfile
+from datetime import datetime
 from pathlib import Path
 
 import httpx
@@ -80,8 +81,44 @@ def parse_and_store(zip_bytes: bytes, session: Session) -> None:
         if "calendar_dates.txt" in names:
             _parse_calendar_dates(read("calendar_dates.txt"), session)
 
+    _validate_service_id_convention(session)
+
     session.commit()
     logger.info("GTFS static data committed to database.")
+
+
+def _validate_service_id_convention(session: Session) -> None:
+    """
+    Routing (_find_trip_legs) selects trips with service_id = <travel date>,
+    relying on the GO feed convention that service_id values are YYYYMMDD
+    dates.  A feed that switched to standard weekly service_ids would make
+    every route query silently return nothing — abort the ingest instead
+    (the transaction is not yet committed, so the previous data survives).
+    Isolated non-date values only get a warning: their trips are unroutable
+    but the rest of the feed still works.
+    """
+    session.flush()
+    service_ids = {row[0] for row in session.query(Trip.service_id).distinct()}
+    non_date: set[str] = set()
+    for sid in service_ids:
+        try:
+            datetime.strptime(sid, "%Y%m%d")
+        except (TypeError, ValueError):
+            non_date.add(sid)
+
+    if service_ids and non_date == service_ids:
+        raise ValueError(
+            "GTFS feed convention change: no trip service_id parses as a "
+            f"YYYYMMDD date (samples: {sorted(non_date)[:5]}). Routing "
+            "filters trips by service_id = travel date and would return no "
+            "results — aborting ingest."
+        )
+    if non_date:
+        logger.warning(
+            "%d of %d service_id values are not YYYYMMDD dates (samples: %s). "
+            "Trips on these services will never be selected by routing.",
+            len(non_date), len(service_ids), sorted(non_date)[:5],
+        )
 
 
 def _parse_stops(df: pd.DataFrame, session: Session) -> None:
