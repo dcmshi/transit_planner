@@ -488,6 +488,27 @@ class TestParseAndStore:
         assert db.query(Stop).filter_by(stop_id="S1").count() == 1
         assert db.query(Trip).filter_by(trip_id="T1").count() == 1
 
+    def test_garbage_numeric_fields_skipped_or_defaulted(self, db):
+        """Ninth pass: route_type/direction_id default, a garbage
+        stop_sequence skips its row — none of them abort the ingest."""
+        buf = io.BytesIO()
+        with zipfile.ZipFile(io.BytesIO(_make_gtfs_zip())) as src, \
+             zipfile.ZipFile(buf, "w") as zf:
+            for name in src.namelist():
+                content = src.read(name).decode()
+                if name == "routes.txt":
+                    content += "R_bad,9,Bad Type,not-a-number\n"
+                if name == "trips.txt":
+                    content += "T_bad_dir,R1,20260211,,garbage,\n"
+                if name == "stop_times.txt":
+                    content += "T1,S1,10:00:00,10:00:00,not-a-seq\n"
+                zf.writestr(name, content)
+
+        parse_and_store(buf.getvalue(), db)  # must not raise
+        assert db.query(Route).filter_by(route_id="R_bad").one().route_type == 3
+        assert db.query(Trip).filter_by(trip_id="T_bad_dir").one().direction_id == 0
+        assert db.query(StopTime).count() == 2  # bad-sequence row skipped
+
     def test_blank_coordinates_and_times_skipped_not_fatal(self, db):
         buf = io.BytesIO()
         with zipfile.ZipFile(io.BytesIO(_make_gtfs_zip())) as src, \

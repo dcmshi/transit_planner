@@ -42,6 +42,15 @@ logger = logging.getLogger(__name__)
 GTFS_ZIP_PATH = DATA_DIR / "gtfs_static.zip"
 
 
+def _int_or(value, default: int) -> int:
+    """int(value), or default for blank/garbage — one bad optional field
+    must not abort a 2M-row ingest."""
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return default
+
+
 async def download_gtfs_zip(url: str = GTFS_STATIC_URL) -> bytes:
     """Download GTFS zip from the given URL and cache it to disk."""
     if not url:
@@ -170,7 +179,7 @@ def _parse_routes(df: pd.DataFrame, session: Session) -> None:
             route_id=row["route_id"],
             route_short_name=row.get("route_short_name", ""),
             route_long_name=row.get("route_long_name", ""),
-            route_type=int(row["route_type"]) if row.get("route_type") else 3,
+            route_type=_int_or(row.get("route_type"), 3),  # 3 = bus
         )
         for row in df.to_dict("records")
     ]
@@ -194,7 +203,7 @@ def _parse_trips(df: pd.DataFrame, session: Session) -> None:
             route_id=row["route_id"],
             service_id=row["service_id"],
             trip_headsign=row.get("trip_headsign", ""),
-            direction_id=int(row["direction_id"]) if row.get("direction_id") else 0,
+            direction_id=_int_or(row.get("direction_id"), 0),
             shape_id=row.get("shape_id", ""),
         ))
     if skipped:
@@ -229,12 +238,19 @@ def _parse_stop_times(df: pd.DataFrame, session: Session) -> None:
         if not row.arrival_time or not row.departure_time:
             blank_times += 1
             continue
+        try:
+            # Ordering-critical — a garbage value can't be defaulted, but
+            # one bad row must not abort the whole ingest either.
+            stop_sequence = int(row.stop_sequence)
+        except (ValueError, TypeError):
+            skipped += 1
+            continue
         batch.append(StopTime(
             trip_id=row.trip_id,
             arrival_time=row.arrival_time,
             departure_time=row.departure_time,
             stop_id=row.stop_id,
-            stop_sequence=int(row.stop_sequence),
+            stop_sequence=stop_sequence,
         ))
         if len(batch) >= chunk_size:
             session.bulk_save_objects(batch)
