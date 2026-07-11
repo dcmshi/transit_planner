@@ -273,6 +273,10 @@ async def _daily_gtfs_refresh() -> None:
         _finish_ingest("error", str(exc))
     finally:
         db.close()
+        # Same CancelledError guard as _run_gtfs_ingest — never leave the
+        # shared ingest slot claimed.
+        if _ingest_state["running"]:
+            _finish_ingest("error", "Daily refresh cancelled before completion.")
 
 
 async def _rt_poll_and_observe() -> None:
@@ -521,8 +525,10 @@ def _prune_dominated(scored_routes: list[dict[str, Any]]) -> list[dict[str, Any]
     arrival time.
 
     Route B is dominated by A when A departs no earlier (less waiting at
-    the origin), arrives no later, has no more transfers, and is no
-    riskier — with at least one axis strictly better.  Yen's + the
+    the origin), arrives no later, has no more transfers, walks no
+    further, and is no riskier — with at least one axis strictly better.
+    Walking is an axis so a heavy-walk option can never silently delete a
+    zero-walk alternative that a rider might prefer.  Yen's + the
     later-departure fill can produce e.g. four options that all leave with
     option #1 but arrive hours later with two extra transfers; showing
     them helps no rider.  Ties on every axis keep both routes.
@@ -530,7 +536,8 @@ def _prune_dominated(scored_routes: list[dict[str, Any]]) -> list[dict[str, Any]
     Routes without trip legs (filtered upstream, handled defensively) are
     incomparable — always kept, appended last.
     """
-    comparable: list[tuple[tuple[int, int, int, float], dict[str, Any]]] = []
+    Metrics = tuple[int, int, int, float, float]
+    comparable: list[tuple[Metrics, dict[str, Any]]] = []
     incomparable: list[dict[str, Any]] = []
     for route in scored_routes:
         trip_legs = [leg for leg in route["legs"] if leg["kind"] == "trip"]
@@ -543,17 +550,20 @@ def _prune_dominated(scored_routes: list[dict[str, Any]]) -> list[dict[str, Any]
                 hms_to_seconds(trip_legs[-1]["arrival_time"]),
                 route["transfers"],
                 route["risk_score"],
+                route.get("total_walk_metres", 0.0),
             ),
             route,
         ))
 
-    survivors: list[tuple[tuple[int, int, int, float], dict[str, Any]]] = []
+    survivors: list[tuple[Metrics, dict[str, Any]]] = []
     for i, (m_i, route) in enumerate(comparable):
-        dep_i, arr_i, tr_i, risk_i = m_i
+        dep_i, arr_i, tr_i, risk_i, walk_i = m_i
         dominated = any(
-            dep_j >= dep_i and arr_j <= arr_i and tr_j <= tr_i and risk_j <= risk_i
-            and (dep_j > dep_i or arr_j < arr_i or tr_j < tr_i or risk_j < risk_i)
-            for j, ((dep_j, arr_j, tr_j, risk_j), _r) in enumerate(comparable)
+            dep_j >= dep_i and arr_j <= arr_i and tr_j <= tr_i
+            and risk_j <= risk_i and walk_j <= walk_i
+            and (dep_j > dep_i or arr_j < arr_i or tr_j < tr_i
+                 or risk_j < risk_i or walk_j < walk_i)
+            for j, ((dep_j, arr_j, tr_j, risk_j, walk_j), _r) in enumerate(comparable)
             if j != i
         )
         if not dominated:

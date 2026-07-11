@@ -229,11 +229,12 @@ class TestStopsSearch:
 # Dominance pruning
 # ---------------------------------------------------------------------------
 
-def _scored_route(dep, arr, transfers=0, risk=0.2):
+def _scored_route(dep, arr, transfers=0, risk=0.2, walk=0.0):
     return {
         "legs": [{"kind": "trip", "departure_time": dep, "arrival_time": arr}],
         "transfers": transfers,
         "risk_score": risk,
+        "total_walk_metres": walk,
     }
 
 
@@ -253,6 +254,16 @@ class TestDominancePruning:
         early_risky = _scored_route("16:00:00", "17:00:00", risk=0.6)
         later_safe = _scored_route("16:30:00", "17:30:00", risk=0.2)
         assert len(_prune_dominated([early_risky, later_safe])) == 2
+
+    def test_walk_heavy_route_does_not_dominate_zero_walk(self):
+        """Regression (ninth pass): a 450m-walk option that departs later
+        and arrives earlier must not delete the no-walk alternative — the
+        rider may strongly prefer not walking."""
+        from api.main import _prune_dominated
+
+        no_walk = _scored_route("10:00:00", "11:00:00", walk=0.0)
+        walk_heavy = _scored_route("10:05:00", "10:55:00", walk=450.0)
+        assert len(_prune_dominated([no_walk, walk_heavy])) == 2
 
     def test_identical_routes_both_kept(self):
         from api.main import _prune_dominated
