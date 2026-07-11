@@ -136,7 +136,11 @@ def _build_llm_payload(
                 arrives = _hhmm(leg["arrival_time"])
                 max_risk: float = leg["risk"]["risk_score"]
                 risk_label: str = leg["risk"]["risk_label"]
-                modifiers: list[str] = list(leg["risk"].get("modifiers", []))
+                # Modifiers embed raw alert headers ("Service alert: <header>")
+                # — sanitise them too, or they bypass the feed-text defence.
+                modifiers: list[str] = [
+                    _sanitise_feed_text(m) for m in leg["risk"].get("modifiers", [])
+                ]
                 is_cancelled: bool = bool(leg["risk"].get("is_cancelled", False))
 
                 # Merge subsequent legs on the same physical trip
@@ -153,6 +157,7 @@ def _build_llm_payload(
                         max_risk = nxt["risk"]["risk_score"]
                         risk_label = nxt["risk"]["risk_label"]
                     for m in nxt["risk"].get("modifiers", []):
+                        m = _sanitise_feed_text(m)
                         if m not in modifiers:
                             modifiers.append(m)
                     if nxt["risk"].get("is_cancelled"):
