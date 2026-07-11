@@ -8,17 +8,14 @@ per-item detail lives in the commit messages for 2026-07-10.
 
 ## Open items
 
-### Split `api/main.py` into modules
+### ✅ Split `api/main.py` into modules (done 2026-07-10)
 
-Now ~850 lines (grown from ~600 with rate limiting, ingest state, cache
-bounding, and dominance pruning) mixing lifespan/scheduler setup,
-route-cache helpers, and all endpoint handlers.  Still readable, but past
-the point where the split is worth doing on the next touch:
-
-- `api/cache.py` — `_routes_cache`, TTL, single-flight locks
-- `api/ratelimit.py` — `_rate_limit`, buckets
-- `api/lifespan.py` — startup/shutdown, scheduled jobs, ingest slot
-- `api/routes.py` — endpoint handlers (incl. `_score_routes_blocking`)
+> `api/main.py` is now ~35 lines of app assembly; concerns moved to
+> `api/routes.py` (endpoints + scoring pipeline), `api/lifespan.py`
+> (startup/shutdown, scheduler jobs, ingest slot), `api/cache.py`, and
+> `api/ratelimit.py`.  All test patch targets updated to the real new
+> module paths (no re-export shims — they would silently break `patch()`
+> semantics).  `uvicorn api.main:app` entry point unchanged.
 
 ### Schema migration for other existing deployments
 

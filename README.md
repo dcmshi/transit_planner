@@ -340,7 +340,12 @@ All settings are environment variables (see `.env.example`):
 ```
 transit_planner/
 ├── api/
-│   └── main.py              FastAPI app, lifespan, endpoints
+│   ├── main.py              FastAPI app assembly (uvicorn entry point)
+│   ├── routes.py            Endpoint handlers + route-scoring pipeline
+│   ├── lifespan.py          Startup/shutdown, scheduler jobs, ingest slot
+│   ├── cache.py             Route cache (TTL, negative, single-flight)
+│   ├── ratelimit.py         Per-IP sliding-window rate limiting
+│   └── schemas.py           Pydantic response models
 ├── db/
 │   ├── models.py            SQLAlchemy ORM (GTFS + reliability)
 │   └── session.py           Engine, SessionLocal, get_session

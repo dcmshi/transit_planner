@@ -315,9 +315,9 @@ class TestReliabilitySeedEndpoint:
             yield db
 
         with (
-            patch("api.main.init_db"),
-            patch("api.main.build_graph"),
-            patch("api.main.SessionLocal", return_value=MagicMock()),
+            patch("api.lifespan.init_db"),
+            patch("api.lifespan.build_graph"),
+            patch("api.lifespan.SessionLocal", return_value=MagicMock()),
         ):
             app.dependency_overrides[get_session] = override_session
             with TestClient(app) as c:

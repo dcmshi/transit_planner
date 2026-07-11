@@ -15,6 +15,10 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+import api.cache as cache_mod
+import api.lifespan as lifespan_mod
+import api.ratelimit as ratelimit_mod
+import api.routes as routes_mod
 from db.models import Base, Stop
 from db.session import get_session
 
@@ -56,12 +60,12 @@ def client(db_session):
         yield db_session
 
     with (
-        patch("api.main.init_db"),
-        patch("api.main.build_graph"),
-        patch("api.main.SessionLocal", return_value=MagicMock()),
+        patch("api.lifespan.init_db"),
+        patch("api.lifespan.build_graph"),
+        patch("api.lifespan.SessionLocal", return_value=MagicMock()),
         # Belt and braces on top of conftest's GTFS_RT_API_KEY="" pin: the
         # lifespan must never fire real RT polls from unit tests.
-        patch("api.main.GTFS_RT_API_KEY", ""),
+        patch("api.lifespan.GTFS_RT_API_KEY", ""),
     ):
         app.dependency_overrides[get_session] = override_get_session
         with TestClient(app, raise_server_exceptions=True) as c:
@@ -74,7 +78,7 @@ def _clear_route_cache():
     """The route cache is module-level in api.main — with negative caching,
     one test's empty result would otherwise poison the next test's query
     for the same origin/destination/time."""
-    from api.main import _clear_routes_cache
+    from api.cache import _clear_routes_cache
     _clear_routes_cache()
     yield
 
@@ -139,7 +143,7 @@ class TestHealth:
     def test_graph_not_built_reports_false(self, client):
         # build_graph is patched to a no-op in the client fixture, so
         # the module-level graph cache is never set → graph_built should be False
-        with patch("api.main.get_graph", side_effect=RuntimeError("not built")):
+        with patch("api.routes.get_graph", side_effect=RuntimeError("not built")):
             body = client.get("/health").json()
         assert body["gtfs"]["graph_built"] is False
         assert body["gtfs"]["graph_nodes"] == 0
@@ -242,14 +246,14 @@ class TestDominancePruning:
     def test_strictly_dominated_route_dropped(self):
         """Regression (live example): options departing together where one
         arrives 3h later with 2 extra transfers helped no rider."""
-        from api.main import _prune_dominated
+        from api.routes import _prune_dominated
 
         best = _scored_route("16:08:00", "17:35:00", transfers=0)
         worse = _scored_route("16:08:00", "20:35:00", transfers=2)
         assert _prune_dominated([worse, best]) == [best]
 
     def test_tradeoff_routes_both_kept(self):
-        from api.main import _prune_dominated
+        from api.routes import _prune_dominated
 
         early_risky = _scored_route("16:00:00", "17:00:00", risk=0.6)
         later_safe = _scored_route("16:30:00", "17:30:00", risk=0.2)
@@ -259,21 +263,21 @@ class TestDominancePruning:
         """Regression (ninth pass): a 450m-walk option that departs later
         and arrives earlier must not delete the no-walk alternative — the
         rider may strongly prefer not walking."""
-        from api.main import _prune_dominated
+        from api.routes import _prune_dominated
 
         no_walk = _scored_route("10:00:00", "11:00:00", walk=0.0)
         walk_heavy = _scored_route("10:05:00", "10:55:00", walk=450.0)
         assert len(_prune_dominated([no_walk, walk_heavy])) == 2
 
     def test_identical_routes_both_kept(self):
-        from api.main import _prune_dominated
+        from api.routes import _prune_dominated
 
         a = _scored_route("16:00:00", "17:00:00")
         b = _scored_route("16:00:00", "17:00:00")
         assert len(_prune_dominated([a, b])) == 2  # ties don't dominate
 
     def test_survivors_sorted_by_arrival(self):
-        from api.main import _prune_dominated
+        from api.routes import _prune_dominated
 
         late = _scored_route("18:00:00", "19:00:00")
         early = _scored_route("16:00:00", "17:00:00")
@@ -283,9 +287,9 @@ class TestDominancePruning:
     def test_endpoint_drops_dominated_route(self, client):
         dominated_route = [{**_FAKE_ROUTE[0], "arrival_time": "11:30:00"}]
         with (
-            patch("api.main.find_routes", return_value=[_FAKE_ROUTE, dominated_route]),
-            patch("api.main.get_historical_reliability_batch", return_value={}),
-            patch("api.main.compute_live_risk", return_value=_FAKE_LIVE_RISK),
+            patch("api.routes.find_routes", return_value=[_FAKE_ROUTE, dominated_route]),
+            patch("api.routes.get_historical_reliability_batch", return_value={}),
+            patch("api.routes.compute_live_risk", return_value=_FAKE_LIVE_RISK),
         ):
             body = client.get(
                 "/routes?origin=UN&destination=GL"
@@ -338,13 +342,12 @@ class TestAlerts:
 class TestRateLimit:
     @pytest.fixture(autouse=True)
     def _clean_buckets(self):
-        import api.main as main_mod
-        main_mod._rate_buckets.clear()
+        ratelimit_mod._rate_buckets.clear()
         yield
-        main_mod._rate_buckets.clear()
+        ratelimit_mod._rate_buckets.clear()
 
     def test_requests_over_limit_get_429(self, client):
-        with patch("api.main.RATE_LIMIT_PER_MINUTE", 3):
+        with patch("api.ratelimit.RATE_LIMIT_PER_MINUTE", 3):
             statuses = [
                 client.get("/stops?query=Guelph").status_code for _ in range(4)
             ]
@@ -352,19 +355,19 @@ class TestRateLimit:
         assert statuses[3] == 429
 
     def test_limit_disabled_when_zero(self, client):
-        with patch("api.main.RATE_LIMIT_PER_MINUTE", 0):
+        with patch("api.ratelimit.RATE_LIMIT_PER_MINUTE", 0):
             statuses = [
                 client.get("/stops?query=Guelph").status_code for _ in range(5)
             ]
         assert statuses == [200] * 5
 
     def test_health_not_rate_limited(self, client):
-        with patch("api.main.RATE_LIMIT_PER_MINUTE", 1):
+        with patch("api.ratelimit.RATE_LIMIT_PER_MINUTE", 1):
             client.get("/stops?query=Guelph")  # consume the budget
             assert client.get("/health").status_code == 200
 
     def test_429_includes_retry_after(self, client):
-        with patch("api.main.RATE_LIMIT_PER_MINUTE", 1):
+        with patch("api.ratelimit.RATE_LIMIT_PER_MINUTE", 1):
             client.get("/stops?query=Guelph")
             resp = client.get("/stops?query=Guelph")
         assert resp.status_code == 429
@@ -377,19 +380,17 @@ class TestRateLimit:
         import time as time_mod
         from collections import deque
 
-        import api.main as main_mod
-
         stale_ts = time_mod.monotonic() - 3600  # far outside the window
         for i in range(5):
-            main_mod._rate_buckets[f"10.0.0.{i}"] = deque([stale_ts])
+            ratelimit_mod._rate_buckets[f"10.0.0.{i}"] = deque([stale_ts])
 
         with (
-            patch("api.main.RATE_LIMIT_PER_MINUTE", 100),
-            patch("api.main._RATE_BUCKETS_MAX", 3),  # force the cleanup pass
+            patch("api.ratelimit.RATE_LIMIT_PER_MINUTE", 100),
+            patch("api.ratelimit._RATE_BUCKETS_MAX", 3),  # force the cleanup pass
         ):
             client.get("/stops?query=Guelph")
 
-        assert not any(k.startswith("10.0.0.") for k in main_mod._rate_buckets)
+        assert not any(k.startswith("10.0.0.") for k in ratelimit_mod._rate_buckets)
 
 
 # ---------------------------------------------------------------------------
@@ -447,7 +448,7 @@ class TestGetRoutes:
     # --- routing errors ---
 
     def test_unknown_stop_returns_404(self, client):
-        with patch("api.main.find_routes",
+        with patch("api.routes.find_routes",
                    side_effect=ValueError("Origin stop 'ZZ' not found in graph.")):
             resp = client.get(
                 "/routes?origin=ZZ&destination=GL"
@@ -457,7 +458,7 @@ class TestGetRoutes:
         assert "ZZ" in resp.json()["detail"]
 
     def test_no_routes_found_returns_404(self, client):
-        with patch("api.main.find_routes", return_value=[]):
+        with patch("api.routes.find_routes", return_value=[]):
             resp = client.get(
                 "/routes?origin=UN&destination=GL"
                 "&travel_date=2026-02-11&departure_time=08:00"
@@ -468,9 +469,9 @@ class TestGetRoutes:
 
     def test_valid_route_returns_200(self, client):
         with (
-            patch("api.main.find_routes", return_value=[_FAKE_ROUTE]),
-            patch("api.main.get_historical_reliability_batch", return_value={}),
-            patch("api.main.compute_live_risk", return_value=_FAKE_LIVE_RISK),
+            patch("api.routes.find_routes", return_value=[_FAKE_ROUTE]),
+            patch("api.routes.get_historical_reliability_batch", return_value={}),
+            patch("api.routes.compute_live_risk", return_value=_FAKE_LIVE_RISK),
         ):
             resp = client.get(
                 "/routes?origin=UN&destination=GL"
@@ -480,9 +481,9 @@ class TestGetRoutes:
 
     def test_response_contains_routes_key(self, client):
         with (
-            patch("api.main.find_routes", return_value=[_FAKE_ROUTE]),
-            patch("api.main.get_historical_reliability_batch", return_value={}),
-            patch("api.main.compute_live_risk", return_value=_FAKE_LIVE_RISK),
+            patch("api.routes.find_routes", return_value=[_FAKE_ROUTE]),
+            patch("api.routes.get_historical_reliability_batch", return_value={}),
+            patch("api.routes.compute_live_risk", return_value=_FAKE_LIVE_RISK),
         ):
             body = client.get(
                 "/routes?origin=UN&destination=GL"
@@ -494,9 +495,9 @@ class TestGetRoutes:
 
     def test_route_has_expected_fields(self, client):
         with (
-            patch("api.main.find_routes", return_value=[_FAKE_ROUTE]),
-            patch("api.main.get_historical_reliability_batch", return_value={}),
-            patch("api.main.compute_live_risk", return_value=_FAKE_LIVE_RISK),
+            patch("api.routes.find_routes", return_value=[_FAKE_ROUTE]),
+            patch("api.routes.get_historical_reliability_batch", return_value={}),
+            patch("api.routes.compute_live_risk", return_value=_FAKE_LIVE_RISK),
         ):
             route = client.get(
                 "/routes?origin=UN&destination=GL"
@@ -510,9 +511,9 @@ class TestGetRoutes:
 
     def test_total_travel_seconds_correct(self, client):
         with (
-            patch("api.main.find_routes", return_value=[_FAKE_ROUTE]),
-            patch("api.main.get_historical_reliability_batch", return_value={}),
-            patch("api.main.compute_live_risk", return_value=_FAKE_LIVE_RISK),
+            patch("api.routes.find_routes", return_value=[_FAKE_ROUTE]),
+            patch("api.routes.get_historical_reliability_batch", return_value={}),
+            patch("api.routes.compute_live_risk", return_value=_FAKE_LIVE_RISK),
         ):
             route = client.get(
                 "/routes?origin=UN&destination=GL"
@@ -523,9 +524,9 @@ class TestGetRoutes:
 
     def test_risk_score_and_label_present(self, client):
         with (
-            patch("api.main.find_routes", return_value=[_FAKE_ROUTE]),
-            patch("api.main.get_historical_reliability_batch", return_value={}),
-            patch("api.main.compute_live_risk", return_value=_FAKE_LIVE_RISK),
+            patch("api.routes.find_routes", return_value=[_FAKE_ROUTE]),
+            patch("api.routes.get_historical_reliability_batch", return_value={}),
+            patch("api.routes.compute_live_risk", return_value=_FAKE_LIVE_RISK),
         ):
             route = client.get(
                 "/routes?origin=UN&destination=GL"
@@ -540,9 +541,9 @@ class TestGetRoutes:
         leg's scheduled departure on the travel date (a 08:00 weekday leg →
         weekday_am_peak), not from the wall clock at query time."""
         with (
-            patch("api.main.find_routes", return_value=[_FAKE_ROUTE]),
-            patch("api.main.get_historical_reliability_batch", return_value={}) as mock_hist,
-            patch("api.main.compute_live_risk", return_value=_FAKE_LIVE_RISK) as mock_live,
+            patch("api.routes.find_routes", return_value=[_FAKE_ROUTE]),
+            patch("api.routes.get_historical_reliability_batch", return_value={}) as mock_hist,
+            patch("api.routes.compute_live_risk", return_value=_FAKE_LIVE_RISK) as mock_live,
         ):
             resp = client.get(
                 "/routes?origin=UN&destination=GL"
@@ -562,10 +563,10 @@ class TestGetRoutes:
         from config import AGENCY_TZ
         today = _dt.now(AGENCY_TZ).strftime("%Y-%m-%d")
         with (
-            patch("api.main.find_routes", return_value=[_FAKE_ROUTE]),
-            patch("api.main.get_historical_reliability_batch", return_value={}),
-            patch("api.main.compute_live_risk", return_value=_FAKE_LIVE_RISK),
-            patch("api.main.get_live_delay", return_value=300),
+            patch("api.routes.find_routes", return_value=[_FAKE_ROUTE]),
+            patch("api.routes.get_historical_reliability_batch", return_value={}),
+            patch("api.routes.compute_live_risk", return_value=_FAKE_LIVE_RISK),
+            patch("api.routes.get_live_delay", return_value=300),
         ):
             leg = client.get(
                 f"/routes?origin=UN&destination=GL"
@@ -580,10 +581,10 @@ class TestGetRoutes:
         """Regression: trip_ids repeat across service days — today's live
         delay must not produce expected times for a future travel date."""
         with (
-            patch("api.main.find_routes", return_value=[_FAKE_ROUTE]),
-            patch("api.main.get_historical_reliability_batch", return_value={}),
-            patch("api.main.compute_live_risk", return_value=_FAKE_LIVE_RISK),
-            patch("api.main.get_live_delay", return_value=300),
+            patch("api.routes.find_routes", return_value=[_FAKE_ROUTE]),
+            patch("api.routes.get_historical_reliability_batch", return_value={}),
+            patch("api.routes.compute_live_risk", return_value=_FAKE_LIVE_RISK),
+            patch("api.routes.get_live_delay", return_value=300),
         ):
             leg = client.get(
                 "/routes?origin=UN&destination=GL"
@@ -597,9 +598,9 @@ class TestGetRoutes:
     def test_hhmm_departure_time_accepted(self, client):
         """HH:MM (without seconds) should be accepted."""
         with (
-            patch("api.main.find_routes", return_value=[_FAKE_ROUTE]),
-            patch("api.main.get_historical_reliability_batch", return_value={}),
-            patch("api.main.compute_live_risk", return_value=_FAKE_LIVE_RISK),
+            patch("api.routes.find_routes", return_value=[_FAKE_ROUTE]),
+            patch("api.routes.get_historical_reliability_batch", return_value={}),
+            patch("api.routes.compute_live_risk", return_value=_FAKE_LIVE_RISK),
         ):
             resp = client.get(
                 "/routes?origin=UN&destination=GL"
@@ -634,9 +635,8 @@ class TestGetRoutes:
 
     def test_unexpected_routing_exception_returns_500(self, client):
         """A non-ValueError exception from find_routes should return 500."""
-        import api.main as main_mod
-        main_mod._routes_cache.clear()
-        with patch("api.main.find_routes", side_effect=RuntimeError("graph exploded")):
+        cache_mod._routes_cache.clear()
+        with patch("api.routes.find_routes", side_effect=RuntimeError("graph exploded")):
             resp = client.get(
                 "/routes?origin=UN&destination=GL"
                 "&travel_date=2026-02-11&departure_time=08:00"
@@ -651,10 +651,9 @@ class TestGetRoutes:
 @pytest.fixture
 def _reset_ingest_state():
     """Reset the module-level ingest slot before and after a test."""
-    import api.main as main_mod
 
     def _reset():
-        main_mod._ingest_state.update(
+        lifespan_mod._ingest_state.update(
             running=False, started_at=None, finished_at=None,
             last_status=None, last_message=None,
         )
@@ -678,8 +677,8 @@ class TestIngestAuth:
     def test_open_when_no_key_configured(self, client):
         """No INGEST_API_KEY set → request accepted without a header."""
         with (
-            patch("api.main.INGEST_API_KEY", ""),
-            patch("api.main._run_gtfs_ingest", new_callable=AsyncMock),
+            patch("api.routes.INGEST_API_KEY", ""),
+            patch("api.lifespan._run_gtfs_ingest", new_callable=AsyncMock),
         ):
             resp = client.post("/ingest/gtfs-static")
         assert resp.status_code == 202
@@ -687,8 +686,8 @@ class TestIngestAuth:
     def test_correct_key_accepted(self, client):
         """Correct X-API-Key header → 202."""
         with (
-            patch("api.main.INGEST_API_KEY", "secret"),
-            patch("api.main._run_gtfs_ingest", new_callable=AsyncMock),
+            patch("api.routes.INGEST_API_KEY", "secret"),
+            patch("api.lifespan._run_gtfs_ingest", new_callable=AsyncMock),
         ):
             resp = client.post(
                 "/ingest/gtfs-static",
@@ -698,7 +697,7 @@ class TestIngestAuth:
 
     def test_wrong_key_rejected(self, client):
         """Wrong X-API-Key header → 401."""
-        with patch("api.main.INGEST_API_KEY", "secret"):
+        with patch("api.routes.INGEST_API_KEY", "secret"):
             resp = client.post(
                 "/ingest/gtfs-static",
                 headers={"X-API-Key": "wrong"},
@@ -707,7 +706,7 @@ class TestIngestAuth:
 
     def test_missing_header_rejected(self, client):
         """No X-API-Key header when key is configured → 401."""
-        with patch("api.main.INGEST_API_KEY", "secret"):
+        with patch("api.routes.INGEST_API_KEY", "secret"):
             resp = client.post("/ingest/gtfs-static")
         assert resp.status_code == 401
 
@@ -721,28 +720,26 @@ class TestIngestBackground:
 
     def test_returns_202_accepted(self, client):
         with (
-            patch("api.main.INGEST_API_KEY", ""),
-            patch("api.main._run_gtfs_ingest", new_callable=AsyncMock),
+            patch("api.routes.INGEST_API_KEY", ""),
+            patch("api.lifespan._run_gtfs_ingest", new_callable=AsyncMock),
         ):
             resp = client.post("/ingest/gtfs-static")
         assert resp.status_code == 202
         assert resp.json()["status"] == "accepted"
 
     def test_concurrent_ingest_rejected_409(self, client):
-        import api.main as main_mod
-        main_mod._ingest_state["running"] = True
-        with patch("api.main.INGEST_API_KEY", ""):
+        lifespan_mod._ingest_state["running"] = True
+        with patch("api.routes.INGEST_API_KEY", ""):
             resp = client.post("/ingest/gtfs-static")
         assert resp.status_code == 409
 
     def test_status_endpoint_reports_state(self, client):
-        import api.main as main_mod
-        main_mod._ingest_state.update(
+        lifespan_mod._ingest_state.update(
             running=False, started_at="2026-07-10T12:00:00+00:00",
             finished_at="2026-07-10T12:01:00+00:00",
             last_status="ok", last_message="done",
         )
-        with patch("api.main.INGEST_API_KEY", ""):
+        with patch("api.routes.INGEST_API_KEY", ""):
             body = client.get("/ingest/status").json()
         assert body["running"] is False
         assert body["last_status"] == "ok"
@@ -752,16 +749,15 @@ class TestIngestBackground:
     async def test_run_ingest_chains_refresh_build_seed(self):
         """The background body chains refresh → build → full reseed and
         records success in the ingest state."""
-        import api.main as main_mod
-        from api.main import _run_gtfs_ingest
+        from api.lifespan import _run_gtfs_ingest
 
         mock_session = MagicMock()
-        main_mod._ingest_state["running"] = True  # slot claimed by endpoint
+        lifespan_mod._ingest_state["running"] = True  # slot claimed by endpoint
         with (
-            patch("api.main.SessionLocal", return_value=mock_session),
-            patch("api.main.refresh_static_data", new_callable=AsyncMock) as mock_refresh,
-            patch("api.main.build_graph") as mock_build,
-            patch("api.main.seed_from_static", return_value=42) as mock_seed,
+            patch("api.lifespan.SessionLocal", return_value=mock_session),
+            patch("api.lifespan.refresh_static_data", new_callable=AsyncMock) as mock_refresh,
+            patch("api.lifespan.build_graph") as mock_build,
+            patch("api.lifespan.seed_from_static", return_value=42) as mock_seed,
         ):
             await _run_gtfs_ingest()
 
@@ -769,9 +765,9 @@ class TestIngestBackground:
         mock_build.assert_called_once_with(mock_session)
         _, kwargs = mock_seed.call_args
         assert kwargs.get("fill_gaps_only") is False
-        assert main_mod._ingest_state["running"] is False
-        assert main_mod._ingest_state["last_status"] == "ok"
-        assert "42" in main_mod._ingest_state["last_message"]
+        assert lifespan_mod._ingest_state["running"] is False
+        assert lifespan_mod._ingest_state["last_status"] == "ok"
+        assert "42" in lifespan_mod._ingest_state["last_message"]
         mock_session.close.assert_called_once()
 
     @pytest.mark.anyio
@@ -781,17 +777,16 @@ class TestIngestBackground:
         would 409 every manual ingest and skip every daily refresh)."""
         import asyncio
 
-        import api.main as main_mod
-        from api.main import _run_gtfs_ingest
+        from api.lifespan import _run_gtfs_ingest
 
-        main_mod._ingest_state["running"] = True
+        lifespan_mod._ingest_state["running"] = True
 
         async def hang(session):
             await asyncio.Event().wait()
 
         with (
-            patch("api.main.SessionLocal", return_value=MagicMock()),
-            patch("api.main.refresh_static_data", side_effect=hang),
+            patch("api.lifespan.SessionLocal", return_value=MagicMock()),
+            patch("api.lifespan.refresh_static_data", side_effect=hang),
         ):
             task = asyncio.get_running_loop().create_task(_run_gtfs_ingest())
             await asyncio.sleep(0.05)
@@ -799,26 +794,25 @@ class TestIngestBackground:
             with pytest.raises(asyncio.CancelledError):
                 await task
 
-        assert main_mod._ingest_state["running"] is False
-        assert main_mod._ingest_state["last_status"] == "error"
-        assert "cancelled" in main_mod._ingest_state["last_message"].lower()
+        assert lifespan_mod._ingest_state["running"] is False
+        assert lifespan_mod._ingest_state["last_status"] == "error"
+        assert "cancelled" in lifespan_mod._ingest_state["last_message"].lower()
 
     @pytest.mark.anyio
     async def test_run_ingest_records_error(self):
-        import api.main as main_mod
-        from api.main import _run_gtfs_ingest
+        from api.lifespan import _run_gtfs_ingest
 
-        main_mod._ingest_state["running"] = True
+        lifespan_mod._ingest_state["running"] = True
         with (
-            patch("api.main.SessionLocal", return_value=MagicMock()),
-            patch("api.main.refresh_static_data", new_callable=AsyncMock,
+            patch("api.lifespan.SessionLocal", return_value=MagicMock()),
+            patch("api.lifespan.refresh_static_data", new_callable=AsyncMock,
                   side_effect=Exception("feed down")),
         ):
             await _run_gtfs_ingest()  # must not raise
 
-        assert main_mod._ingest_state["running"] is False
-        assert main_mod._ingest_state["last_status"] == "error"
-        assert "feed down" in main_mod._ingest_state["last_message"]
+        assert lifespan_mod._ingest_state["running"] is False
+        assert lifespan_mod._ingest_state["last_status"] == "error"
+        assert "feed down" in lifespan_mod._ingest_state["last_message"]
 
 # ---------------------------------------------------------------------------
 # _daily_gtfs_refresh job function
@@ -833,11 +827,10 @@ class TestDailyGtfsRefreshJob:
     @pytest.mark.anyio
     async def test_skipped_while_manual_ingest_running(self):
         """The daily refresh and manual ingest share one slot."""
-        import api.main as main_mod
-        from api.main import _daily_gtfs_refresh
+        from api.lifespan import _daily_gtfs_refresh
 
-        main_mod._ingest_state["running"] = True
-        with patch("api.main.refresh_static_data", new_callable=AsyncMock) as mock_refresh:
+        lifespan_mod._ingest_state["running"] = True
+        with patch("api.lifespan.refresh_static_data", new_callable=AsyncMock) as mock_refresh:
             await _daily_gtfs_refresh()
 
         mock_refresh.assert_not_called()
@@ -845,15 +838,15 @@ class TestDailyGtfsRefreshJob:
     @pytest.mark.anyio
     async def test_calls_refresh_build_seed(self):
         """Job invokes refresh_static_data, build_graph, and seed_from_static."""
-        from api.main import _daily_gtfs_refresh
+        from api.lifespan import _daily_gtfs_refresh
 
         mock_session = MagicMock()
         with (
-            patch("api.main.SessionLocal", return_value=mock_session),
-            patch("api.main.refresh_static_data", new_callable=AsyncMock) as mock_refresh,
-            patch("api.main.build_graph") as mock_build,
-            patch("api.main.decay_reliability_records", return_value=3) as mock_decay,
-            patch("api.main.seed_from_static", return_value=5) as mock_seed,
+            patch("api.lifespan.SessionLocal", return_value=mock_session),
+            patch("api.lifespan.refresh_static_data", new_callable=AsyncMock) as mock_refresh,
+            patch("api.lifespan.build_graph") as mock_build,
+            patch("api.lifespan.decay_reliability_records", return_value=3) as mock_decay,
+            patch("api.lifespan.seed_from_static", return_value=5) as mock_seed,
         ):
             await _daily_gtfs_refresh()
 
@@ -865,29 +858,29 @@ class TestDailyGtfsRefreshJob:
     @pytest.mark.anyio
     async def test_error_does_not_propagate(self):
         """A failure during refresh is swallowed — the job must not crash the scheduler."""
-        from api.main import _daily_gtfs_refresh
+        from api.lifespan import _daily_gtfs_refresh
 
         with (
-            patch("api.main.SessionLocal", return_value=MagicMock()),
-            patch("api.main.refresh_static_data", new_callable=AsyncMock,
+            patch("api.lifespan.SessionLocal", return_value=MagicMock()),
+            patch("api.lifespan.refresh_static_data", new_callable=AsyncMock,
                   side_effect=Exception("network down")),
-            patch("api.main.build_graph"),
-            patch("api.main.seed_from_static"),
+            patch("api.lifespan.build_graph"),
+            patch("api.lifespan.seed_from_static"),
         ):
             await _daily_gtfs_refresh()  # must not raise
 
     @pytest.mark.anyio
     async def test_session_always_closed(self):
         """DB session is closed in the finally block even when the job fails."""
-        from api.main import _daily_gtfs_refresh
+        from api.lifespan import _daily_gtfs_refresh
 
         mock_session = MagicMock()
         with (
-            patch("api.main.SessionLocal", return_value=mock_session),
-            patch("api.main.refresh_static_data", new_callable=AsyncMock,
+            patch("api.lifespan.SessionLocal", return_value=mock_session),
+            patch("api.lifespan.refresh_static_data", new_callable=AsyncMock,
                   side_effect=Exception("fail")),
-            patch("api.main.build_graph"),
-            patch("api.main.seed_from_static"),
+            patch("api.lifespan.build_graph"),
+            patch("api.lifespan.seed_from_static"),
         ):
             await _daily_gtfs_refresh()
 
@@ -902,28 +895,28 @@ class TestRoutesCache:
 
     def setup_method(self):
         """Clear the module-level cache before each test."""
-        from api.main import _clear_routes_cache
+        from api.cache import _clear_routes_cache
         _clear_routes_cache()
 
     def test_cache_key_includes_all_fields(self):
-        from api.main import _routes_cache_key
+        from api.cache import _routes_cache_key
         dt = datetime(2026, 2, 17, 8, 30, 0)
         key = _routes_cache_key("UN", "GL", dt)
         assert key == ("UN", "GL", "2026-02-17", "08:30")
 
     def test_cache_miss_returns_none(self):
-        from api.main import _get_cached_routes
+        from api.cache import _get_cached_routes
         assert _get_cached_routes(("UN", "GL", "2026-02-17", "08:30")) is None
 
     def test_store_and_retrieve(self):
-        from api.main import _get_cached_routes, _store_cached_routes
+        from api.cache import _get_cached_routes, _store_cached_routes
         key = ("UN", "GL", "2026-02-17", "08:30")
         routes = [[{"kind": "trip", "route_id": "R1"}]]
         _store_cached_routes(key, routes)
         assert _get_cached_routes(key) == routes
 
     def test_clear_removes_entries(self):
-        from api.main import _clear_routes_cache, _get_cached_routes, _store_cached_routes
+        from api.cache import _clear_routes_cache, _get_cached_routes, _store_cached_routes
         key = ("UN", "GL", "2026-02-17", "08:30")
         _store_cached_routes(key, [[]])
         _clear_routes_cache()
@@ -932,18 +925,16 @@ class TestRoutesCache:
     def test_expired_entry_returns_none(self, monkeypatch):
         from datetime import timedelta
 
-        import api.main as main_mod
-        from api.main import _get_cached_routes, _store_cached_routes
+        from api.cache import _get_cached_routes, _store_cached_routes
 
         key = ("UN", "GL", "2026-02-17", "08:30")
         # TTL is captured per entry at store time — shrink it before storing.
-        monkeypatch.setattr(main_mod, "_ROUTES_CACHE_TTL", timedelta(seconds=0))
+        monkeypatch.setattr(cache_mod, "_ROUTES_CACHE_TTL", timedelta(seconds=0))
         _store_cached_routes(key, [[]])
         assert _get_cached_routes(key) is None
 
     def test_empty_result_negative_cached(self, client, monkeypatch):
         """Repeated queries for an unroutable pair must not re-run routing."""
-        import api.main as main_mod
 
         calls = {"n": 0}
 
@@ -951,32 +942,29 @@ class TestRoutesCache:
             calls["n"] += 1
             return []
 
-        monkeypatch.setattr(main_mod, "find_routes", fake_find_routes)
+        monkeypatch.setattr(routes_mod, "find_routes", fake_find_routes)
         params = "origin=UN&destination=GL&travel_date=2026-02-18&departure_time=08:00"
         assert client.get(f"/routes?{params}").status_code == 404
         assert client.get(f"/routes?{params}").status_code == 404
         assert calls["n"] == 1  # second 404 came from the negative cache
 
     def test_negative_entries_use_short_ttl(self):
-        import api.main as main_mod
-        from api.main import _store_cached_routes
+        from api.cache import _store_cached_routes
 
         key = ("UN", "GL", "2026-02-17", "08:30")
         _store_cached_routes(key, [])
-        assert main_mod._routes_cache[key][2] == main_mod._ROUTES_CACHE_NEGATIVE_TTL
+        assert cache_mod._routes_cache[key][2] == cache_mod._ROUTES_CACHE_NEGATIVE_TTL
 
     def test_cache_size_is_bounded(self, monkeypatch):
-        import api.main as main_mod
-        from api.main import _store_cached_routes
+        from api.cache import _store_cached_routes
 
-        monkeypatch.setattr(main_mod, "_ROUTES_CACHE_MAX_ENTRIES", 20)
+        monkeypatch.setattr(cache_mod, "_ROUTES_CACHE_MAX_ENTRIES", 20)
         for i in range(60):
             _store_cached_routes(("UN", f"S{i}", "2026-02-17", "08:30"), [["x"]])
-        assert len(main_mod._routes_cache) <= 20
+        assert len(cache_mod._routes_cache) <= 20
 
     def test_find_routes_called_once_on_cache_hit(self, client, monkeypatch):
         """Second identical request uses cached routes; find_routes called once."""
-        import api.main as main_mod
 
         fake_legs = [{
             "kind": "trip",
@@ -992,9 +980,9 @@ class TestRoutesCache:
             call_count["n"] += 1
             return [fake_legs]
 
-        monkeypatch.setattr(main_mod, "find_routes", fake_find_routes)
-        monkeypatch.setattr(main_mod, "get_historical_reliability_batch", lambda *a, **kw: {})
-        monkeypatch.setattr(main_mod, "compute_live_risk", lambda **kw: {
+        monkeypatch.setattr(routes_mod, "find_routes", fake_find_routes)
+        monkeypatch.setattr(routes_mod, "get_historical_reliability_batch", lambda *a, **kw: {})
+        monkeypatch.setattr(routes_mod, "compute_live_risk", lambda **kw: {
             "risk_score": 0.1, "risk_label": "Low", "modifiers": [], "is_cancelled": False,
         })
 
@@ -1006,11 +994,11 @@ class TestRoutesCache:
 
     def test_different_params_not_shared(self, monkeypatch):
         """Different origin/destination get independent cache entries."""
-        from api.main import _get_cached_routes, _routes_cache_key
+        from api.cache import _get_cached_routes, _routes_cache_key
 
         key_a = _routes_cache_key("UN", "GL", datetime(2026, 2, 17, 8, 0))
         key_b = _routes_cache_key("BR", "GL", datetime(2026, 2, 17, 8, 0))
-        from api.main import _store_cached_routes
+        from api.cache import _store_cached_routes
         _store_cached_routes(key_a, [["route_a"]])
         assert _get_cached_routes(key_b) is None
 
@@ -1023,9 +1011,7 @@ class TestRouteCacheSingleFlight:
         import time
         from unittest.mock import MagicMock
 
-        import api.main as main_mod
-
-        main_mod._clear_routes_cache()
+        cache_mod._clear_routes_cache()
         calls = []
         walk_route = [[{
             "kind": "walk", "from_stop_name": "A", "to_stop_name": "B",
@@ -1037,11 +1023,11 @@ class TestRouteCacheSingleFlight:
             time.sleep(0.1)
             return walk_route
 
-        monkeypatch.setattr(main_mod, "find_routes", slow_find)
+        monkeypatch.setattr(routes_mod, "find_routes", slow_find)
 
         results = []
         def worker():
-            results.append(main_mod._score_routes_blocking(
+            results.append(routes_mod._score_routes_blocking(
                 "A", "B", datetime(2026, 2, 9, 8, 0), MagicMock()
             ))
 
@@ -1054,4 +1040,4 @@ class TestRouteCacheSingleFlight:
         assert len(calls) == 1
         assert len(results) == 4
         assert all(r == results[0] for r in results)
-        main_mod._clear_routes_cache()
+        cache_mod._clear_routes_cache()
