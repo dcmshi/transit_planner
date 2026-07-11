@@ -385,8 +385,12 @@ issues invisible to the SQLite unit suite.  295 tests passing.
 
 ## Seventh & Eighth Audit Passes (2026-07-10)
 
-Two passes in one day; every finding is catalogued (with fix notes) in
-`TODO.md`.  Suite grew 295 → 364 tests; ruff + GitHub Actions CI added.
+Two passes in one day.  The eighth pass was run by two independent
+reviewers plus a separate agent session (whose findings arrived via
+TODO.md); the three finding sets overlapped heavily and were consolidated
+— every item is fixed or explicitly deferred (see TODO.md "Deferred");
+per-item detail lives in the 2026-07-10 commit messages.  Suite grew
+295 → 364 tests; ruff + GitHub Actions CI added.
 
 **Seventh pass (full backlog burn-down):** agency-timezone anchoring
 (`AGENCY_TZ`), risk keyed to travel time instead of query time, service_id
@@ -420,6 +424,10 @@ feed-string sanitisation.
   including a 24:05:00 post-midnight arrival)
 - Ingest: 202 + 409-guard + `/ingest/status` exercised live; 5 198
   records reseeded
+- Frontend e2e (separate agent session, companion frontend repo): `/stops`
+  and `/routes` exercised end-to-end by its new Playwright suite (5/5
+  passing) — stop search, route planning with risk badges, selection,
+  persistence
 
 ---
 
