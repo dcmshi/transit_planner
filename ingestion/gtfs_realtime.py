@@ -263,7 +263,13 @@ async def poll_all() -> None:
         # a gap there (even with the other feeds healthy) means a bus
         # could have reported without us ever seeing it — buses with no
         # vehicle-position data would otherwise become false no-shows.
-        if tu_ok:
+        # An HTTP-200 feed with ZERO entities counts as a gap too: some
+        # GTFS-RT vendors serve empty-but-successful feeds during
+        # outages, and judging no-shows against one would mark every
+        # bus running in that window as missed.  (Overnight the feed is
+        # legitimately empty, but there are no trips to sweep then, and
+        # coverage re-arms with the first morning entity.)
+        if tu_ok and trip_updates:
             if _polling_since is None:
                 _polling_since = _last_fetched
         else:

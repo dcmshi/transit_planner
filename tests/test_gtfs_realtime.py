@@ -423,6 +423,7 @@ class TestNoShowCoverage:
         """Regression: coverage survived as long as ANY feed succeeded, so
         a trip-updates outage (the primary evidence stream) produced false
         no-shows for buses that report no vehicle positions."""
+        rt_mod.trip_updates["T1"] = TripUpdateState(trip_id="T1", route_id="R1")
         with patch.object(rt_mod, "GTFS_RT_API_KEY", "k"):
             p1, p2, p3 = self._patch_feeds(True, True, True)
             with p1, p2, p3:
@@ -435,6 +436,25 @@ class TestNoShowCoverage:
             with p1, p2, p3:
                 await rt_mod.poll_all()
             assert rt_mod._polling_since is None
+
+    @pytest.mark.anyio
+    async def test_empty_but_successful_feed_is_a_coverage_gap(self):
+        """Regression (ninth pass): an HTTP-200 trip-updates feed with zero
+        entities (vendor outage shape) must not count as coverage — every
+        bus running in that window would otherwise be a false no-show."""
+        assert not rt_mod.trip_updates  # feed "succeeded" but is empty
+        with patch.object(rt_mod, "GTFS_RT_API_KEY", "k"):
+            p1, p2, p3 = self._patch_feeds(True, True, True)
+            with p1, p2, p3:
+                await rt_mod.poll_all()
+            assert rt_mod._polling_since is None
+
+            # First real entity re-arms coverage.
+            rt_mod.trip_updates["T1"] = TripUpdateState(trip_id="T1", route_id="R1")
+            p1, p2, p3 = self._patch_feeds(True, True, True)
+            with p1, p2, p3:
+                await rt_mod.poll_all()
+            assert rt_mod._polling_since is not None
 
     @pytest.mark.anyio
     async def test_seen_set_rolls_before_update_at_midnight(self):
