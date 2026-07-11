@@ -431,6 +431,36 @@ feed-string sanitisation.
 
 ---
 
+## Ninth Audit Pass (2026-07-10)
+
+Adversarial review of the eighth pass's own fixes (the eighth reviewed the
+seventh's; its fixes had not themselves been reviewed) plus a docs
+consistency sweep.  One confirmed gap and five hardening items, all fixed:
+
+- [x] **`risk_factors` bypassed the LLM feed-text sanitisation** — modifiers
+  embed raw alert headers; now sanitised in `_build_llm_payload` (2026-07-10)
+- [x] **Walking added as a dominance axis** — a heavy-walk option could
+  silently delete a zero-walk alternative (2026-07-10)
+- [x] **Empty-but-successful trip-updates feed = coverage gap** — vendor
+  outages serving HTTP-200 with zero entities no longer produce permanent
+  false no-shows (2026-07-10)
+- [x] **Coverage ties broken by whole-segment weight**, not first-hop
+  weight (2026-07-10)
+- [x] **Remaining `int()` parses guarded** — route_type/direction_id
+  default, garbage stop_sequence skips its row (2026-07-10)
+- [x] **`_daily_gtfs_refresh` CancelledError slot-release guard** —
+  symmetry with `_run_gtfs_ingest` (2026-07-10)
+- [x] **Docs**: `/stops` `routes_served`, stale manual-reseed note, richer
+  `/health` example, `/alerts` in the rate-limit comment (2026-07-10)
+
+Checked and clean: float decay/purge/reseed interplay (probe-verified), DST
+nights (disproved by probe — same-tzinfo arithmetic is wall-clock), RT
+restart/rollover matrix, cross-thread session use, prune/cache/LLM
+numbering consistency, retry cache keys, pool/ILIKE/snapshots.  CI green on
+every push; suite at 369 passing tests.
+
+---
+
 ## Environment Setup
 
 ```bash

@@ -161,7 +161,7 @@ Search stops by name substring. Use this to find `stop_id` values.
 |-----------|----------|-------------|
 | `query` | yes | Name substring (min 2 characters) |
 
-**Responses:** `200` with array of `{stop_id, stop_name, lat, lon}` objects; empty array if no match.
+**Responses:** `200` with array of `{stop_id, stop_name, lat, lon, routes_served}` objects; empty array if no match.
 
 ```bash
 curl "http://localhost:8000/stops?query=Guelph"
@@ -190,10 +190,19 @@ Liveness and data-freshness check.
   },
   "reliability": {
     "records": 1234,
-    "last_seeded_at": "2026-02-11T09:35:00"
+    "last_seeded_at": "2026-02-11T09:35:00",
+    "by_source": {"seed": 1100, "mixed": 130, "observed": 4}
   },
   "gtfs_rt": {
-    "polling_active": false
+    "polling_active": true,
+    "startup_fetch_only": false,
+    "last_fetched_at": "2026-02-11T10:00:00+00:00",
+    "consecutive_failures": 0,
+    "backing_off_until": null,
+    "polling_coverage_since": "2026-02-11T09:30:00+00:00",
+    "trip_updates": 245,
+    "service_alerts": 22,
+    "vehicle_positions": 245
   }
 }
 ```
@@ -234,8 +243,9 @@ Seed the reliability database from the static GTFS schedule. No GTFS-RT
 feed required. Uses synthetic per-bucket priors derived from schedule
 density (see [Risk model](#risk-model)).
 
-Run this once after `/ingest/gtfs-static` so that risk scores reflect
-real route/time-of-day patterns rather than the flat 0.8 neutral prior.
+`/ingest/gtfs-static` already runs a full reseed as part of its pipeline,
+so calling this manually is only needed to re-seed with a different
+`window_days` sample.
 
 | Parameter | Required | Default | Description |
 |-----------|----------|---------|-------------|
