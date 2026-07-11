@@ -211,19 +211,25 @@ def _rank_routes_by_coverage(
         )
 
     ranked: list[tuple[int, float, str]] = []
-    for route_id, weight in weight_by_route.items():
+    for route_id in weight_by_route:
         count = 0
+        total_weight = 0.0
         for j in range(start, len(node_path) - 1):
             a, b = node_path[j], node_path[j + 1]
             ab_edges = G.get_edge_data(a, b) or {}
-            if not any(
-                e.get("kind") == "trip" and e.get("route_id") == route_id
+            pair_weights = [
+                e.get("weight", float("inf"))
                 for e in ab_edges.values()
-            ):
+                if e.get("kind") == "trip" and e.get("route_id") == route_id
+            ]
+            if not pair_weights:
                 break
+            total_weight += min(pair_weights)
             count += 1
-        ranked.append((count, weight, route_id))
-    # Longest coverage first, then fastest, then route_id for determinism.
+        ranked.append((count, total_weight, route_id))
+    # Longest coverage first, then fastest over the WHOLE covered segment
+    # (first-hop weight alone let a route quicker off the mark but slower
+    # overall shadow the genuinely faster one), then route_id.
     ranked.sort(key=lambda rc: (-rc[0], rc[1], rc[2]))
     return [route_id for _count, _weight, route_id in ranked]
 

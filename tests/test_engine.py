@@ -654,6 +654,24 @@ class TestPickLongestRoute:
         result = _pick_longest_route(G, ["X", "A", "B", "C", "D"], 1)
         assert result == "R1"
 
+    def test_coverage_tie_broken_by_segment_weight_not_first_hop(self):
+        """Ninth-pass fix: with equal coverage, the route faster over the
+        WHOLE segment ranks first — first-hop weight alone let a slower
+        route shadow a faster one."""
+        from routing.engine import _rank_routes_by_coverage
+
+        G = nx.MultiDiGraph()
+        for node in ("A", "B", "C"):
+            G.add_node(node, name=f"Stop {node}")
+        # R_slow wins hop 1 (100 vs 200) but loses the segment (100+900
+        # vs 200+300).
+        G.add_edge("A", "B", route_id="R_slow", weight=100, kind="trip")
+        G.add_edge("B", "C", route_id="R_slow", weight=900, kind="trip")
+        G.add_edge("A", "B", route_id="R_fast", weight=200, kind="trip")
+        G.add_edge("B", "C", route_id="R_fast", weight=300, kind="trip")
+
+        assert _rank_routes_by_coverage(G, ["A", "B", "C"], 0) == ["R_fast", "R_slow"]
+
     def test_coverage_beats_weight_and_all_routes_are_candidates(self):
         """All trip routes on the segment are candidates (not just those
         tied at the minimum weight — see the 2026-07-10 eighth-pass fix),
