@@ -111,6 +111,11 @@ Return up to N reliability-scored routes between two stops.
 
 **Responses:**
 - `200` — routes found; body contains `routes` array (+ optional `explanation` string)
+
+Every leg carries `from_lat`/`from_lon`/`to_lat`/`to_lon` alongside the stop
+ids and names, so a map client can draw a route without resolving each
+intermediate stop through `/stops`. They are null only if a graph node is
+missing coordinates, which does not happen for ingested stops.
 - `404` — unknown stop ID, or no routes exist between the stops
 - `422` — invalid parameter format
 - `429` — per-IP rate limit exceeded (see `RATE_LIMIT_PER_MINUTE`)

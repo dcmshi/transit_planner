@@ -1294,3 +1294,69 @@ class TestStopRoutesLookup:
                    for s in client.get("/stops?query=GO").json()}
         assert by_name["Union Station GO"] == ["R1", "R2"]
         assert by_name["Guelph Central GO"] == []
+
+
+# ---------------------------------------------------------------------------
+# Leg coordinates on /routes
+# ---------------------------------------------------------------------------
+
+class TestLegCoordinatesInResponse:
+    """A map client needs [lon, lat] per leg endpoint. Without these it had to
+    resolve every intermediate stop through /stops — five extra requests on a
+    single planning flow, enough to hit the rate limit."""
+
+    _LEG_WITH_COORDS = {
+        **_FAKE_ROUTE[0],
+        "from_lat": 43.6453, "from_lon": -79.3806,
+        "to_lat": 43.5443, "to_lon": -80.2469,
+    }
+
+    def _get(self, client, legs):
+        with (
+            patch("api.routes.find_routes", return_value=[legs]),
+            patch("api.routes.get_historical_reliability_batch", return_value={}),
+        ):
+            return client.get(
+                "/routes?origin=UN&destination=GL"
+                "&travel_date=2026-02-11&departure_time=08:00"
+            )
+
+    def test_coordinates_are_serialised(self, client):
+        resp = self._get(client, [self._LEG_WITH_COORDS])
+        assert resp.status_code == 200
+        leg = resp.json()["routes"][0]["legs"][0]
+        assert (leg["from_lat"], leg["from_lon"]) == (43.6453, -79.3806)
+        assert (leg["to_lat"], leg["to_lon"]) == (43.5443, -80.2469)
+
+    def test_walk_legs_carry_them_too(self, client):
+        walk = {
+            "kind": "walk",
+            "from_stop_id": "UN", "to_stop_id": "GL",
+            "from_stop_name": "Union Station GO", "to_stop_name": "Guelph Central GO",
+            "from_lat": 43.6453, "from_lon": -79.3806,
+            "to_lat": 43.5443, "to_lon": -80.2469,
+            "distance_m": 250.0, "walk_seconds": 200,
+        }
+        resp = self._get(client, [self._LEG_WITH_COORDS, walk])
+        assert resp.status_code == 200
+        rendered = resp.json()["routes"][0]["legs"][1]
+        assert rendered["kind"] == "walk"
+        assert (rendered["from_lat"], rendered["to_lon"]) == (43.6453, -80.2469)
+
+    def test_absent_coordinates_serialise_as_null(self, client):
+        """Legs built before the field existed, or a node without lat/lon,
+        must not fail response validation."""
+        resp = self._get(client, list(_FAKE_ROUTE))
+        assert resp.status_code == 200
+        leg = resp.json()["routes"][0]["legs"][0]
+        assert leg["from_lat"] is None
+        assert leg["to_lon"] is None
+
+    def test_openapi_advertises_the_fields(self, client):
+        """The frontend generates its types from /openapi.json."""
+        schemas = client.get("/openapi.json").json()["components"]["schemas"]
+        for model in ("TripLeg", "WalkLeg"):
+            props = schemas[model]["properties"]
+            for field in ("from_lat", "from_lon", "to_lat", "to_lon"):
+                assert field in props, f"{model}.{field} missing from OpenAPI"
+                assert {"type": "number"} in props[field]["anyOf"]

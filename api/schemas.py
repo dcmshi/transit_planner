@@ -33,6 +33,13 @@ class TripLeg(BaseModel):
     to_stop_id: str
     from_stop_name: str
     to_stop_name: str
+    # Stop coordinates, so a client can draw the leg without a lookup per
+    # stop.  Null only if the graph node lacks them, which ingested stops
+    # never do.
+    from_lat: float | None = None
+    from_lon: float | None = None
+    to_lat: float | None = None
+    to_lon: float | None = None
     trip_id: str
     route_id: str
     service_id: str
@@ -53,6 +60,13 @@ class WalkLeg(BaseModel):
     to_stop_id: str
     from_stop_name: str
     to_stop_name: str
+    # Stop coordinates, so a client can draw the leg without a lookup per
+    # stop.  Null only if the graph node lacks them, which ingested stops
+    # never do.
+    from_lat: float | None = None
+    from_lon: float | None = None
+    to_lat: float | None = None
+    to_lon: float | None = None
     distance_m: float
     walk_seconds: int
 

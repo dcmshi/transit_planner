@@ -20,6 +20,13 @@ A "route" is a list of legs. Each leg is one edge traversal:
     "to_stop_id":     str,
     "from_stop_name": str,
     "to_stop_name":   str,
+    # Stop coordinates, so a client can draw the leg without resolving each
+    # stop again.  None only when the graph node lacks them, which does not
+    # happen for ingested stops.
+    "from_lat":       float | None,
+    "from_lon":       float | None,
+    "to_lat":         float | None,
+    "to_lon":         float | None,
     # trip legs only:
     "trip_id":        str,
     "route_id":       str,
@@ -289,6 +296,10 @@ def _schedule_path(
                 "to_stop_id": v,
                 "from_stop_name": G.nodes[u].get("name", u),
                 "to_stop_name": G.nodes[v].get("name", v),
+                "from_lat": G.nodes[u].get("lat"),
+                "from_lon": G.nodes[u].get("lon"),
+                "to_lat": G.nodes[v].get("lat"),
+                "to_lon": G.nodes[v].get("lon"),
                 "distance_m": best["distance_m"],
                 "walk_seconds": best["walk_seconds"],
             })
@@ -462,6 +473,10 @@ def _find_trip_legs(
             "to_stop_id":     b,
             "from_stop_name": G.nodes[a].get("name", a),
             "to_stop_name":   G.nodes[b].get("name", b),
+            "from_lat":       G.nodes[a].get("lat"),
+            "from_lon":       G.nodes[a].get("lon"),
+            "to_lat":         G.nodes[b].get("lat"),
+            "to_lon":         G.nodes[b].get("lon"),
             "trip_id":        trip_id,
             "route_id":       route_id,
             "service_id":     service_date,

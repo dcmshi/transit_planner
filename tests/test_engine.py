@@ -28,6 +28,7 @@ from routing.engine import (
     _pick_longest_route,
     _route_signature,
     _RouteQueryCache,
+    _schedule_path,
     count_transfers,
     dominates,
     find_routes_arriving_by,
@@ -1132,3 +1133,58 @@ class TestKeepIfNotDominated:
             routes, self._route("08:00:00", "23:00:00"), paths, ["A", "C", "B"]
         ) is False
         assert paths == [["A", "B"]]
+
+
+# ---------------------------------------------------------------------------
+# Leg coordinates
+# ---------------------------------------------------------------------------
+
+class TestLegCoordinates:
+    """Legs carry their stops' coordinates so a map client can draw a route
+    without resolving every intermediate stop through /stops."""
+
+    def _graph(self):
+        G: nx.MultiDiGraph[str] = nx.MultiDiGraph()
+        G.add_node("A", name="Stop A", lat=43.5443, lon=-80.2469)
+        G.add_node("B", name="Stop B", lat=43.6749, lon=-79.8221)
+        return G
+
+    def test_walk_leg_carries_both_endpoints(self):
+        G = self._graph()
+        G.add_edge("A", "B", kind="walk", distance_m=250.0, walk_seconds=200, weight=200)
+
+        legs = _schedule_path(MagicMock(), G, ["A", "B"], datetime(2026, 2, 17, 8, 0))
+
+        assert legs is not None
+        leg = legs[0]
+        assert (leg["from_lat"], leg["from_lon"]) == (43.5443, -80.2469)
+        assert (leg["to_lat"], leg["to_lon"]) == (43.6749, -79.8221)
+
+    def test_trip_leg_carries_both_endpoints(self, trip_db):
+        G = _make_trip_graph()
+        for stop_id, lat, lon in [("S1", 43.0, -79.0), ("S2", 43.1, -79.1),
+                                  ("S3", 43.2, -79.2)]:
+            G.nodes[stop_id]["lat"] = lat
+            G.nodes[stop_id]["lon"] = lon
+
+        legs = _find_trip_legs(trip_db, G, "R1", ["S1", "S2", "S3"], 0, "20260302")
+
+        assert legs is not None
+        assert (legs[0]["from_lat"], legs[0]["from_lon"]) == (43.0, -79.0)
+        assert (legs[0]["to_lat"], legs[0]["to_lon"]) == (43.1, -79.1)
+        assert (legs[1]["from_lat"], legs[1]["from_lon"]) == (43.1, -79.1)
+        assert (legs[1]["to_lat"], legs[1]["to_lon"]) == (43.2, -79.2)
+
+    def test_missing_node_coordinates_become_none(self):
+        """A node without lat/lon yields nulls rather than raising — the same
+        defensive shape the stop-name fallback already uses."""
+        G: nx.MultiDiGraph[str] = nx.MultiDiGraph()
+        G.add_node("A", name="Stop A")  # no lat/lon
+        G.add_node("B", name="Stop B", lat=43.6, lon=-79.8)
+        G.add_edge("A", "B", kind="walk", distance_m=100.0, walk_seconds=80, weight=80)
+
+        legs = _schedule_path(MagicMock(), G, ["A", "B"], datetime(2026, 2, 17, 8, 0))
+
+        assert legs is not None
+        assert legs[0]["from_lat"] is None
+        assert legs[0]["to_lat"] == 43.6
