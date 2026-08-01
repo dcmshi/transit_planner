@@ -34,6 +34,7 @@ A "route" is a list of legs. Each leg is one edge traversal:
 """
 
 import logging
+from collections.abc import Sequence
 from datetime import date, datetime, timedelta
 from typing import Any
 
@@ -145,9 +146,11 @@ def find_routes(
             sig = _route_signature(legs)
             if sig in seen_signatures:
                 continue
+            # Recorded even when dominated, so a rejected itinerary is not
+            # reconsidered on a later candidate path.
             seen_signatures.add(sig)
-            routes.append(legs)
-            candidate_paths.append(node_path)
+            if not _keep_if_not_dominated(routes, legs, candidate_paths, node_path):
+                continue
             if len(routes) >= max_routes:
                 break
     except nx.NetworkXNoPath:
@@ -514,6 +517,91 @@ def _passes_filters(legs: Route) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Dominance
+# ---------------------------------------------------------------------------
+
+def dominates(better: Sequence[float], worse: Sequence[float]) -> bool:
+    """
+    True when `better` is at least as good as `worse` on every axis and
+    strictly better on at least one.
+
+    Every axis reads lower-is-better.  Callers negate any axis where higher
+    is better — departure time, since leaving later beats leaving earlier for
+    the same arrival.  Shared with api/routes.py so the two dominance passes
+    cannot drift apart; they differ only in which axes they can supply.
+    """
+    return (
+        all(b <= w for b, w in zip(better, worse))
+        and any(b < w for b, w in zip(better, worse))
+    )
+
+
+def route_metrics(legs: Route, walk_metres: float | None = None) -> tuple[float, ...] | None:
+    """
+    Dominance axes the routing engine can measure on its own, or None for a
+    route with no trip legs (which is incomparable — see _prune_dominated).
+
+    Risk is deliberately absent: it needs historical reliability and live
+    GTFS-RT state, neither of which exists at this layer.  api/routes.py adds
+    it to the same tuple shape once scoring has run.
+
+    `walk_metres` overrides the distance derived from the legs.  A scored
+    route already carries its own total, and that value — not a second
+    derivation — is the one the API has always compared on.
+    """
+    trip_legs = [leg for leg in legs if leg["kind"] == "trip"]
+    if not trip_legs:
+        return None
+    return (
+        -_hms_to_seconds(trip_legs[0]["departure_time"]),
+        _hms_to_seconds(trip_legs[-1]["arrival_time"]),
+        count_transfers(legs),
+        total_walk_metres(legs) if walk_metres is None else walk_metres,
+    )
+
+
+def _keep_if_not_dominated(
+    routes: list[Route],
+    legs: Route,
+    paths: list[list[str]] | None = None,
+    node_path: list[str] | None = None,
+) -> bool:
+    """
+    Add `legs` to `routes` unless something already kept beats it outright,
+    evicting anything it beats in turn.  Returns whether it was added.
+
+    This is what stops the route budget being spent on itineraries the API
+    would delete anyway: a fourteen-hour wait at an interchange passes every
+    hard filter (one trip leg, few transfers, generous connection) and used to
+    occupy a slot until _prune_dominated dropped it after scoring.
+
+    `paths` is kept index-aligned with `routes` when supplied — callers rely
+    on routes[i] describing candidate_paths[i].
+    """
+    metrics = route_metrics(legs)
+    if metrics is None:
+        return False
+
+    kept = [route_metrics(r) for r in routes]
+    if any(k is not None and dominates(k, metrics) for k in kept):
+        return False
+
+    survivors = [
+        i for i, k in enumerate(kept)
+        if k is None or not dominates(metrics, k)
+    ]
+    if len(survivors) != len(routes):
+        routes[:] = [routes[i] for i in survivors]
+        if paths is not None:
+            paths[:] = [paths[i] for i in survivors]
+
+    routes.append(legs)
+    if paths is not None and node_path is not None:
+        paths.append(node_path)
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -580,10 +668,12 @@ def total_walk_metres(legs: Route) -> float:
 # journey including transfer waits; anything slower than the window is missed,
 # which is the one documented limitation of this approach.
 ARRIVE_BY_LOOKBACK_HOURS = 4
-# Search wider than the caller asked for: the earliest departures in the
-# window are rarely the ones a rider wants, so most candidates are discarded
-# in favour of the latest that still arrive in time.
-_ARRIVE_BY_CANDIDATE_MULTIPLIER = 6
+# Search somewhat wider than the caller asked for: find_routes returns the
+# earliest departures from the window start, and the ones wanted here are the
+# latest that still arrive in time.  2× suffices now that dominance pruning
+# stops the budget going on itineraries that would be discarded anyway — at 6×
+# the results were identical and the query took twice as long.
+_ARRIVE_BY_CANDIDATE_MULTIPLIER = 2
 
 
 def find_routes_arriving_by(
@@ -709,7 +799,10 @@ def _fill_later_departures(
             sig = _route_signature(legs)
             if sig not in seen_signatures:
                 seen_signatures.add(sig)
-                routes.append(legs)
+                # No paths list here: path_not_before is index-aligned with
+                # candidate_paths, not with routes, so evicting a route must
+                # not disturb either.
+                _keep_if_not_dominated(routes, legs)
         if not any_active:
             break
 

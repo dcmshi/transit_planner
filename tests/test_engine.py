@@ -23,15 +23,19 @@ from routing.engine import (
     _fill_later_departures,
     _find_trip_legs,
     _hms_to_seconds,
+    _keep_if_not_dominated,
     _passes_filters,
     _pick_longest_route,
     _route_signature,
     _RouteQueryCache,
     count_transfers,
+    dominates,
     find_routes_arriving_by,
+    route_metrics,
     total_travel_seconds,
     total_walk_metres,
 )
+from routing.engine import Route as RouteLegs  # db.models.Route is the GTFS model
 
 # ---------------------------------------------------------------------------
 # Helpers to build minimal leg dicts
@@ -1017,3 +1021,114 @@ class TestFindRoutesArrivingBy:
                 travel_day=date(2026, 2, 17), session=MagicMock(),
             )
         assert result == []
+
+
+# ---------------------------------------------------------------------------
+# Dominance
+# ---------------------------------------------------------------------------
+
+class TestDominates:
+    """Every axis reads lower-is-better; departure is pre-negated by
+    route_metrics so that leaving later counts as better."""
+
+    def test_better_on_one_axis_equal_on_rest(self):
+        assert dominates((0, 100, 0, 0.0), (0, 200, 0, 0.0)) is True
+
+    def test_identical_does_not_dominate(self):
+        assert dominates((0, 100, 0, 0.0), (0, 100, 0, 0.0)) is False
+
+    def test_mixed_wins_and_losses_does_not_dominate(self):
+        # Arrives earlier but walks further — a real trade-off, keep both.
+        assert dominates((0, 100, 0, 500.0), (0, 200, 0, 0.0)) is False
+        assert dominates((0, 200, 0, 0.0), (0, 100, 0, 500.0)) is False
+
+    def test_worse_on_one_axis_does_not_dominate(self):
+        assert dominates((0, 200, 0, 0.0), (0, 100, 0, 0.0)) is False
+
+    def test_later_departure_dominates_when_arrival_matches(self):
+        later = route_metrics([_trip("R1", "09:00:00", "10:00:00", 3600)])
+        earlier = route_metrics([_trip("R1", "08:00:00", "10:00:00", 7200)])
+        assert later is not None and earlier is not None
+        assert dominates(later, earlier) is True
+        assert dominates(earlier, later) is False
+
+
+class TestRouteMetrics:
+    def test_none_without_trip_legs(self):
+        assert route_metrics([_walk(300)]) is None
+
+    def test_departure_is_negated(self):
+        m = route_metrics([_trip("R1", "08:00:00", "09:00:00", 3600)])
+        assert m is not None
+        assert m[0] == -_hms_to_seconds("08:00:00")
+        assert m[1] == _hms_to_seconds("09:00:00")
+
+    def test_walk_override_beats_the_legs(self):
+        """A scored route carries its own total; that value, not a second
+        derivation from the legs, is what the API has always compared on."""
+        legs = [_trip("R1", "08:00:00", "09:00:00", 3600)]
+        from_legs, overridden = route_metrics(legs), route_metrics(legs, 450.0)
+        assert from_legs is not None and overridden is not None
+        assert from_legs[3] == 0.0
+        assert overridden[3] == 450.0
+
+
+class TestKeepIfNotDominated:
+    """The engine's route budget must not be spent on itineraries the API
+    would delete. A fourteen-hour wait at an interchange passes every hard
+    filter, so before this it occupied a slot until _prune_dominated ran."""
+
+    def _route(self, dep, arr):
+        return [_trip("R1", dep, arr, _hms_to_seconds(arr) - _hms_to_seconds(dep))]
+
+    def test_first_route_is_always_kept(self):
+        routes: list[RouteLegs] = []
+        assert _keep_if_not_dominated(routes, self._route("08:00:00", "09:00:00")) is True
+        assert len(routes) == 1
+
+    def test_dominated_candidate_is_rejected(self):
+        routes = [self._route("08:00:00", "09:00:00")]
+        # Same departure, arrives 14 hours later — the shape that wasted slots.
+        assert _keep_if_not_dominated(routes, self._route("08:00:00", "23:00:00")) is False
+        assert len(routes) == 1
+
+    def test_candidate_evicts_the_route_it_dominates(self):
+        routes = [self._route("08:00:00", "23:00:00")]
+        assert _keep_if_not_dominated(routes, self._route("08:00:00", "09:00:00")) is True
+        assert len(routes) == 1
+        assert routes[0][0]["arrival_time"] == "09:00:00"
+
+    def test_incomparable_routes_are_both_kept(self):
+        routes = [self._route("08:00:00", "09:00:00")]
+        # Leaves later but arrives later too.
+        assert _keep_if_not_dominated(routes, self._route("08:30:00", "09:30:00")) is True
+        assert len(routes) == 2
+
+    def test_walk_only_candidate_is_rejected(self):
+        routes: list[RouteLegs] = []
+        assert _keep_if_not_dominated(routes, [_walk(300)]) is False
+        assert routes == []
+
+    def test_paths_stay_index_aligned_through_eviction(self):
+        """_fill_later_departures seeds path_not_before from routes but indexes
+        it by candidate_paths, so routes[i] must keep describing paths[i]."""
+        routes = [self._route("08:00:00", "23:00:00"), self._route("09:00:00", "09:30:00")]
+        paths = [["A", "SLOW", "B"], ["A", "FAST", "B"]]
+
+        added = _keep_if_not_dominated(
+            routes, self._route("08:00:00", "09:00:00"), paths, ["A", "NEW", "B"]
+        )
+
+        assert added is True
+        assert len(routes) == len(paths)
+        # The 23:00 route was evicted; its path went with it.
+        assert paths == [["A", "FAST", "B"], ["A", "NEW", "B"]]
+        assert [r[0]["arrival_time"] for r in routes] == ["09:30:00", "09:00:00"]
+
+    def test_rejected_candidate_leaves_paths_untouched(self):
+        routes = [self._route("08:00:00", "09:00:00")]
+        paths = [["A", "B"]]
+        assert _keep_if_not_dominated(
+            routes, self._route("08:00:00", "23:00:00"), paths, ["A", "C", "B"]
+        ) is False
+        assert paths == [["A", "B"]]

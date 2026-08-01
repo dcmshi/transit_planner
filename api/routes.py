@@ -67,8 +67,10 @@ from reliability.historical import (
 from reliability.live import compute_live_risk, get_live_delay, risk_label
 from routing.engine import (
     count_transfers,
+    dominates,
     find_routes,
     find_routes_arriving_by,
+    route_metrics,
     total_travel_seconds,
     total_walk_metres,
 )
@@ -343,48 +345,45 @@ def _prune_dominated(
 
     Routes without trip legs (filtered upstream, handled defensively) are
     incomparable — always kept, appended last.
+
+    routing.engine already prunes on the four axes it can measure while it
+    builds its route budget, so most of the work is done by the time a route
+    gets here.  This pass exists for the axis the engine cannot see: risk
+    needs historical reliability and live GTFS-RT state, so it only becomes
+    comparable after scoring.  The metric tuple extends the engine's, and the
+    comparison is the engine's `dominates`, so the two can never disagree
+    about what "worse on every axis" means.
     """
-    Metrics = tuple[int, int, int, float, float]
+    Metrics = tuple[float, ...]
     comparable: list[tuple[Metrics, dict[str, Any]]] = []
     incomparable: list[dict[str, Any]] = []
     for route in scored_routes:
-        trip_legs = [leg for leg in route["legs"] if leg["kind"] == "trip"]
-        if not trip_legs:
+        base = route_metrics(route["legs"], route.get("total_walk_metres", 0.0))
+        if base is None:
             incomparable.append(route)
             continue
-        comparable.append((
-            (
-                hms_to_seconds(trip_legs[0]["departure_time"]),
-                hms_to_seconds(trip_legs[-1]["arrival_time"]),
-                route["transfers"],
-                route["risk_score"],
-                route.get("total_walk_metres", 0.0),
-            ),
-            route,
-        ))
+        comparable.append((base + (route["risk_score"],), route))
 
-    survivors: list[tuple[Metrics, dict[str, Any]]] = []
-    for i, (m_i, route) in enumerate(comparable):
-        dep_i, arr_i, tr_i, risk_i, walk_i = m_i
-        dominated = any(
-            dep_j >= dep_i and arr_j <= arr_i and tr_j <= tr_i
-            and risk_j <= risk_i and walk_j <= walk_i
-            and (dep_j > dep_i or arr_j < arr_i or tr_j < tr_i
-                 or risk_j < risk_i or walk_j < walk_i)
-            for j, ((dep_j, arr_j, tr_j, risk_j, walk_j), _r) in enumerate(comparable)
+    survivors: list[tuple[Metrics, dict[str, Any]]] = [
+        (m_i, route)
+        for i, (m_i, route) in enumerate(comparable)
+        if not any(
+            dominates(m_j, m_i)
+            for j, (m_j, _r) in enumerate(comparable)
             if j != i
         )
-        if not dominated:
-            survivors.append((m_i, route))
+    ]
 
     # Earliest arrival first (ties by risk, then transfers) — Yen's path
     # weight is not a meaningful presentation order for riders.  Under an
     # arrive-by query every survivor already meets the deadline, so the useful
     # order is instead the one that lets the rider leave latest.
+    # Metrics are (-departure, arrival, transfers, walk, risk); departure is
+    # already negated, so ascending on it is latest-first.
     if latest_departure_first:
-        survivors.sort(key=lambda mr: (-mr[0][0], mr[0][3], mr[0][2]))
+        survivors.sort(key=lambda mr: (mr[0][0], mr[0][4], mr[0][2]))
     else:
-        survivors.sort(key=lambda mr: (mr[0][1], mr[0][3], mr[0][2]))
+        survivors.sort(key=lambda mr: (mr[0][1], mr[0][4], mr[0][2]))
     return [route for _m, route in survivors] + incomparable
 
 
