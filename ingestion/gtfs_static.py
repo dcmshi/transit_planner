@@ -13,6 +13,7 @@ Feed contents used:
 import asyncio
 import io
 import logging
+import re
 import zipfile
 from datetime import datetime
 from typing import Any, cast
@@ -41,6 +42,29 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 GTFS_ZIP_PATH = DATA_DIR / "gtfs_static.zip"
+
+
+# Hours may exceed 23 for post-midnight trips but must stay two digits: the
+# routing query and the no-show sweep both read the hour with
+# substr(departure_time, 1, 2), so a three-digit hour would slice wrong just
+# as a one-digit hour does.
+_GTFS_TIME_RE = re.compile(r"^(\d{1,2}):([0-5]\d):([0-5]\d)$")
+
+
+def _normalise_gtfs_time(value: str) -> str | None:
+    """Zero-pad a GTFS time to HH:MM:SS, or None if it cannot be trusted.
+
+    The spec accepts H:MM:SS as well as HH:MM:SS, but every SQL site slices
+    fixed character offsets out of these strings.  Left unpadded, "9:30:00"
+    makes PostgreSQL raise on CAST('9:' AS INT) and makes SQLite silently
+    return 09:00:00 — a half-hour error with no warning.  Pad once here, at
+    the boundary, instead of teaching each query to cope.
+    """
+    match = _GTFS_TIME_RE.match(value.strip())
+    if match is None:
+        return None
+    hours, minutes, seconds = match.groups()
+    return f"{int(hours):02d}:{minutes}:{seconds}"
 
 
 def _int_or(value: Any, default: int) -> int:
@@ -229,6 +253,7 @@ def _parse_stop_times(df: pd.DataFrame, session: Session) -> None:
     loaded = 0
     skipped = 0
     blank_times = 0
+    malformed_times = 0
     for row in df.itertuples(index=False):
         if row.trip_id not in valid_trips or row.stop_id not in valid_stops:
             skipped += 1
@@ -239,6 +264,11 @@ def _parse_stop_times(df: pd.DataFrame, session: Session) -> None:
         if not row.arrival_time or not row.departure_time:
             blank_times += 1
             continue
+        arrival_time = _normalise_gtfs_time(str(row.arrival_time))
+        departure_time = _normalise_gtfs_time(str(row.departure_time))
+        if arrival_time is None or departure_time is None:
+            malformed_times += 1
+            continue
         try:
             # Ordering-critical — a garbage value can't be defaulted, but
             # one bad row must not abort the whole ingest either.
@@ -248,8 +278,8 @@ def _parse_stop_times(df: pd.DataFrame, session: Session) -> None:
             continue
         batch.append(StopTime(
             trip_id=row.trip_id,
-            arrival_time=row.arrival_time,
-            departure_time=row.departure_time,
+            arrival_time=arrival_time,
+            departure_time=departure_time,
             stop_id=row.stop_id,
             stop_sequence=stop_sequence,
         ))
@@ -264,6 +294,10 @@ def _parse_stop_times(df: pd.DataFrame, session: Session) -> None:
         logger.warning("Skipped %d stop_times with invalid trip_id or stop_id.", skipped)
     if blank_times:
         logger.warning("Skipped %d stop_times with blank arrival/departure times.", blank_times)
+    if malformed_times:
+        logger.warning(
+            "Skipped %d stop_times whose times are not H:MM:SS or HH:MM:SS.", malformed_times
+        )
     logger.info("Loaded %d stop times.", loaded)
 
 

@@ -272,6 +272,64 @@ class TestParseStopTimes:
         assert db.query(StopTime).count() == 1
         assert db.query(StopTime).filter_by(stop_id="S1").first() is not None
 
+    def test_single_digit_hour_is_zero_padded(self, db):
+        """GTFS accepts H:MM:SS.  Stored unpadded it breaks every SQL site
+        that reads the hour with substr(x, 1, 2): PostgreSQL raises on
+        CAST('9:' AS INT) and SQLite silently returns 09:00:00."""
+        self._seed(db)
+        df = pd.DataFrame([
+            {"trip_id": "T1", "stop_id": "S1", "arrival_time": "9:30:00",
+             "departure_time": "9:35:00", "stop_sequence": "1"},
+        ])
+        _parse_stop_times(df, db)
+        db.flush()
+        st = db.query(StopTime).one()
+        assert st.arrival_time == "09:30:00"
+        assert st.departure_time == "09:35:00"
+
+    def test_post_midnight_hour_preserved(self, db):
+        """>= 24:00:00 is legal GTFS and must survive normalisation intact."""
+        self._seed(db)
+        df = pd.DataFrame([
+            {"trip_id": "T1", "stop_id": "S1", "arrival_time": "25:05:00",
+             "departure_time": "25:05:00", "stop_sequence": "1"},
+        ])
+        _parse_stop_times(df, db)
+        db.flush()
+        assert db.query(StopTime).one().departure_time == "25:05:00"
+
+    @pytest.mark.parametrize("bad", ["8:5:00", "08-30-00", "0830", "abc", "100:00:00", "08:60:00"])
+    def test_malformed_times_skipped_not_stored(self, db, bad):
+        """Anything the SQL offsets could not read is dropped at the boundary
+        rather than stored to fail later — including three-digit hours, which
+        substr(x, 1, 2) would slice just as wrongly as one-digit hours."""
+        self._seed(db)
+        df = pd.DataFrame([
+            {"trip_id": "T1", "stop_id": "S1", "arrival_time": bad,
+             "departure_time": bad, "stop_sequence": "1"},
+        ])
+        _parse_stop_times(df, db)
+        db.flush()
+        assert db.query(StopTime).count() == 0
+
+    def test_padding_makes_sql_hour_slice_correct(self, db):
+        """End-to-end on the expression the routing query actually uses."""
+        from sqlalchemy import text
+
+        self._seed(db)
+        df = pd.DataFrame([
+            {"trip_id": "T1", "stop_id": "S1", "arrival_time": "9:30:00",
+             "departure_time": "9:30:00", "stop_sequence": "1"},
+        ])
+        _parse_stop_times(df, db)
+        db.flush()
+        dep_sec = db.execute(text(
+            "SELECT CAST(substr(departure_time, 1, 2) AS INT) * 3600"
+            "     + CAST(substr(departure_time, 4, 2) AS INT) * 60"
+            "     + CAST(substr(departure_time, 7, 2) AS INT) FROM stop_times"
+        )).scalar()
+        assert dep_sec == 9 * 3600 + 30 * 60  # 34200, not the unpadded 32400
+
     def test_clears_existing_stop_times(self, db):
         self._seed(db)
         db.add(StopTime(trip_id="T1", stop_id="S1", arrival_time="07:00:00",
