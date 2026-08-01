@@ -65,7 +65,21 @@ Work needed to honestly support the whole network:
 - Docs and the FastAPI `description` in `api/main.py` still say
   "Toronto ↔ Guelph".
 
-### `test_matches_bisect_result` only passes on an empty stops table
+### ✅ `test_matches_bisect_result` only passed on an empty stops table (done 2026-07-31)
+
+> `_add_walk_edges_postgis` now filters the self-join's rows to stops already
+> present as nodes, so it matches `_add_walk_edges_bisect`'s contract instead
+> of inventing nodes for anything within 500 m.  Production is unchanged —
+> `_add_stop_nodes()` runs first, and a full build against the 889-stop Docker
+> DB still yields 889 nodes / 2028 walk edges / 1927 trip edges.
+>
+> Added `test_only_touches_stops_already_in_the_graph`, which asserts the node
+> set directly rather than the edge set, so an empty database cannot hide the
+> regression again.  All 4 integration tests now pass against the populated DB;
+> both new and existing tests fail without the fix.
+>
+> Diagnosis kept below for the record.
+
 
 `tests/integration/test_walk_edges_postgis.py::TestWalkEdgesPostGIS::test_matches_bisect_result`
 inserts three `_TEST_*` stops, then compares `_add_walk_edges_postgis` against

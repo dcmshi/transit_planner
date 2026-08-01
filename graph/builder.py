@@ -220,7 +220,17 @@ def _add_walk_edges_postgis(G: nx.MultiDiGraph, session: Session) -> None:
          AND ST_DWithin(a.geog, b.geog, :max_walk)
     """), {"max_walk": MAX_WALK_METRES}).fetchall()
 
+    # The self-join spans the whole stops table, so restrict it to stops that
+    # are already nodes.  add_edge() creates endpoints implicitly, and without
+    # this the function would invent nodes for stops the caller never added —
+    # diverging from _add_walk_edges_bisect, which only sees the list it is
+    # handed.  In production _add_stop_nodes() has already added every stop,
+    # so nothing is dropped here.
+    nodes = set(G.nodes)
+    added = 0
     for row in rows:
+        if row.from_id not in nodes or row.to_id not in nodes:
+            continue
         walk_sec = int(row.distance_m / walk_speed_ms)
         G.add_edge(
             row.from_id, row.to_id,
@@ -229,7 +239,8 @@ def _add_walk_edges_postgis(G: nx.MultiDiGraph, session: Session) -> None:
             weight=walk_sec,
             kind="walk",
         )
-    logger.info("Added %d walk edges via PostGIS ST_DWithin.", len(rows))
+        added += 1
+    logger.info("Added %d walk edges via PostGIS ST_DWithin.", added)
 
 
 def _add_walk_edges_bisect(G: nx.MultiDiGraph, stops: list[Stop]) -> None:

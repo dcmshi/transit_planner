@@ -90,6 +90,29 @@ class TestWalkEdgesPostGIS:
         finally:
             _delete_stops(pg_session, ["_TEST_C", "_TEST_D"])
 
+    def test_only_touches_stops_already_in_the_graph(self, pg_session):
+        """The ST_DWithin self-join spans the whole stops table, so the helper
+        must filter to existing nodes.  Without that it invents a node for
+        every stop within 500 m of another — which passed unnoticed while CI
+        ran against an empty database."""
+        from graph.builder import _add_walk_edges_postgis
+
+        _insert_stop(pg_session, "_TEST_H", 43.6453, -79.3806)
+        _insert_stop(pg_session, "_TEST_I", 43.6458, -79.3810)  # ~60 m
+        try:
+            G: nx.MultiDiGraph[str] = nx.MultiDiGraph()
+            G.add_node("_TEST_H")
+            G.add_node("_TEST_I")
+            _add_walk_edges_postgis(G, pg_session)
+
+            assert set(G.nodes) == {"_TEST_H", "_TEST_I"}, (
+                f"helper added nodes outside the graph: "
+                f"{sorted(set(G.nodes) - {'_TEST_H', '_TEST_I'})[:10]}"
+            )
+            assert G.has_edge("_TEST_H", "_TEST_I")
+        finally:
+            _delete_stops(pg_session, ["_TEST_H", "_TEST_I"])
+
     def test_matches_bisect_result(self, pg_session):
         """PostGIS and bisect produce the same edge set for a small stop cluster."""
         from unittest.mock import MagicMock
