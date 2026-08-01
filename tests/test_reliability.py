@@ -28,8 +28,11 @@ from reliability.live import (
     LATE_EVENING_RISK_BUMP,
     MAX_ALERT_RISK_BUMP,
     MISSING_VEHICLE_RISK_BUMP,
+    RISK_LABEL_HIGH_AT,
+    RISK_LABEL_MEDIUM_AT,
     WEEKEND_RISK_BUMP,
     compute_live_risk,
+    risk_label,
 )
 
 # ---------------------------------------------------------------------------
@@ -519,6 +522,26 @@ class TestComputeLiveRisk:
         assert low["risk_label"] == "Low"
         assert mid["risk_label"] == "Medium"
         assert high["risk_label"] == "High"
+
+    def test_risk_label_boundaries_are_exact(self):
+        assert risk_label(RISK_LABEL_MEDIUM_AT - 1e-9) == "Low"
+        assert risk_label(RISK_LABEL_MEDIUM_AT) == "Medium"
+        assert risk_label(RISK_LABEL_HIGH_AT - 1e-9) == "Medium"
+        assert risk_label(RISK_LABEL_HIGH_AT) == "High"
+        assert risk_label(0.0) == "Low"
+        assert risk_label(1.0) == "High"
+
+    def test_api_route_label_uses_the_same_helper(self):
+        """api/routes.py re-implemented these thresholds inline, so the
+        route-level label could drift from the leg-level one.  Both must now
+        agree at every boundary."""
+        import api.routes as routes_mod
+
+        assert routes_mod.risk_label is risk_label
+        for score in (0.0, 0.32, RISK_LABEL_MEDIUM_AT, 0.5,
+                      RISK_LABEL_HIGH_AT, 0.9, 1.0):
+            leg = _compute(hist=1.0 - score)
+            assert leg["risk_label"] == risk_label(score)
 
 
 # ---------------------------------------------------------------------------

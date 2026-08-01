@@ -61,7 +61,7 @@ from reliability.historical import (
     classify_time_bucket,
     get_historical_reliability_batch,
 )
-from reliability.live import compute_live_risk, get_live_delay
+from reliability.live import compute_live_risk, get_live_delay, risk_label
 from routing.engine import (
     count_transfers,
     find_routes,
@@ -397,7 +397,6 @@ def _score_routes_blocking(
             route_risk_scores.append(live["risk_score"])
 
         overall_risk = max(route_risk_scores) if route_risk_scores else 0.0
-        risk_label = "Low" if overall_risk < 0.33 else "Medium" if overall_risk < 0.66 else "High"
 
         scored_routes.append({
             "legs": scored_legs,
@@ -405,7 +404,7 @@ def _score_routes_blocking(
             "transfers": count_transfers(route_legs),
             "total_walk_metres": round(total_walk_metres(route_legs), 1),
             "risk_score": round(overall_risk, 3),
-            "risk_label": risk_label,
+            "risk_label": risk_label(overall_risk),
         })
 
     return _prune_dominated(scored_routes)

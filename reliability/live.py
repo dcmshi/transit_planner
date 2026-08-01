@@ -44,6 +44,9 @@ DELAY_MINOR_SECONDS = 5 * 60
 DELAY_MAJOR_SECONDS = 15 * 60
 DELAY_RISK_BUMP_MINOR = 0.05
 DELAY_RISK_BUMP_MAJOR = 0.15
+# Label boundaries — see risk_label().
+RISK_LABEL_MEDIUM_AT = 0.33
+RISK_LABEL_HIGH_AT = 0.66
 
 
 def get_live_delay(trip_id: str, stop_id: str) -> int | None:
@@ -173,7 +176,7 @@ def compute_live_risk(
     final_risk = min(1.0, base_risk + total_adjustment)
     return {
         "risk_score": round(final_risk, 3),
-        "risk_label": _risk_label(final_risk),
+        "risk_label": risk_label(final_risk),
         "modifiers": modifiers,
         "is_cancelled": False,
     }
@@ -204,10 +207,16 @@ def _same_route_cancellations(route_id: str) -> int:
     )
 
 
-def _risk_label(score: float) -> str:
-    if score < 0.33:
+def risk_label(score: float) -> str:
+    """Map a 0–1 risk score to its rider-facing label.
+
+    Public and shared: the API labels a whole route the same way this module
+    labels a single leg, and `llm/explainer.py` ranks options by these exact
+    strings.  Three copies of the thresholds would drift.
+    """
+    if score < RISK_LABEL_MEDIUM_AT:
         return "Low"
-    if score < 0.66:
+    if score < RISK_LABEL_HIGH_AT:
         return "Medium"
     return "High"
 
