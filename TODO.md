@@ -39,6 +39,47 @@ per-item detail lives in the commit messages for 2026-07-10.
 > module paths (no re-export shims — they would silently break `patch()`
 > semantics).  `uvicorn api.main:app` entry point unchanged.
 
+### Corridor assumptions block arbitrary origin/destination pairs
+
+The routing itself is already origin/destination agnostic: `/routes` takes
+any two `stop_id`s and only rejects `origin == destination`, ingestion pulls
+the entire Metrolinx GO feed with no route filter (44 routes / 889 stops in
+the Docker DB), and nothing in `routing/engine.py` restricts the pair.  What
+*is* corridor-specific is a set of past-midnight assumptions justified by
+"GO Transit Toronto–Guelph service ends well before midnight" — and that
+premise is false for the feed already loaded: **81,531 stop_times across
+5,995 trips have `departure_time >= 24:00:00`.**
+
+Work needed to honestly support the whole network:
+
+- `routing/engine.py` `_fill_later_departures` caps `not_before` at
+  `MAX_SECONDS = 23:59:59`, so any path whose next departure is a >= 24:00:00
+  GTFS time is dropped instead of returned.
+- The no-show sweep in `ingestion/gtfs_realtime.py` skips >= 24:00:00 final
+  departures (currently listed below as deferred on the same false premise) —
+  those trips never get their `scheduled_departures` incremented, so
+  reliability silently under-counts the late-evening network.
+- `calendar.txt` / `exception_type` service resolution (also deferred below)
+  matters more once trips outside the corridor are in scope, since the
+  service_id-is-a-date convention was only validated against it.
+- Docs and the FastAPI `description` in `api/main.py` still say
+  "Toronto ↔ Guelph".
+
+### `test_matches_bisect_result` only passes on an empty stops table
+
+`tests/integration/test_walk_edges_postgis.py::TestWalkEdgesPostGIS::test_matches_bisect_result`
+inserts three `_TEST_*` stops, then compares `_add_walk_edges_postgis` against
+`_add_walk_edges_bisect`.  The PostGIS helper runs an unfiltered self-join over
+the whole `stops` table and `G.add_edge()` implicitly creates nodes, so it
+returns every within-500 m pair in the database; the bisect side only ever sees
+the three mocks.  The two agree only when `stops` holds nothing else.
+
+CI is green because its Postgres service starts empty and runs only
+`init_db()`.  Against this machine's ingested Docker DB the test fails with
+~2,000 lines of real stop pairs.  Fix by scoping the PostGIS query to the
+graph's nodes (or to the `_TEST_` prefix) rather than the whole table.
+Pre-existing — confirmed failing on `9935429`, before the mypy work.
+
 ### Schema migration for other existing deployments
 
 This machine's Docker DB is fully migrated in place (2026-06-10 and
@@ -85,7 +126,10 @@ adopting Alembic instead of manual SQL.
   loudly on a convention change), but full ServiceCalendar-based service
   resolution only becomes necessary if Metrolinx actually changes format.
 - **No-show sweep skips >24:00:00 final departures** — their service day
-  ends before the cutoff can pass.  Documented; irrelevant for the
-  Toronto–Guelph corridor where service ends before midnight.
+  ends before the cutoff can pass.  Was deferred as "irrelevant for the
+  Toronto–Guelph corridor where service ends before midnight"; that premise
+  does not hold for the feed actually ingested (5,995 trips have
+  >= 24:00:00 departures), so this is now tracked under the corridor item
+  above rather than deferred on those grounds.
 - **Risk aggregation: max leg risk vs weighted sum** (ADR-006) — revisit
   once enough real GTFS-RT observations accumulate.
