@@ -69,16 +69,34 @@ Work needed to honestly support the whole network:
 
 `tests/integration/test_walk_edges_postgis.py::TestWalkEdgesPostGIS::test_matches_bisect_result`
 inserts three `_TEST_*` stops, then compares `_add_walk_edges_postgis` against
-`_add_walk_edges_bisect`.  The PostGIS helper runs an unfiltered self-join over
-the whole `stops` table and `G.add_edge()` implicitly creates nodes, so it
-returns every within-500 m pair in the database; the bisect side only ever sees
-the three mocks.  The two agree only when `stops` holds nothing else.
+`_add_walk_edges_bisect`.  The two helpers take their stop set from different
+places, and the test only controls one of them:
 
-CI is green because its Postgres service starts empty and runs only
-`init_db()`.  Against this machine's ingested Docker DB the test fails with
-~2,000 lines of real stop pairs.  Fix by scoping the PostGIS query to the
-graph's nodes (or to the `_TEST_` prefix) rather than the whole table.
+- `_add_walk_edges_bisect(G, stops)` iterates exactly the list handed to it —
+  the three `MagicMock` fixtures — and yields 4 edges.
+- `_add_walk_edges_postgis(G, session)` ignores `G`'s existing nodes and runs
+  an unfiltered `stops`-against-`stops` self-join, so it returns every
+  within-500 m pair in the database.  Because `G.add_edge()` creates endpoints
+  implicitly, the call grows the graph from the 3 seeded nodes to **823**, and
+  the assertion compares **2040 edges against 4**.
+
+**The behaviour under test is not broken.**  Feeding both implementations the
+same 889 ingested stops produces 2028 edges each with zero set difference, and
+restricted to the three fixtures they return the identical 4 edges
+(`_TEST_E`↔`_TEST_F`, `_TEST_F`↔`_TEST_G`).  Only the test's isolation is wrong.
+
+CI stays green because its Postgres service starts empty and runs only
+`init_db()`, so the self-join has nothing else to find.  Fix by scoping the
+PostGIS query to the graph's nodes — which would also align the function's
+contract with the bisect variant, whose behaviour production already relies on
+`_add_stop_nodes()` having run first.
+
 Pre-existing — confirmed failing on `9935429`, before the mypy work.
+
+(Aside: the `_TEST_G` fixture is commented "~520 m — just outside 500 m limit",
+which is true of its distance to `_TEST_E` but not to `_TEST_F` at ~467 m, so
+an `F`↔`G` edge is expected.  Both implementations agree on it; the comment is
+just narrower than it reads.)
 
 ### Schema migration for other existing deployments
 
