@@ -402,7 +402,14 @@ def _score_routes_blocking(
     With arrive_by_sec set, departure_dt supplies only the travel date and the
     search runs backwards from that deadline instead.
     """
-    mode = "depart" if arrive_by_sec is None else "arrive"
+    # The deadline belongs in the key.  Under arrive_by the caller's
+    # departure_dt carries only the travel date, so without it every deadline
+    # for one origin/destination/date collapsed onto a single entry — the
+    # first answer was then served for every other deadline, including ones it
+    # arrives after, and a legitimately empty result negative-cached 404s over
+    # deadlines that do have service.
+    deadline_missed = False
+    mode = "depart" if arrive_by_sec is None else f"arrive:{arrive_by_sec}"
     cache_key = _routes_cache_key(origin, destination, departure_dt, mode)
     routes = _get_cached_routes(cache_key)
     if routes is None:
@@ -422,24 +429,41 @@ def _score_routes_blocking(
                                 max_routes=MAX_ROUTES,
                             )
                         else:
-                            routes = find_routes_arriving_by(
+                            found = find_routes_arriving_by(
                                 origin, destination,
                                 arrive_by_sec=arrive_by_sec,
                                 travel_day=departure_dt.date(),
                                 session=session,
                                 max_routes=MAX_ROUTES,
                             )
+                            routes = found.routes
+                            # Service exists, nothing reaches the destination
+                            # in time.  Raising here would be caught by the
+                            # broad handler below and surface as a 500.
+                            deadline_missed = not routes and found.any_service
                     except ValueError as exc:
                         raise HTTPException(status_code=404, detail=str(exc))
                     except Exception as exc:
                         raise HTTPException(status_code=500, detail=f"Routing error: {exc}")
                     # Empty results are stored too (negative cache) so
-                    # repeated unroutable queries don't re-run Yen's.
-                    _store_cached_routes(cache_key, routes)
+                    # repeated unroutable queries don't re-run Yen's — except
+                    # a missed deadline, which is not cached so that a cached
+                    # empty result always means "no service" and the two 404s
+                    # never blur together on a cache hit.
+                    if not deadline_missed:
+                        _store_cached_routes(cache_key, routes)
         finally:
             _release_inflight_lock(cache_key)
 
     if not routes:
+        if deadline_missed and arrive_by_sec is not None:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"No route arrives by {seconds_to_hms(arrive_by_sec)} "
+                    "— try a later deadline."
+                ),
+            )
         raise HTTPException(status_code=404, detail="No routes found between these stops.")
 
     # Agency-local naive wall clock — the same frame as schedule times.

@@ -937,7 +937,11 @@ class TestFindRoutesArrivingBy:
     window before the deadline and keeps what still makes it."""
 
     def _legs(self, dep, arr):
-        return [_trip("R1", dep, arr, _hms_to_seconds(arr) - _hms_to_seconds(dep))]
+        # Distinct trip_id per departure: results are deduplicated by route
+        # signature across widened passes, and real departures are different
+        # trips.  Sharing one id collapses every fixture into a single result.
+        return [_trip("R1", dep, arr, _hms_to_seconds(arr) - _hms_to_seconds(dep),
+                      trip_id=f"T{dep}")]
 
     def _patched(self, candidates):
         return patch("routing.engine.find_routes", return_value=candidates)
@@ -951,7 +955,7 @@ class TestFindRoutesArrivingBy:
             result = find_routes_arriving_by(
                 "A", "B", arrive_by_sec=_hms_to_seconds("09:00:00"),
                 travel_day=date(2026, 2, 17), session=MagicMock(),
-            )
+            ).routes
         assert [r[0]["arrival_time"] for r in result] == ["08:50:00"]
 
     def test_exactly_on_the_deadline_is_accepted(self):
@@ -959,7 +963,7 @@ class TestFindRoutesArrivingBy:
             result = find_routes_arriving_by(
                 "A", "B", arrive_by_sec=_hms_to_seconds("09:00:00"),
                 travel_day=date(2026, 2, 17), session=MagicMock(),
-            )
+            ).routes
         assert len(result) == 1
 
     def test_orders_latest_departure_first(self):
@@ -973,7 +977,7 @@ class TestFindRoutesArrivingBy:
             result = find_routes_arriving_by(
                 "A", "B", arrive_by_sec=_hms_to_seconds("09:00:00"),
                 travel_day=date(2026, 2, 17), session=MagicMock(),
-            )
+            ).routes
         assert [r[0]["departure_time"] for r in result] == [
             "08:00:00", "07:30:00", "07:00:00",
         ]
@@ -984,8 +988,9 @@ class TestFindRoutesArrivingBy:
                 "A", "B", arrive_by_sec=_hms_to_seconds("12:00:00"),
                 travel_day=date(2026, 2, 17), session=MagicMock(),
             )
-        called_from = mock_find.call_args.kwargs["departure_dt"]
-        assert called_from == datetime(2026, 2, 17, 12 - ARRIVE_BY_LOOKBACK_HOURS, 0, 0)
+        # The first pass uses the initial window; later passes widen it.
+        first_call = mock_find.call_args_list[0].kwargs["departure_dt"]
+        assert first_call == datetime(2026, 2, 17, 12 - ARRIVE_BY_LOOKBACK_HOURS, 0, 0)
 
     def test_early_deadline_clamps_the_window_to_midnight(self):
         with patch("routing.engine.find_routes", return_value=[]) as mock_find:
@@ -1003,7 +1008,7 @@ class TestFindRoutesArrivingBy:
             result = find_routes_arriving_by(
                 "A", "B", arrive_by_sec=_hms_to_seconds("25:30:00"),
                 travel_day=date(2026, 2, 17), session=MagicMock(),
-            )
+            ).routes
         assert len(result) == 1
         # The window still starts inside the travel day.
         assert result[0][0]["departure_time"] == "23:00:00"
@@ -1014,15 +1019,75 @@ class TestFindRoutesArrivingBy:
             result = find_routes_arriving_by(
                 "A", "B", arrive_by_sec=_hms_to_seconds("09:00:00"),
                 travel_day=date(2026, 2, 17), session=MagicMock(), max_routes=2,
-            )
+            ).routes
         assert len(result) == 2
+
+    def test_window_widens_until_it_finds_service(self):
+        """Regression: a fixed four-hour lookback returned nothing whenever the
+        last departure fell outside it.  GL->UN runs three trains a day, so
+        arrive_by=23:59 saw an empty window and 404'd even though every one of
+        those trains arrives before the deadline."""
+        early = [self._legs("08:08:00", "09:35:00")]
+        calls = []
+
+        def widening(*args, **kwargs):
+            calls.append(kwargs["departure_dt"])
+            # Only visible once the window reaches back past 08:08.
+            return early if kwargs["departure_dt"].hour <= 8 else []
+
+        with patch("routing.engine.find_routes", side_effect=widening):
+            result = find_routes_arriving_by(
+                "GL", "UN", arrive_by_sec=_hms_to_seconds("23:59:00"),
+                travel_day=date(2026, 8, 3), session=MagicMock(),
+            )
+
+        assert len(calls) > 1, "should have widened past the initial window"
+        assert [r[0]["departure_time"] for r in result.routes] == ["08:08:00"]
+
+    def test_widening_stops_once_enough_is_found(self):
+        """Frequent service must not be widened into: a day-wide search would
+        surface the earliest departures when the caller wants the latest."""
+        plenty = [self._legs(f"{h:02d}:47:00", f"{h + 1:02d}:35:00") for h in range(17, 23)]
+        calls = []
+
+        def counting(*args, **kwargs):
+            calls.append(kwargs["departure_dt"])
+            return plenty
+
+        with patch("routing.engine.find_routes", side_effect=counting):
+            find_routes_arriving_by(
+                "MO", "UN", arrive_by_sec=_hms_to_seconds("23:59:00"),
+                travel_day=date(2026, 8, 3), session=MagicMock(),
+            )
+
+        assert len(calls) == 1
+
+    def test_reports_service_exists_when_none_makes_the_deadline(self):
+        """Lets the API say "try a later deadline" instead of "no such route"."""
+        late = [self._legs("20:00:00", "21:00:00")]
+        with patch("routing.engine.find_routes", return_value=late):
+            result = find_routes_arriving_by(
+                "A", "B", arrive_by_sec=_hms_to_seconds("09:00:00"),
+                travel_day=date(2026, 2, 17), session=MagicMock(),
+            )
+        assert result.routes == []
+        assert result.any_service is True
+
+    def test_reports_no_service_when_nothing_is_found_at_all(self):
+        with patch("routing.engine.find_routes", return_value=[]):
+            result = find_routes_arriving_by(
+                "A", "B", arrive_by_sec=_hms_to_seconds("09:00:00"),
+                travel_day=date(2026, 2, 17), session=MagicMock(),
+            )
+        assert result.routes == []
+        assert result.any_service is False
 
     def test_walk_only_candidates_are_skipped(self):
         with self._patched([[_walk(300)]]):
             result = find_routes_arriving_by(
                 "A", "B", arrive_by_sec=_hms_to_seconds("09:00:00"),
                 travel_day=date(2026, 2, 17), session=MagicMock(),
-            )
+            ).routes
         assert result == []
 
 

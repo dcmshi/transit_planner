@@ -22,6 +22,7 @@ import api.routes as routes_mod
 from config import AGENCY_TZ
 from db.models import Base, Stop
 from db.session import get_session
+from routing.engine import ArriveByResult
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -467,7 +468,7 @@ class TestGetRoutes:
         cache_mod._routes_cache.clear()
         with (
             patch("api.routes.find_routes_arriving_by",
-                  return_value=[_FAKE_ROUTE]) as mock_arrive,
+                  return_value=ArriveByResult([_FAKE_ROUTE], True)) as mock_arrive,
             patch("api.routes.find_routes") as mock_depart,
             patch("api.routes.get_historical_reliability_batch", return_value={}),
         ):
@@ -483,7 +484,7 @@ class TestGetRoutes:
         cache_mod._routes_cache.clear()
         with (
             patch("api.routes.find_routes_arriving_by",
-                  return_value=[_FAKE_ROUTE]) as mock_arrive,
+                  return_value=ArriveByResult([_FAKE_ROUTE], True)) as mock_arrive,
             patch("api.routes.get_historical_reliability_batch", return_value={}),
         ):
             resp = client.get(
@@ -499,7 +500,7 @@ class TestGetRoutes:
         with (
             patch("api.routes.find_routes", return_value=[_FAKE_ROUTE]) as mock_depart,
             patch("api.routes.find_routes_arriving_by",
-                  return_value=[_FAKE_ROUTE]) as mock_arrive,
+                  return_value=ArriveByResult([_FAKE_ROUTE], True)) as mock_arrive,
             patch("api.routes.get_historical_reliability_batch", return_value={}),
         ):
             base = "/routes?origin=UN&destination=GL&travel_date=2026-02-11"
@@ -508,6 +509,73 @@ class TestGetRoutes:
 
         assert mock_depart.call_count == 1
         assert mock_arrive.call_count == 1
+
+    def test_each_deadline_gets_its_own_cache_entry(self, client):
+        """Regression: departure_dt carries only the travel date under
+        arrive_by, so every deadline for one origin/destination/date collapsed
+        onto a single cache key.  The first answer was then served for every
+        other deadline — including ones it arrives after — and a legitimately
+        empty result negative-cached 404s over deadlines that do have service."""
+        cache_mod._routes_cache.clear()
+        seen = []
+
+        def by_deadline(*args, **kwargs):
+            seen.append(kwargs["arrive_by_sec"])
+            return ArriveByResult([_FAKE_ROUTE], True)
+
+        with (
+            patch("api.routes.find_routes_arriving_by", side_effect=by_deadline),
+            patch("api.routes.get_historical_reliability_batch", return_value={}),
+        ):
+            base = "/routes?origin=GL&destination=UN&travel_date=2026-08-03"
+            for deadline in ("10:35", "21:45", "23:59"):
+                assert client.get(f"{base}&arrive_by={deadline}").status_code == 200
+
+        assert seen == [10 * 3600 + 35 * 60, 21 * 3600 + 45 * 60, 23 * 3600 + 59 * 60]
+
+    def test_empty_deadline_result_does_not_poison_other_deadlines(self, client):
+        cache_mod._routes_cache.clear()
+        calls = {"n": 0}
+
+        def first_empty(*args, **kwargs):
+            calls["n"] += 1
+            if kwargs["arrive_by_sec"] < 12 * 3600:
+                return ArriveByResult([], True)
+            return ArriveByResult([_FAKE_ROUTE], True)
+
+        with (
+            patch("api.routes.find_routes_arriving_by", side_effect=first_empty),
+            patch("api.routes.get_historical_reliability_batch", return_value={}),
+        ):
+            base = "/routes?origin=GL&destination=UN&travel_date=2026-08-03"
+            assert client.get(f"{base}&arrive_by=09:00").status_code == 404
+            assert client.get(f"{base}&arrive_by=23:59").status_code == 200
+        assert calls["n"] == 2  # the 404 did not answer the second query
+
+    def test_missed_deadline_and_no_service_read_differently(self, client):
+        """The client needs to tell "try a later deadline" from "these stops
+        are not connected"."""
+        cache_mod._routes_cache.clear()
+        base = "/routes?origin=GL&destination=UN&travel_date=2026-08-03"
+
+        with (
+            patch("api.routes.find_routes_arriving_by",
+                  return_value=ArriveByResult([], True)),
+            patch("api.routes.get_historical_reliability_batch", return_value={}),
+        ):
+            missed = client.get(f"{base}&arrive_by=09:00")
+        cache_mod._routes_cache.clear()
+        with (
+            patch("api.routes.find_routes_arriving_by",
+                  return_value=ArriveByResult([], False)),
+            patch("api.routes.get_historical_reliability_batch", return_value={}),
+        ):
+            unreachable = client.get(f"{base}&arrive_by=09:00")
+
+        assert missed.status_code == unreachable.status_code == 404
+        assert "09:00" in missed.json()["detail"]
+        assert "later deadline" in missed.json()["detail"]
+        assert missed.json()["detail"] != unreachable.json()["detail"]
 
     # --- routing errors ---
 

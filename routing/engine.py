@@ -807,6 +807,18 @@ ARRIVE_BY_LOOKBACK_HOURS = 4
 _ARRIVE_BY_CANDIDATE_MULTIPLIER = 2
 
 
+class ArriveByResult(NamedTuple):
+    """Arrive-by search outcome.
+
+    `any_service` distinguishes "nothing gets you there in time" from "these
+    stops are not connected at all" — identical empty lists otherwise, and the
+    API needs to say different things about them.
+    """
+
+    routes: list[Route]
+    any_service: bool
+
+
 def find_routes_arriving_by(
     origin_stop_id: str,
     destination_stop_id: str,
@@ -814,9 +826,9 @@ def find_routes_arriving_by(
     travel_day: date,
     session: Session,
     max_routes: int = MAX_ROUTES,
-) -> list[Route]:
+) -> ArriveByResult:
     """
-    Return up to max_routes itineraries reaching the destination at or before
+    Up to max_routes itineraries reaching the destination at or before
     arrive_by_sec, latest departure first.
 
     arrive_by_sec is seconds past midnight on travel_day, the same frame GTFS
@@ -824,37 +836,54 @@ def find_routes_arriving_by(
 
     Ordered latest-departure-first on purpose: when two itineraries both
     arrive in time, the rider wants the one that lets them leave later.
+
+    The lookback window widens until it finds enough options or reaches the
+    start of the service day.  A fixed window cannot serve both cases: on a
+    corridor running three trains a day, a deadline four hours after the last
+    departure sees nothing, while on an hourly one a day-wide search would
+    return the earliest departures when the caller wants the latest.  Starting
+    narrow and widening only when short keeps frequent service tight and still
+    answers sparse service.
     """
-    window_start = max(0, arrive_by_sec - ARRIVE_BY_LOOKBACK_HOURS * 3600)
-    # The forward search anchors on a wall-clock time within travel_day.
-    search_start_sec = min(window_start, 24 * 3600 - 1)
-    search_from = datetime(
-        travel_day.year, travel_day.month, travel_day.day
-    ) + timedelta(seconds=search_start_sec)
+    day_start = datetime(travel_day.year, travel_day.month, travel_day.day)
 
-    candidates = find_routes(
-        origin_stop_id,
-        destination_stop_id,
-        departure_dt=search_from,
-        session=session,
-        max_routes=max_routes * _ARRIVE_BY_CANDIDATE_MULTIPLIER,
-    )
+    def _search(window_seconds: int) -> list[Route]:
+        start = min(max(0, arrive_by_sec - window_seconds), 24 * 3600 - 1)
+        return find_routes(
+            origin_stop_id,
+            destination_stop_id,
+            departure_dt=day_start + timedelta(seconds=start),
+            session=session,
+            max_routes=max_routes * _ARRIVE_BY_CANDIDATE_MULTIPLIER,
+        )
 
-    in_time: list[tuple[int, Route]] = []
-    for legs in candidates:
-        trip_legs = [leg for leg in legs if leg["kind"] == "trip"]
-        if not trip_legs:
-            continue
-        if _hms_to_seconds(trip_legs[-1]["arrival_time"]) > arrive_by_sec:
-            continue
-        in_time.append((_hms_to_seconds(trip_legs[0]["departure_time"]), legs))
+    window = ARRIVE_BY_LOOKBACK_HOURS * 3600
+    in_time: dict[tuple[str, ...], tuple[int, Route]] = {}
+    any_service = False
 
-    in_time.sort(key=lambda dep_legs: -dep_legs[0])
+    while True:
+        for legs in _search(window):
+            any_service = True
+            trip_legs = [leg for leg in legs if leg["kind"] == "trip"]
+            if not trip_legs:
+                continue
+            if _hms_to_seconds(trip_legs[-1]["arrival_time"]) > arrive_by_sec:
+                continue
+            # Widened passes re-cover the previous window; keep one of each.
+            in_time.setdefault(
+                _route_signature(legs),
+                (_hms_to_seconds(trip_legs[0]["departure_time"]), legs),
+            )
+        if len(in_time) >= max_routes or window >= arrive_by_sec:
+            break
+        window *= 2
+
+    ordered = sorted(in_time.values(), key=lambda dep_legs: -dep_legs[0])
     logger.debug(
-        "Arrive-by %ds: %d candidates searched from %s, %d arrive in time.",
-        arrive_by_sec, len(candidates), search_from.isoformat(), len(in_time),
+        "Arrive-by %ds: %d in time after widening to %dh.",
+        arrive_by_sec, len(ordered), window // 3600,
     )
-    return [legs for _dep, legs in in_time[:max_routes]]
+    return ArriveByResult([legs for _dep, legs in ordered[:max_routes]], any_service)
 
 
 def _fill_later_departures(
