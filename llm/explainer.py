@@ -39,6 +39,11 @@ logger = logging.getLogger(__name__)
 
 _GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 
+# Generous: a cold Ollama model load is slow, and the caller has already
+# received nothing until this returns.  Exceeding it degrades to a fallback
+# string, never an error.
+_LLM_TIMEOUT_SECONDS = 60.0
+
 # Strict prompt that locks small models onto the explanation task.
 # Explicit format + explicit forbiddens prevent data-analysis tangents.
 SYSTEM_PROMPT = """
@@ -254,10 +259,12 @@ async def _post_llm_request(
     POST to an LLM backend with the shared error handling.
 
     Returns the successful response, or a human-readable fallback string
-    when the backend is unreachable or returns an HTTP error.
+    for every httpx failure mode.  An explanation is a garnish on a response
+    whose routes are already computed — no LLM problem may cost the caller
+    those routes, so the catch-all below is deliberately broad.
     """
     try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with httpx.AsyncClient(timeout=_LLM_TIMEOUT_SECONDS) as client:
             resp = await client.post(url, json=payload, headers=headers)
             resp.raise_for_status()
             return resp
@@ -269,6 +276,15 @@ async def _post_llm_request(
             "%s returned HTTP %d — explanation skipped.", provider, exc.response.status_code
         )
         return f"Explanation unavailable: {provider} returned HTTP {exc.response.status_code}."
+    except httpx.HTTPError as exc:
+        # Timeouts and protocol errors are siblings of ConnectError under
+        # TransportError, not subclasses — catching ConnectError alone let a
+        # slow model (a cold Ollama load routinely exceeds the timeout)
+        # propagate out and turn the whole /routes call into a 500.
+        logger.warning(
+            "%s request failed (%s) — explanation skipped.", provider, type(exc).__name__
+        )
+        return f"Explanation unavailable: {provider} request failed ({type(exc).__name__})."
 
 
 async def _explain_ollama(llm_input: dict[str, Any]) -> str:

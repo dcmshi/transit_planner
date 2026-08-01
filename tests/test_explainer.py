@@ -351,6 +351,30 @@ class TestExplainOllama:
 
         assert "HTTP 500" in result
 
+    @pytest.mark.parametrize("exc_name", [
+        "ReadTimeout", "ConnectTimeout", "PoolTimeout", "ReadError", "RemoteProtocolError",
+    ])
+    @pytest.mark.anyio
+    async def test_transport_errors_return_fallback(self, exc_name):
+        """Timeouts and protocol errors are siblings of ConnectError under
+        TransportError, not subclasses.  Catching ConnectError alone let them
+        propagate and turn the whole /routes request into a 500, discarding
+        routes that had already been computed."""
+        import httpx
+
+        exc = getattr(httpx, exc_name)("boom")
+        with patch("llm.explainer.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(side_effect=exc)
+            mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            result = await explain_routes([], [], "Origin", "Dest")
+
+        assert isinstance(result, str)
+        assert "Explanation unavailable" in result
+        assert exc_name in result
+
     @pytest.mark.anyio
     async def test_unexpected_response_structure_returns_fallback(self):
         """Ollama returns 200 but with an unexpected JSON shape — should not KeyError."""
