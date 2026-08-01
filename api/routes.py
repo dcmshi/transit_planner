@@ -61,7 +61,7 @@ from llm.explainer import explain_routes
 from reliability.historical import (
     NEUTRAL_PRIOR,
     classify_time_bucket,
-    get_historical_reliability_batch,
+    get_reliability_snapshots,
     score_record,
 )
 from reliability.live import compute_live_risk, get_live_delay, risk_label
@@ -479,8 +479,9 @@ def _score_routes_blocking(
         )
 
     # One historical-reliability query for every trip leg in the response
-    # (up to MAX_ROUTES × legs point queries otherwise).
-    hist_by_key = get_historical_reliability_batch(
+    # (up to MAX_ROUTES × legs point queries otherwise).  Snapshots rather
+    # than bare scores so each leg can carry the counters behind its risk.
+    snapshots = get_reliability_snapshots(
         [
             (leg["route_id"], leg["from_stop_id"], classify_time_bucket(_leg_dt(leg)))
             for route_legs in routes
@@ -501,9 +502,13 @@ def _score_routes_blocking(
                 continue
 
             leg_dt = _leg_dt(leg)
-            hist = hist_by_key.get(
-                (leg["route_id"], leg["from_stop_id"], classify_time_bucket(leg_dt)),
-                NEUTRAL_PRIOR,
+            snapshot = snapshots.get(
+                (leg["route_id"], leg["from_stop_id"], classify_time_bucket(leg_dt))
+            )
+            hist = (
+                snapshot.score
+                if snapshot is not None and snapshot.score is not None
+                else NEUTRAL_PRIOR
             )
             live = compute_live_risk(
                 route_id=leg["route_id"],
@@ -514,6 +519,7 @@ def _score_routes_blocking(
                 historical_reliability=hist,
                 scheduled_dt=leg_dt,
                 service_date=travel_day,
+                reliability=snapshot,
             )
             scored_leg = {**leg, "risk": live}
             # Live expected times — same SERVICE day only (a >24:00:00 leg

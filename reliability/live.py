@@ -26,7 +26,7 @@ from ingestion.gtfs_realtime import (
     trip_updates,
     vehicle_positions,
 )
-from reliability.historical import classify_time_bucket
+from reliability.historical import ReliabilitySnapshot, classify_time_bucket
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +73,7 @@ def compute_live_risk(
     historical_reliability: float,
     scheduled_dt: datetime | None = None,
     service_date: Date | None = None,
+    reliability: ReliabilitySnapshot | None = None,
 ) -> dict[str, Any]:
     """
     Compute the final risk score for a single trip leg.
@@ -92,6 +93,14 @@ def compute_live_risk(
           "modifiers":    list[str],  # human-readable modifier notes
           "is_cancelled": bool,
           "time_bucket":  str,        # bucket whose history fed the score
+          # the counters behind historical_reliability, so a client can show
+          # the basis for a score without a second lookup:
+          "scheduled_departures": float,
+          "observed_departures":  float,
+          "total_delay_seconds":  float,
+          "cancellation_count":   float,
+          "source":               str | None,
+          "neutral_prior_used":   bool,
         }
 
     time_bucket is derived here, from the same scheduled_dt the caller used to
@@ -110,6 +119,17 @@ def compute_live_risk(
         scheduled_dt = scheduled_dt.replace(tzinfo=None)
 
     time_bucket = classify_time_bucket(scheduled_dt)
+    # Absent snapshot means no stored record at all for this bucket, which is
+    # itself the answer: zero counters and a neutral prior standing in.
+    basis: dict[str, Any] = {
+        "time_bucket": time_bucket,
+        "scheduled_departures": reliability.scheduled_departures if reliability else 0.0,
+        "observed_departures": reliability.observed_departures if reliability else 0.0,
+        "total_delay_seconds": reliability.total_delay_seconds if reliability else 0.0,
+        "cancellation_count": reliability.cancellation_count if reliability else 0.0,
+        "source": reliability.source if reliability else None,
+        "neutral_prior_used": reliability is None or reliability.score is None,
+    }
 
     # Start from the inverse of historical reliability
     base_risk = 1.0 - historical_reliability
@@ -131,7 +151,7 @@ def compute_live_risk(
             "risk_label": "High",
             "modifiers": ["Trip is currently marked as cancelled in GTFS-RT."],
             "is_cancelled": True,
-            "time_bucket": time_bucket,
+            **basis,
         }
 
     # 2. Service alerts touching this route or stop and covering the leg's
@@ -190,7 +210,7 @@ def compute_live_risk(
         "risk_label": risk_label(final_risk),
         "modifiers": modifiers,
         "is_cancelled": False,
-        "time_bucket": time_bucket,
+        **basis,
     }
 
 

@@ -117,11 +117,13 @@ ids and names, so a map client can draw a route without resolving each
 intermediate stop through `/stops`. They are null only if a graph node is
 missing coordinates, which does not happen for ingested stops.
 
-Each trip leg's `risk` carries `time_bucket` — the reliability bucket whose
-history produced `risk_score`. Fetch `/reliability?route_id=&stop_id=` for the
-leg and select the row with that bucket to show the counters behind the score.
-Always populated, including when the bucket had too little data and the neutral
-prior stood in.
+Each trip leg's `risk` explains itself: `time_bucket` names the reliability
+bucket whose history produced `risk_score`, and the counters behind it
+(`scheduled_departures`, `observed_departures`, `total_delay_seconds`,
+`cancellation_count`, `source`) are inlined alongside, so no second request is
+needed to show why a leg scored as it did. They match the `/reliability` row
+for the same `(route_id, from_stop_id, time_bucket)`. When no record exists the
+counters are zero, `source` is null, and `neutral_prior_used` is true.
 
 Trip legs also carry `geometry` — the stretch of the trip's GTFS shape between
 that leg's two stops, as ordered `[lon, lat]` pairs, so the map follows the

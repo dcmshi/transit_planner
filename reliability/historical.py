@@ -18,7 +18,7 @@ Reliability score (0–1, higher = more reliable) is derived from:
 
 import logging
 from datetime import datetime, timezone
-from typing import Any, cast
+from typing import Any, NamedTuple, cast
 
 from sqlalchemy import CursorResult, text
 from sqlalchemy.orm import Session
@@ -118,14 +118,33 @@ def get_historical_reliability(
     return _score_record(record)
 
 
-def get_historical_reliability_batch(
+class ReliabilitySnapshot(NamedTuple):
+    """The stored counters behind one route/stop/bucket, plus its score.
+
+    `score` is None when the record holds too little data to score, which is
+    exactly when callers substitute NEUTRAL_PRIOR — so a client can tell a
+    genuine 0.8 from a stand-in.
+    """
+
+    scheduled_departures: float
+    observed_departures: float
+    total_delay_seconds: float
+    cancellation_count: float
+    source: str
+    score: float | None
+
+
+def get_reliability_snapshots(
     keys: list[tuple[str, str, str]],
     session: Session,
-) -> dict[tuple[str, str, str], float]:
+) -> dict[tuple[str, str, str], ReliabilitySnapshot]:
     """
-    Batch variant of get_historical_reliability: one query for all
-    (route_id, stop_id, time_bucket) triples instead of one per trip leg.
-    Missing triples are simply absent — callers fall back to NEUTRAL_PRIOR.
+    Counters and score for many (route_id, stop_id, time_bucket) triples in
+    one query, instead of a point lookup per trip leg.
+
+    Unlike get_historical_reliability_batch this keeps records that are too
+    sparse to score, with score=None — the API surfaces those so a rider can
+    see there is no history yet rather than an unexplained neutral score.
     """
     unique = list(set(keys))
     if not unique:
@@ -146,16 +165,37 @@ def get_historical_reliability_batch(
         .order_by(ReliabilityRecord.updated_at.asc())
         .all()
     )
-    scored: dict[tuple[str, str, str], float] = {}
+
+    snapshots: dict[tuple[str, str, str], ReliabilitySnapshot] = {}
     for r in records:
         # A NULL component cannot match the tuple_(...).in_() filter above, so
         # this guard only ever re-states an invariant the query already holds.
         if r.route_id is None or r.stop_id is None or r.time_bucket is None:
             continue
-        if _count(r.scheduled_departures) < _MIN_SCHEDULED:
-            continue
-        scored[(r.route_id, r.stop_id, r.time_bucket)] = _score_record(r)
-    return scored
+        snapshots[(r.route_id, r.stop_id, r.time_bucket)] = ReliabilitySnapshot(
+            scheduled_departures=_count(r.scheduled_departures),
+            observed_departures=_count(r.observed_departures),
+            total_delay_seconds=_count(r.total_delay_seconds),
+            cancellation_count=_count(r.cancellation_count),
+            source=r.source,
+            score=score_record(r),
+        )
+    return snapshots
+
+
+def get_historical_reliability_batch(
+    keys: list[tuple[str, str, str]],
+    session: Session,
+) -> dict[tuple[str, str, str], float]:
+    """
+    Scores only, for callers that do not need the counters.  Triples with no
+    usable history are absent — callers fall back to NEUTRAL_PRIOR.
+    """
+    return {
+        key: snap.score
+        for key, snap in get_reliability_snapshots(keys, session).items()
+        if snap.score is not None
+    }
 
 
 def record_observed_departure(

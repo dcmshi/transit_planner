@@ -19,8 +19,10 @@ from db.models import Base, ReliabilityRecord
 from ingestion.gtfs_realtime import ServiceAlertState, TripUpdateState
 from reliability.historical import (
     NEUTRAL_PRIOR,
+    ReliabilitySnapshot,
     classify_time_bucket,
     get_historical_reliability,
+    get_historical_reliability_batch,
     record_observed_departure,
 )
 from reliability.live import (
@@ -994,3 +996,104 @@ class TestRiskTimeBucket:
                 scheduled_dt=saturday,
             )
         assert risk["time_bucket"] == "weekend"
+
+
+class TestRiskCounters:
+    """LiveRisk carries the counters behind its score, so a client can explain
+    a leg without a second request."""
+
+    _SNAP = ReliabilitySnapshot(
+        scheduled_departures=100.0, observed_departures=95.0,
+        total_delay_seconds=1200.0, cancellation_count=2.0,
+        source="mixed", score=0.93,
+    )
+
+    def _risk(self, snapshot):
+        with patch(f"{_LIVE}.trip_updates", {}), \
+             patch(f"{_LIVE}.service_alerts", []), \
+             patch(f"{_LIVE}.vehicle_positions", {}):
+            return compute_live_risk(
+                route_id="R1", stop_id="S1", trip_id="T1",
+                departure_time_str="14:00:00",
+                query_dt=datetime(2026, 2, 9, 13, 0),
+                historical_reliability=0.93,
+                reliability=snapshot,
+            )
+
+    def test_counters_come_from_the_snapshot(self):
+        r = self._risk(self._SNAP)
+        assert r["scheduled_departures"] == 100.0
+        assert r["observed_departures"] == 95.0
+        assert r["total_delay_seconds"] == 1200.0
+        assert r["cancellation_count"] == 2.0
+        assert r["source"] == "mixed"
+        assert r["neutral_prior_used"] is False
+
+    def test_absent_snapshot_reads_as_no_history(self):
+        """No stored record at all — zeros and a neutral prior, not nulls the
+        UI has to special-case."""
+        r = self._risk(None)
+        assert r["scheduled_departures"] == 0.0
+        assert r["observed_departures"] == 0.0
+        assert r["source"] is None
+        assert r["neutral_prior_used"] is True
+
+    def test_sparse_record_keeps_its_counters(self):
+        """score=None means the neutral prior stood in, but the counters are
+        still worth showing — that is how the UI says "only 0.3 departures
+        recorded so far"."""
+        sparse = self._SNAP._replace(scheduled_departures=0.3, score=None)
+        r = self._risk(sparse)
+        assert r["neutral_prior_used"] is True
+        assert r["scheduled_departures"] == 0.3
+
+    def test_counters_present_on_a_cancelled_trip(self):
+        cancelled = TripUpdateState(trip_id="T1", route_id="R1", is_cancelled=True)
+        with patch(f"{_LIVE}.trip_updates", {"T1": cancelled}), \
+             patch(f"{_LIVE}.service_alerts", []), \
+             patch(f"{_LIVE}.vehicle_positions", {}):
+            r = compute_live_risk(
+                route_id="R1", stop_id="S1", trip_id="T1",
+                departure_time_str="14:00:00",
+                query_dt=datetime(2026, 2, 9, 13, 0),
+                historical_reliability=0.93,
+                reliability=self._SNAP,
+            )
+        assert r["is_cancelled"] is True
+        assert r["scheduled_departures"] == 100.0
+
+
+class TestGetReliabilitySnapshots:
+    def test_keeps_records_too_sparse_to_score(self, hist_db):
+        """The score-only batch drops these; the snapshot keeps them so the
+        API can show that there is no history yet."""
+        from reliability.historical import get_reliability_snapshots
+
+        hist_db.add(ReliabilityRecord(
+            route_id="R1", stop_id="S1", time_bucket="weekend",
+            scheduled_departures=0.2, observed_departures=0.1,
+            cancellation_count=0, total_delay_seconds=0, source="seed",
+        ))
+        hist_db.commit()
+        key = ("R1", "S1", "weekend")
+        snaps = get_reliability_snapshots([key], hist_db)
+        assert snaps[key].score is None
+        assert snaps[key].scheduled_departures == 0.2
+        assert get_historical_reliability_batch([key], hist_db) == {}
+
+    def test_scores_agree_with_the_score_only_batch(self, hist_db):
+        from reliability.historical import get_reliability_snapshots
+
+        hist_db.add(ReliabilityRecord(
+            route_id="R1", stop_id="S1", time_bucket="weekday_am_peak",
+            scheduled_departures=100, observed_departures=95,
+            cancellation_count=0, total_delay_seconds=0, source="observed",
+        ))
+        hist_db.commit()
+        key = ("R1", "S1", "weekday_am_peak")
+        assert (get_reliability_snapshots([key], hist_db)[key].score
+                == get_historical_reliability_batch([key], hist_db)[key])
+
+    def test_empty_keys(self, hist_db):
+        from reliability.historical import get_reliability_snapshots
+        assert get_reliability_snapshots([], hist_db) == {}

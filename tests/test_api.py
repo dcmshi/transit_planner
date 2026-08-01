@@ -290,7 +290,7 @@ class TestDominancePruning:
         dominated_route = [{**_FAKE_ROUTE[0], "arrival_time": "11:30:00"}]
         with (
             patch("api.routes.find_routes", return_value=[_FAKE_ROUTE, dominated_route]),
-            patch("api.routes.get_historical_reliability_batch", return_value={}),
+            patch("api.routes.get_reliability_snapshots", return_value={}),
             patch("api.routes.compute_live_risk", return_value=_FAKE_LIVE_RISK),
         ):
             body = client.get(
@@ -421,6 +421,9 @@ _FAKE_LIVE_RISK = {
     "modifiers": [],
     "is_cancelled": False,
     "time_bucket": "weekday_am_peak",
+    "scheduled_departures": 0.0, "observed_departures": 0.0,
+    "total_delay_seconds": 0.0, "cancellation_count": 0.0,
+    "source": None, "neutral_prior_used": True,
 }
 
 
@@ -471,7 +474,7 @@ class TestGetRoutes:
             patch("api.routes.find_routes_arriving_by",
                   return_value=ArriveByResult([_FAKE_ROUTE], True)) as mock_arrive,
             patch("api.routes.find_routes") as mock_depart,
-            patch("api.routes.get_historical_reliability_batch", return_value={}),
+            patch("api.routes.get_reliability_snapshots", return_value={}),
         ):
             resp = client.get(
                 "/routes?origin=UN&destination=GL&travel_date=2026-02-11&arrive_by=10:30"
@@ -486,7 +489,7 @@ class TestGetRoutes:
         with (
             patch("api.routes.find_routes_arriving_by",
                   return_value=ArriveByResult([_FAKE_ROUTE], True)) as mock_arrive,
-            patch("api.routes.get_historical_reliability_batch", return_value={}),
+            patch("api.routes.get_reliability_snapshots", return_value={}),
         ):
             resp = client.get(
                 "/routes?origin=UN&destination=GL&travel_date=2026-02-11&arrive_by=25:30"
@@ -502,7 +505,7 @@ class TestGetRoutes:
             patch("api.routes.find_routes", return_value=[_FAKE_ROUTE]) as mock_depart,
             patch("api.routes.find_routes_arriving_by",
                   return_value=ArriveByResult([_FAKE_ROUTE], True)) as mock_arrive,
-            patch("api.routes.get_historical_reliability_batch", return_value={}),
+            patch("api.routes.get_reliability_snapshots", return_value={}),
         ):
             base = "/routes?origin=UN&destination=GL&travel_date=2026-02-11"
             assert client.get(f"{base}&departure_time=09:00").status_code == 200
@@ -526,7 +529,7 @@ class TestGetRoutes:
 
         with (
             patch("api.routes.find_routes_arriving_by", side_effect=by_deadline),
-            patch("api.routes.get_historical_reliability_batch", return_value={}),
+            patch("api.routes.get_reliability_snapshots", return_value={}),
         ):
             base = "/routes?origin=GL&destination=UN&travel_date=2026-08-03"
             for deadline in ("10:35", "21:45", "23:59"):
@@ -546,7 +549,7 @@ class TestGetRoutes:
 
         with (
             patch("api.routes.find_routes_arriving_by", side_effect=first_empty),
-            patch("api.routes.get_historical_reliability_batch", return_value={}),
+            patch("api.routes.get_reliability_snapshots", return_value={}),
         ):
             base = "/routes?origin=GL&destination=UN&travel_date=2026-08-03"
             assert client.get(f"{base}&arrive_by=09:00").status_code == 404
@@ -562,14 +565,14 @@ class TestGetRoutes:
         with (
             patch("api.routes.find_routes_arriving_by",
                   return_value=ArriveByResult([], True)),
-            patch("api.routes.get_historical_reliability_batch", return_value={}),
+            patch("api.routes.get_reliability_snapshots", return_value={}),
         ):
             missed = client.get(f"{base}&arrive_by=09:00")
         cache_mod._routes_cache.clear()
         with (
             patch("api.routes.find_routes_arriving_by",
                   return_value=ArriveByResult([], False)),
-            patch("api.routes.get_historical_reliability_batch", return_value={}),
+            patch("api.routes.get_reliability_snapshots", return_value={}),
         ):
             unreachable = client.get(f"{base}&arrive_by=09:00")
 
@@ -603,7 +606,7 @@ class TestGetRoutes:
     def test_valid_route_returns_200(self, client):
         with (
             patch("api.routes.find_routes", return_value=[_FAKE_ROUTE]),
-            patch("api.routes.get_historical_reliability_batch", return_value={}),
+            patch("api.routes.get_reliability_snapshots", return_value={}),
             patch("api.routes.compute_live_risk", return_value=_FAKE_LIVE_RISK),
         ):
             resp = client.get(
@@ -615,7 +618,7 @@ class TestGetRoutes:
     def test_response_contains_routes_key(self, client):
         with (
             patch("api.routes.find_routes", return_value=[_FAKE_ROUTE]),
-            patch("api.routes.get_historical_reliability_batch", return_value={}),
+            patch("api.routes.get_reliability_snapshots", return_value={}),
             patch("api.routes.compute_live_risk", return_value=_FAKE_LIVE_RISK),
         ):
             body = client.get(
@@ -629,7 +632,7 @@ class TestGetRoutes:
     def test_route_has_expected_fields(self, client):
         with (
             patch("api.routes.find_routes", return_value=[_FAKE_ROUTE]),
-            patch("api.routes.get_historical_reliability_batch", return_value={}),
+            patch("api.routes.get_reliability_snapshots", return_value={}),
             patch("api.routes.compute_live_risk", return_value=_FAKE_LIVE_RISK),
         ):
             route = client.get(
@@ -645,7 +648,7 @@ class TestGetRoutes:
     def test_total_travel_seconds_correct(self, client):
         with (
             patch("api.routes.find_routes", return_value=[_FAKE_ROUTE]),
-            patch("api.routes.get_historical_reliability_batch", return_value={}),
+            patch("api.routes.get_reliability_snapshots", return_value={}),
             patch("api.routes.compute_live_risk", return_value=_FAKE_LIVE_RISK),
         ):
             route = client.get(
@@ -658,7 +661,7 @@ class TestGetRoutes:
     def test_risk_score_and_label_present(self, client):
         with (
             patch("api.routes.find_routes", return_value=[_FAKE_ROUTE]),
-            patch("api.routes.get_historical_reliability_batch", return_value={}),
+            patch("api.routes.get_reliability_snapshots", return_value={}),
             patch("api.routes.compute_live_risk", return_value=_FAKE_LIVE_RISK),
         ):
             route = client.get(
@@ -675,7 +678,7 @@ class TestGetRoutes:
         weekday_am_peak), not from the wall clock at query time."""
         with (
             patch("api.routes.find_routes", return_value=[_FAKE_ROUTE]),
-            patch("api.routes.get_historical_reliability_batch", return_value={}) as mock_hist,
+            patch("api.routes.get_reliability_snapshots", return_value={}) as mock_hist,
             patch("api.routes.compute_live_risk", return_value=_FAKE_LIVE_RISK) as mock_live,
         ):
             resp = client.get(
@@ -697,7 +700,7 @@ class TestGetRoutes:
         today = _dt.now(AGENCY_TZ).strftime("%Y-%m-%d")
         with (
             patch("api.routes.find_routes", return_value=[_FAKE_ROUTE]),
-            patch("api.routes.get_historical_reliability_batch", return_value={}),
+            patch("api.routes.get_reliability_snapshots", return_value={}),
             patch("api.routes.compute_live_risk", return_value=_FAKE_LIVE_RISK),
             patch("api.routes.get_live_delay", return_value=300),
         ):
@@ -715,7 +718,7 @@ class TestGetRoutes:
         delay must not produce expected times for a future travel date."""
         with (
             patch("api.routes.find_routes", return_value=[_FAKE_ROUTE]),
-            patch("api.routes.get_historical_reliability_batch", return_value={}),
+            patch("api.routes.get_reliability_snapshots", return_value={}),
             patch("api.routes.compute_live_risk", return_value=_FAKE_LIVE_RISK),
             patch("api.routes.get_live_delay", return_value=300),
         ):
@@ -732,7 +735,7 @@ class TestGetRoutes:
         """HH:MM (without seconds) should be accepted."""
         with (
             patch("api.routes.find_routes", return_value=[_FAKE_ROUTE]),
-            patch("api.routes.get_historical_reliability_batch", return_value={}),
+            patch("api.routes.get_reliability_snapshots", return_value={}),
             patch("api.routes.compute_live_risk", return_value=_FAKE_LIVE_RISK),
         ):
             resp = client.get(
@@ -1171,10 +1174,13 @@ class TestRoutesCache:
             return [fake_legs]
 
         monkeypatch.setattr(routes_mod, "find_routes", fake_find_routes)
-        monkeypatch.setattr(routes_mod, "get_historical_reliability_batch", lambda *a, **kw: {})
+        monkeypatch.setattr(routes_mod, "get_reliability_snapshots", lambda *a, **kw: {})
         monkeypatch.setattr(routes_mod, "compute_live_risk", lambda **kw: {
             "risk_score": 0.1, "risk_label": "Low", "modifiers": [], "is_cancelled": False,
             "time_bucket": "weekday_am_peak",
+            "scheduled_departures": 0.0, "observed_departures": 0.0,
+            "total_delay_seconds": 0.0, "cancellation_count": 0.0,
+            "source": None, "neutral_prior_used": True,
         })
 
         params = "origin=UN&destination=GL&travel_date=2026-02-17&departure_time=08:00"
@@ -1384,7 +1390,7 @@ class TestLegCoordinatesInResponse:
     def _get(self, client, legs):
         with (
             patch("api.routes.find_routes", return_value=[legs]),
-            patch("api.routes.get_historical_reliability_batch", return_value={}),
+            patch("api.routes.get_reliability_snapshots", return_value={}),
         ):
             return client.get(
                 "/routes?origin=UN&destination=GL"
@@ -1445,7 +1451,7 @@ class TestLegGeometryInResponse:
     def _get(self, client, legs):
         with (
             patch("api.routes.find_routes", return_value=[legs]),
-            patch("api.routes.get_historical_reliability_batch", return_value={}),
+            patch("api.routes.get_reliability_snapshots", return_value={}),
         ):
             return client.get(
                 "/routes?origin=UN&destination=GL"
@@ -1525,7 +1531,7 @@ class TestRiskTimeBucketContract:
 
         with (
             patch("api.routes.find_routes", return_value=[_FAKE_ROUTE]),
-            patch("api.routes.get_historical_reliability_batch", return_value={}),
+            patch("api.routes.get_reliability_snapshots", return_value={}),
         ):
             resp = client.get(
                 "/routes?origin=UN&destination=GL"
@@ -1545,13 +1551,55 @@ class TestRiskTimeBucketContract:
         self._seed_all_buckets(db_session)
         with (
             patch("api.routes.find_routes", return_value=[_FAKE_ROUTE]),
-            patch("api.routes.get_historical_reliability_batch", return_value={}),
+            patch("api.routes.get_reliability_snapshots", return_value={}),
         ):
             resp = client.get(
                 "/routes?origin=UN&destination=GL"
                 "&travel_date=2026-02-11&departure_time=08:00"
             )
         assert resp.json()["routes"][0]["legs"][0]["risk"]["time_bucket"] == "weekday_am_peak"
+
+    def test_leg_counters_match_the_reliability_row(self, client, db_session):
+        """The counters inlined on the leg must be the same numbers
+        /reliability reports for the row the bucket selects."""
+        self._seed_all_buckets(db_session)
+
+        with patch("api.routes.find_routes", return_value=[_FAKE_ROUTE]):
+            resp = client.get(
+                "/routes?origin=UN&destination=GL"
+                "&travel_date=2026-02-11&departure_time=08:00"
+            )
+        risk = resp.json()["routes"][0]["legs"][0]["risk"]
+        row = next(
+            r for r in client.get("/reliability?route_id=GT1&stop_id=UN").json()
+            if r["time_bucket"] == risk["time_bucket"]
+        )
+        for field in ("scheduled_departures", "observed_departures",
+                      "total_delay_seconds", "cancellation_count",
+                      "source", "neutral_prior_used"):
+            assert risk[field] == row[field], field
+        assert risk["risk_score"] == pytest.approx(1 - row["score"], abs=1e-6)
+
+    def test_leg_with_no_history_reads_as_no_observations(self, client, db_session):
+        """Nothing seeded: zeros and the neutral prior, so the UI can say "no
+        observations yet" rather than showing an unexplained score."""
+        with patch("api.routes.find_routes", return_value=[_FAKE_ROUTE]):
+            resp = client.get(
+                "/routes?origin=UN&destination=GL"
+                "&travel_date=2026-02-11&departure_time=08:00"
+            )
+        risk = resp.json()["routes"][0]["legs"][0]["risk"]
+        assert risk["scheduled_departures"] == 0
+        assert risk["source"] is None
+        assert risk["neutral_prior_used"] is True
+
+    def test_openapi_advertises_the_counters(self, client):
+        schema = client.get("/openapi.json").json()["components"]["schemas"]["LiveRisk"]
+        for field in ("scheduled_departures", "observed_departures",
+                      "total_delay_seconds", "cancellation_count",
+                      "source", "neutral_prior_used"):
+            assert field in schema["properties"], field
+            assert field in schema["required"], field
 
     def test_openapi_advertises_time_bucket(self, client):
         props = client.get("/openapi.json").json()["components"]["schemas"]["LiveRisk"]["properties"]

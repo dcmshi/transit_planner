@@ -31,6 +31,18 @@ class LiveRisk(BaseModel):
     # bucketing rules.  Populated even when the bucket had too little data and
     # the neutral prior was used.
     time_bucket: str
+    # The stored counters behind risk_score — the same numbers /reliability
+    # returns for this (route_id, from_stop_id, time_bucket) — so a client can
+    # explain a leg's score without a second request.  All zero, with source
+    # null, when no record exists for the bucket at all.
+    scheduled_departures: float
+    observed_departures: float
+    total_delay_seconds: float
+    cancellation_count: float
+    source: str | None
+    # True when the record was too sparse to score, or absent, and the neutral
+    # prior stood in — so the UI can say "no observations yet for this bucket".
+    neutral_prior_used: bool
 
 
 class TripLeg(BaseModel):
