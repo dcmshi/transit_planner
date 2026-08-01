@@ -22,7 +22,7 @@ import api.routes as routes_mod
 from config import AGENCY_TZ
 from db.models import Base, Stop
 from db.session import get_session
-from routing.engine import ArriveByResult
+from routing.engine import ArriveByResult, encode_polyline
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -1446,7 +1446,8 @@ class TestLegGeometryInResponse:
     """Each leg carries its own slice of the trip's GTFS shape, so the map can
     follow the track and still colour per leg by risk."""
 
-    _GEOM = [[-80.2469, 43.5443], [-80.1, 43.58], [-79.3806, 43.6453]]
+    # Encoded polyline for [[-80.2469,43.5443],[-80.1,43.58],[-79.3806,43.6453]]
+    _GEOM = encode_polyline([[-80.2469, 43.5443], [-80.1, 43.58], [-79.3806, 43.6453]])
 
     def _get(self, client, legs):
         with (
@@ -1497,11 +1498,9 @@ class TestLegGeometryInResponse:
     def test_openapi_advertises_geometry(self, client):
         schemas = client.get("/openapi.json").json()["components"]["schemas"]
         prop = schemas["TripLeg"]["properties"]["geometry"]
-        # array of [lon, lat] pairs, nullable
+        # encoded polyline string, nullable
         assert {"type": "null"} in prop["anyOf"]
-        array = next(a for a in prop["anyOf"] if a.get("type") == "array")
-        assert array["items"]["type"] == "array"
-        assert array["items"]["items"]["type"] == "number"
+        assert {"type": "string"} in prop["anyOf"]
         assert "geometry" not in schemas["WalkLeg"]["properties"]
 
 

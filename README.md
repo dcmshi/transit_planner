@@ -126,9 +126,14 @@ for the same `(route_id, from_stop_id, time_bucket)`. When no record exists the
 counters are zero, `source` is null, and `neutral_prior_used` is true.
 
 Trip legs also carry `geometry` — the stretch of the trip's GTFS shape between
-that leg's two stops, as ordered `[lon, lat]` pairs, so the map follows the
-track rather than drawing a chord between stations. Per leg, so each keeps its
-own risk colour.
+that leg's two stops, so the map follows the track rather than drawing a chord
+between stations. Per leg, so each keeps its own risk colour.
+
+It is a [Google encoded polyline](https://developers.google.com/maps/documentation/utilities/polylinealgorithm)
+at precision 5, roughly 4.4× smaller than the equivalent `[lon, lat]` arrays.
+Decode with any standard decoder — `@mapbox/polyline`'s `toGeoJSON()` returns
+`[lon, lat]` pairs ready for MapLibre. (The format is defined latitude-first,
+so a plain `decode()` gives `[lat, lon]`.)
 
 The GO feed publishes `shapes.txt` but no `shape_dist_traveled` in either
 `shapes.txt` or `stop_times.txt`, so ingest projects each stop onto its shape

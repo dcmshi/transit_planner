@@ -64,12 +64,14 @@ class TripLeg(BaseModel):
     departure_time: str   # HH:MM:SS — may exceed 24:00:00
     arrival_time: str     # HH:MM:SS — may exceed 24:00:00
     travel_seconds: int
-    # Track geometry between this leg's two stops as ordered [lon, lat] pairs,
-    # simplified for display.  Null when the trip has no usable GTFS shape —
-    # clients should fall back to a straight line between the stop
-    # coordinates.  Walk legs never have one: GTFS publishes no pedestrian
-    # geometry.
-    geometry: list[list[float]] | None = None
+    # Track geometry between this leg's two stops as a Google encoded
+    # polyline (precision 5), simplified for display.  Decode with any
+    # standard decoder — @mapbox/polyline's toGeoJSON() yields [lon, lat]
+    # pairs ready for MapLibre.  Null when the trip has no usable GTFS
+    # shape; clients should then fall back to a straight line between the
+    # stop coordinates.  Walk legs never have one: GTFS publishes no
+    # pedestrian geometry.
+    geometry: str | None = None
     risk: LiveRisk | None
     # Live GTFS-RT delay — present only for same-day trips currently in the
     # trip-updates feed with a non-zero delay (positive = late).

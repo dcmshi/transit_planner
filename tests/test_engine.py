@@ -33,6 +33,7 @@ from routing.engine import (
     _TripShape,
     count_transfers,
     dominates,
+    encode_polyline,
     find_routes_arriving_by,
     route_metrics,
     total_travel_seconds,
@@ -1269,28 +1270,86 @@ def _straight_shape(n=11):
     )
 
 
+def _decode_polyline(encoded, precision=5):
+    """Independent decoder, so the tests below check the encoder rather than
+    just agreeing with it.  Returns [lon, lat] pairs (GeoJSON order)."""
+    coords, index, lat, lon = [], 0, 0, 0
+    factor = 10 ** precision
+    while index < len(encoded):
+        for axis in range(2):
+            result, shift = 0, 0
+            while True:
+                byte = ord(encoded[index]) - 63
+                index += 1
+                result |= (byte & 0x1F) << shift
+                shift += 5
+                if byte < 0x20:
+                    break
+            delta = ~(result >> 1) if result & 1 else result >> 1
+            if axis == 0:
+                lat += delta
+            else:
+                lon += delta
+        coords.append([lon / factor, lat / factor])
+    return coords
+
+
+def _flat(points):
+    """pytest.approx cannot compare nested sequences."""
+    return [c for point in points for c in point]
+
+
+class TestEncodePolyline:
+    def test_matches_the_reference_vector(self):
+        """Google's published example, so the format is verified against the
+        spec rather than against this implementation."""
+        points = [[-120.2, 38.5], [-120.95, 40.7], [-126.453, 43.252]]
+        assert encode_polyline(points) == "_p~iF~ps|U_ulLnnqC_mqNvxq`@"
+
+    def test_round_trips(self):
+        points = [[-79.3806, 43.6453], [-79.9, 43.65], [-80.2469, 43.5443]]
+        decoded = _decode_polyline(encode_polyline(points))
+        assert _flat(decoded) == pytest.approx(_flat(points), abs=1e-5)
+
+    def test_empty_input(self):
+        assert encode_polyline([]) == ""
+
+    def test_precision_is_about_a_metre(self):
+        """Precision 5 must be finer than the simplification already applied,
+        so encoding adds no visible error."""
+        points = [[-79.380612, 43.645341], [-79.380699, 43.645388]]
+        decoded = _decode_polyline(encode_polyline(points))
+        for got, want in zip(decoded, points):
+            assert abs(got[0] - want[0]) < 1e-5
+            assert abs(got[1] - want[1]) < 1e-5
+
+
 class TestLegGeometry:
     """A leg is a slice of its trip's shape, per leg so the map can colour
-    each one by its own risk label."""
+    each one by its own risk label.  Encoded as a polyline string."""
+
+    def _points(self, shape, a, b):
+        encoded = _leg_geometry(shape, a, b)
+        return None if encoded is None else _decode_polyline(encoded)
 
     def test_slice_covers_only_the_leg(self):
-        geom = _leg_geometry(_straight_shape(), "S1", "S2")
+        geom = self._points(_straight_shape(), "S1", "S2")
         assert geom is not None
-        assert geom[0] == [-79.0, 43.0]
-        assert geom[-1] == [-78.95, 43.0]
+        assert _flat(geom[:1]) == pytest.approx([-79.0, 43.0], abs=1e-5)
+        assert _flat(geom[-1:]) == pytest.approx([-78.95, 43.0], abs=1e-5)
 
     def test_consecutive_legs_join_up(self):
         """The map draws legs separately; a gap between them would show."""
-        first = _leg_geometry(_straight_shape(), "S1", "S2")
-        second = _leg_geometry(_straight_shape(), "S2", "S3")
+        first = self._points(_straight_shape(), "S1", "S2")
+        second = self._points(_straight_shape(), "S2", "S3")
         assert first is not None and second is not None
-        assert first[-1] == second[0]
+        assert _flat(first[-1:]) == pytest.approx(_flat(second[:1]), abs=1e-5)
 
-    def test_reversed_stop_order_returns_forward_geometry(self):
-        forward = _leg_geometry(_straight_shape(), "S1", "S2")
-        backward = _leg_geometry(_straight_shape(), "S2", "S1")
+    def test_reversed_stop_order_returns_reversed_geometry(self):
+        forward = self._points(_straight_shape(), "S1", "S2")
+        backward = self._points(_straight_shape(), "S2", "S1")
         assert forward is not None and backward is not None
-        assert backward == forward[::-1]
+        assert _flat(backward) == pytest.approx(_flat(forward[::-1]), abs=1e-5)
 
     def test_no_shape_gives_none(self):
         assert _leg_geometry(None, "S1", "S2") is None
@@ -1311,7 +1370,7 @@ class TestLegGeometry:
             points=[[-79.0 + i * 0.001, 43.0] for i in range(101)],
             stop_indices={"A": 0, "B": 100},
         )
-        geom = _leg_geometry(shape, "A", "B")
+        geom = self._points(shape, "A", "B")
         assert geom is not None
         assert len(geom) == 2
 
@@ -1319,12 +1378,23 @@ class TestLegGeometry:
         """Simplification must not straighten a genuine bend."""
         points = [[-79.0, 43.0], [-78.99, 43.0], [-78.98, 43.05], [-78.97, 43.0]]
         shape = _TripShape(points=points, stop_indices={"A": 0, "B": 3})
-        geom = _leg_geometry(shape, "A", "B")
+        geom = self._points(shape, "A", "B")
         assert geom is not None
-        assert [-78.98, 43.05] in geom
+        assert any(_flat([p]) == pytest.approx([-78.98, 43.05], abs=1e-5) for p in geom)
 
-    def test_points_are_lon_lat(self):
-        geom = _leg_geometry(_straight_shape(), "S1", "S2")
+    def test_decodes_to_lon_lat(self):
+        geom = self._points(_straight_shape(), "S1", "S2")
         assert geom is not None
         lon, lat = geom[0]
         assert -80 < lon < -78 and 42 < lat < 44
+
+    def test_encoding_is_much_smaller_than_raw_pairs(self):
+        """The reason for the format change.  ~4.9x on a 120-point line at
+        these coordinate magnitudes; assert a conservative 3x so the test
+        tracks the property rather than one measurement."""
+        import json
+
+        points = [[-79.0 + i * 0.0007, 43.0 + (i % 7) * 0.0009] for i in range(120)]
+        encoded = encode_polyline(points)
+        raw = json.dumps([[round(x, 6), round(y, 6)] for x, y in points])
+        assert len(encoded) < len(raw) / 3

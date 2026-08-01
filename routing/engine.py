@@ -28,8 +28,8 @@ A "route" is a list of legs. Each leg is one edge traversal:
     "to_lat":         float | None,
     "to_lon":         float | None,
     # trip legs only:
-    #   "geometry": ordered [[lon, lat], ...] along the track between the two
-    #   stops, simplified; None when the trip has no usable shape.
+    #   "geometry": encoded polyline (precision 5) along the track between
+    #   the two stops, simplified; None when the trip has no usable shape.
     # trip legs only:
     "trip_id":        str,
     "route_id":       str,
@@ -565,7 +565,36 @@ def _load_trip_shape(
     return shape
 
 
-def _leg_geometry(shape: "_TripShape | None", from_stop: str, to_stop: str) -> list[list[float]] | None:
+def encode_polyline(points: Sequence[Sequence[float]]) -> str:
+    """
+    Google encoded-polyline format, precision 5 (~1.1 m).
+
+    Points come in as [lon, lat] (GeoJSON order) but the format is defined
+    lat-first, so they are swapped here — which is what off-the-shelf decoders
+    expect.  Precision 5 is the decoder default and is an order of magnitude
+    finer than the 0.0001-degree simplification already applied, so it costs
+    nothing real and keeps clients on a plain `decode()`.
+    """
+    out: list[str] = []
+    prev_lat = prev_lon = 0
+
+    def _chunk(value: int) -> None:
+        value = ~(value << 1) if value < 0 else value << 1
+        while value >= 0x20:
+            out.append(chr((0x20 | (value & 0x1F)) + 63))
+            value >>= 5
+        out.append(chr(value + 63))
+
+    for lon, lat in points:
+        # round() before differencing, so accumulated deltas cannot drift.
+        ilat, ilon = round(lat * 1e5), round(lon * 1e5)
+        _chunk(ilat - prev_lat)
+        _chunk(ilon - prev_lon)
+        prev_lat, prev_lon = ilat, ilon
+    return "".join(out)
+
+
+def _leg_geometry(shape: "_TripShape | None", from_stop: str, to_stop: str) -> str | None:
     """
     The stretch of a trip's polyline between two of its stops, simplified.
 
@@ -574,6 +603,10 @@ def _leg_geometry(shape: "_TripShape | None", from_stop: str, to_stop: str) -> l
 
     Returns None when either stop was never projected onto this shape, which
     happens for a stop the shape does not actually pass.
+
+    Encoded rather than raw coordinate pairs: the arrays roughly doubled a
+    routes response, and the encoding is about a tenth the size for geometry
+    a client decodes in one call anyway.
     """
     if shape is None:
         return None
@@ -594,7 +627,7 @@ def _leg_geometry(shape: "_TripShape | None", from_stop: str, to_stop: str) -> l
     simplified = LineString(span).simplify(
         GEOMETRY_SIMPLIFY_TOLERANCE, preserve_topology=False
     )
-    return [[round(x, 6), round(y, 6)] for x, y in simplified.coords]
+    return encode_polyline(list(simplified.coords))
 
 
 # ---------------------------------------------------------------------------
