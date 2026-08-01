@@ -461,6 +461,43 @@ every push; suite at 369 passing tests.
 
 ---
 
+## Tenth Audit Pass (2026-07-31)
+
+Whole-repo sweep for bugs, refactors, optimisations, and feature gaps, run
+against the live stack (889-stop PostGIS Docker DB, 1,589,171 stop_times)
+rather than by reading alone — every finding below was reproduced before it
+was filed.  Seven defects plus three feature proposals, **all still open**;
+detail and fixes in `TODO.md` under "Tenth-pass audit".
+
+- [ ] **LLM read timeout 500s `/routes?explain=true`** — `_post_llm_request`
+  catches `ConnectError` but not the `TransportError` siblings; injection
+  shows `ReadTimeout` propagating out of `explain_routes` while
+  `ConnectError` degrades correctly
+- [ ] **Single-digit-hour GTFS times break the SQL time arithmetic** — same
+  `"9:30:00"` yields a PostgreSQL cast error, a silent 30-minute SQLite
+  error, and the correct answer in Python
+- [ ] **Daily refresh never fires under frequent restarts** — interval
+  trigger first-fires at boot + 24 h, so decay and cache invalidation are
+  skipped too
+- [ ] **Service alerts ignore `active_period`** — never parsed, and the
+  bump is not same-day gated like every other live signal
+- [ ] **`_add_trip_edges` buffers the whole join** — 749 MB resident /
+  929 MB peak measured, reduced into just 1,927 edges
+- [ ] **Risk-label thresholds duplicated** across `live.py` and `routes.py`
+- [ ] **Documented zero-second-leg filter does not exist** in
+  `_passes_filters`
+- [ ] Feature proposals: `arrive_by` on `/routes`, a read-only reliability
+  endpoint, Alembic
+
+Fixed earlier the same day, before the audit: mypy adopted and gating CI
+(`db/models.py` migrated to SQLAlchemy 2.0 `Mapped[]`, verified DDL-neutral
+on both dialects; nullable reliability counters no longer raise `TypeError`),
+and the PostGIS walk-edge helper scoped to the graph's own nodes — it had
+been inventing a node for every stop within 500 m, which only stayed hidden
+because CI's database is empty.  Suite at 371 unit tests + 4 integration.
+
+---
+
 ## Environment Setup
 
 ```bash

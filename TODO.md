@@ -1,10 +1,145 @@
 # TODO — audit backlog
 
-Updated 2026-07-10, consolidated after the seventh and eighth audit passes
-(two independent reviewers each ran an eighth-pass audit; their findings
-overlapped and every item is fixed or explicitly deferred below).  Full
-findings, fix notes, and live-verification records are in `PROGRESS.md`;
-per-item detail lives in the commit messages for 2026-07-10.
+Updated 2026-07-31 after the tenth-pass audit.  Earlier consolidation was
+2026-07-10, after the seventh and eighth passes (two independent reviewers
+each ran an eighth-pass audit; their findings overlapped and every item is
+fixed or explicitly deferred below).  Full findings, fix notes, and
+live-verification records are in `PROGRESS.md`; per-item detail lives in the
+commit messages.
+
+## Tenth-pass audit (2026-07-31)
+
+Every item below was reproduced against the running stack (889-stop PostGIS
+Docker DB, 1,589,171 stop_times) rather than inferred from reading.  Ordered
+by severity.  Nothing here is fixed yet.
+
+### 1. A slow LLM turns `/routes?explain=true` into a 500 (bug)
+
+`_post_llm_request` (`llm/explainer.py`) catches only `httpx.ConnectError` and
+`httpx.HTTPStatusError`.  `ReadTimeout`, `ConnectTimeout`, `PoolTimeout`,
+`ReadError` and `RemoteProtocolError` all descend from `TransportError`, not
+`ConnectError`, so none are caught.  Verified by injection:
+
+```
+ConnectError  -> returns "Explanation unavailable: Ollama is not running…"  ✅
+ReadTimeout   -> RAISES, propagates out of explain_routes()                 ❌
+```
+
+Nothing between there and the endpoint catches it, so the request 500s and the
+already-computed routes are discarded.  The client timeout is 60 s and a cold
+Ollama model load routinely exceeds that, so this is reachable in normal use,
+not just under failure.  It also contradicts the function's own docstring
+("Returns a human-readable fallback string (rather than raising)").
+
+Fix: catch `httpx.HTTPError` (the common base) — or wrap the `explain_routes`
+call at the endpoint so an explanation failure can never cost the routes.
+
+### 2. Single-digit-hour GTFS times break the SQL time arithmetic (bug, latent)
+
+The GTFS spec accepts `H:MM:SS` as well as `HH:MM:SS`.  Ingest
+(`_parse_stop_times`) only rejects *blank* times — it never validates the
+shape — and both the routing query (`routing/engine.py`) and the no-show sweep
+(`_DEP_SEC_SQL` in `ingestion/gtfs_realtime.py`) slice fixed character offsets
+out of the string.  For `"9:30:00"` the same value gives three different
+answers:
+
+| Path | Result |
+|---|---|
+| PostgreSQL `CAST(substr('9:30:00',1,2) AS INT)` | `ERROR: invalid input syntax for type integer: "9:"` |
+| SQLite, same expression | `32400` — 09:00:00, a silent 30-minute error |
+| Python `hms_to_seconds("9:30:00")` | `34200` — correct |
+
+So on PostgreSQL `/routes` 500s and the no-show sweep dies; on SQLite the wrong
+departure is selected with no error at all.  Metrolinx currently zero-pads, so
+this is latent — but it is one feed change away, and the failure is silent on
+the backend used by the whole unit suite.
+
+Fix: normalise to `HH:MM:SS` at ingest (the boundary), and reject rows that
+still don't match after padding.
+
+### 3. The daily refresh never runs if the process restarts often (bug)
+
+`scheduler.add_job(_daily_gtfs_refresh, "interval", hours=GTFS_REFRESH_HOURS)`
+uses an interval trigger with no `start_date`, so APScheduler sets the first
+fire to **boot + 24 h** (confirmed: a job added at 21:56 first fires at 21:56
+the following day).  Any restart inside the window resets the clock, so a
+container that redeploys or reboots daily never refreshes at all.
+
+The blast radius is wider than stale timetables: `_daily_gtfs_refresh` is the
+only caller of `decay_reliability_records()` and `_clear_routes_cache()`, so
+reliability counters never age out and the route cache is never invalidated
+either.
+
+Fix: a `cron` trigger at a fixed agency-local hour, or pass an explicit
+`next_run_time` so a fresh process picks up a missed window.
+
+### 4. Service alerts ignore their active period (bug)
+
+`compute_live_risk()` gates same-day cancellations, live delay, and the
+cancelled-trip short-circuit behind `is_same_day`, but the alert bump at step 2
+has no such guard — and `ServiceAlertState` never captures the feed's
+`active_period` at all.  A disruption affecting only today therefore inflates
+risk for travel three weeks out, and a planned closure announced for next month
+is treated as active right now.
+
+`ALERT_RISK_BUMP * len(active_alerts)` is also unbounded, so a stop touched by
+ten alerts saturates to maximum risk on that signal alone.
+
+Fix: parse `active_period` in `poll_service_alerts()` and test the leg's
+scheduled datetime against it; consider capping the cumulative bump.
+
+### 5. `_add_trip_edges` buffers the entire stop_times join in memory (optimisation)
+
+The docstring says the single-query approach avoids "loading full ORM objects
+into memory", but `.all()` still materialises every row at once.  Measured on
+the current feed with `tracemalloc`:
+
+```
+rows buffered : 1,589,171
+current       : 749 MB
+peak          : 929 MB
+```
+
+The rows are consumed strictly in `trip_id` order and reduced into `best`,
+which holds only 1,927 entries — nothing needs the full list.  Streaming with
+`.execution_options(yield_per=...)` (or `stream_results`) would cut peak
+several-fold and deliver what the docstring already claims.  Worth doing before
+the corridor generalisation below grows the feed.
+
+### 6. Risk-label thresholds are duplicated (refactor)
+
+`reliability/live.py` defines `_risk_label()` (`<0.33` Low, `<0.66` Medium,
+else High) and `api/routes.py` re-implements the identical ternary inline when
+computing a route's overall label.  `llm/explainer.py` then depends on those
+exact strings via `label_rank`.  Three places, one set of thresholds — they
+will drift.  Promote `_risk_label` to a shared helper and call it from both.
+
+### 7. A documented hard filter does not exist (refactor / correctness)
+
+`routing/engine.py`'s module docstring says step 3 filters routes that violate
+hard constraints "(zero-second legs, too many transfers, tight connections)".
+`_passes_filters()` implements the last two and has no zero-second-leg check;
+"zero-second" appears nowhere else in the file.  Zero-travel-time trip edges
+are reachable — `_add_trip_edges` clamps with `max(0, arr - dep)`, which yields
+exactly 0 whenever a feed writes a post-midnight arrival as `00:05:00` instead
+of `24:05:00`.  Either restore the filter or correct the docstring; right now
+the docs assert a guarantee the code does not provide.
+
+### 8. Feature proposals
+
+Not defects — worth considering, listed smallest-first:
+
+- **`arrive_by` on `/routes`** — the endpoint only accepts `departure_time`.
+  Arrive-by planning is table stakes for a trip planner, and the machinery is
+  mostly there (`_fill_later_departures` already walks a path's departures).
+- **A read-only reliability endpoint** — `/health` reports only aggregate
+  counts by `source`.  Something like `GET /reliability?route_id=&stop_id=`
+  returning the stored counters and derived score would make scoring
+  auditable without opening psql, which matters while the priors are still
+  being tuned.
+- **Alembic** — already noted under the schema-migration item below; the
+  `Column` → `Mapped[]` migration and the counter widening both had to be
+  hand-written SQL.
 
 ## Open items
 
