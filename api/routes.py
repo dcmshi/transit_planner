@@ -3,6 +3,7 @@ Endpoint handlers (v1):
   GET  /routes?origin=<stop_id>&destination=<stop_id>&explain=<bool>
   GET  /stops?query=<name>
   GET  /alerts
+  GET  /reliability?route_id=&stop_id=
   GET  /health
   POST /ingest/gtfs-static     (202 — background)
   GET  /ingest/status
@@ -45,6 +46,7 @@ from api.schemas import (
     HealthResponse,
     IngestResponse,
     IngestStatusResponse,
+    ReliabilityResult,
     RoutesResponse,
     SeedResponse,
     StopResult,
@@ -60,6 +62,7 @@ from reliability.historical import (
     NEUTRAL_PRIOR,
     classify_time_bucket,
     get_historical_reliability_batch,
+    score_record,
 )
 from reliability.live import compute_live_risk, get_live_delay, risk_label
 from routing.engine import (
@@ -75,6 +78,10 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 _ingest_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+# Hard ceiling on /reliability rows.  The endpoint exists to audit a
+# route's score, not to export the table.
+_RELIABILITY_MAX_LIMIT = 200
 
 
 def _require_ingest_key(key: str | None = Security(_ingest_key_header)) -> None:
@@ -214,6 +221,68 @@ def search_stops(
         }
         for s in results
     ]
+
+
+@router.get("/reliability", response_model=list[ReliabilityResult])
+def get_reliability(
+    route_id: str | None = Query(None, max_length=64, description="Filter by GTFS route_id"),
+    stop_id: str | None = Query(None, max_length=64, description="Filter by GTFS stop_id"),
+    time_bucket: str | None = Query(
+        None, max_length=32,
+        description="Filter by bucket, e.g. weekday_am_peak / weekday_pm_peak / "
+                    "weekday_offpeak / weekend",
+    ),
+    limit: int = Query(50, ge=1, le=_RELIABILITY_MAX_LIMIT, description="Max records"),
+    session: Session = Depends(get_session),
+    _: None = Depends(_rate_limit),
+) -> list[dict[str, Any]]:
+    """
+    Inspect the stored reliability counters behind a route's risk score.
+
+    Read-only, for tuning and debugging: /health reports only aggregate
+    counts by source, which is not enough to tell whether a route scores
+    badly because of real observations or a synthetic prior.
+
+    At least one of route_id or stop_id is required, and results are capped.
+    This is a lookup tool, not a bulk export — pull the table directly if you
+    need the whole thing.
+    """
+    from db.models import ReliabilityRecord
+
+    if not route_id and not stop_id:
+        raise HTTPException(
+            status_code=422,
+            detail="Provide at least one of route_id or stop_id.",
+        )
+
+    query = session.query(ReliabilityRecord)
+    if route_id:
+        query = query.filter(ReliabilityRecord.route_id == route_id)
+    if stop_id:
+        query = query.filter(ReliabilityRecord.stop_id == stop_id)
+    if time_bucket:
+        query = query.filter(ReliabilityRecord.time_bucket == time_bucket)
+    records = query.order_by(ReliabilityRecord.updated_at.desc()).limit(limit).all()
+
+    results = []
+    for r in records:
+        score = score_record(r)
+        results.append({
+            "route_id": r.route_id,
+            "stop_id": r.stop_id,
+            "time_bucket": r.time_bucket,
+            "source": r.source,
+            "scheduled_departures": r.scheduled_departures or 0.0,
+            "observed_departures": r.observed_departures or 0.0,
+            "total_delay_seconds": r.total_delay_seconds or 0.0,
+            "cancellation_count": r.cancellation_count or 0.0,
+            "window_start_date": r.window_start_date,
+            "window_end_date": r.window_end_date,
+            "updated_at": r.updated_at,
+            "score": score,
+            "neutral_prior_used": score is None,
+        })
+    return results
 
 
 @router.get("/alerts", response_model=list[AlertResult])

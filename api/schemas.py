@@ -119,6 +119,29 @@ class HealthResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# GET /reliability
+# ---------------------------------------------------------------------------
+
+class ReliabilityResult(BaseModel):
+    route_id: str | None
+    stop_id: str | None
+    time_bucket: str | None
+    # "seed" (synthetic prior), "observed" (real RT only), or "mixed".
+    source: str
+    scheduled_departures: float
+    observed_departures: float
+    total_delay_seconds: float
+    cancellation_count: float
+    window_start_date: str | None
+    window_end_date: str | None
+    updated_at: str | None
+    # None when the record holds too little data to score, in which case the
+    # scorer substitutes the neutral prior instead of this record.
+    score: float | None
+    neutral_prior_used: bool
+
+
+# ---------------------------------------------------------------------------
 # GET /alerts
 # ---------------------------------------------------------------------------
 

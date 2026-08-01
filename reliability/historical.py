@@ -81,6 +81,18 @@ def _score_record(record: ReliabilityRecord) -> float:
     return max(0.0, min(1.0, score))
 
 
+def score_record(record: ReliabilityRecord) -> float | None:
+    """Score one record, or None when it holds too little data to score.
+
+    None is the same condition get_historical_reliability answers with
+    NEUTRAL_PRIOR; exposed separately so callers inspecting stored records
+    can tell "genuinely 0.8" from "no usable data".
+    """
+    if _count(record.scheduled_departures) < _MIN_SCHEDULED:
+        return None
+    return _score_record(record)
+
+
 def get_historical_reliability(
     route_id: str,
     stop_id: str,

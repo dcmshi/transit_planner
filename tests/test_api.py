@@ -1162,3 +1162,95 @@ class TestRouteCacheSingleFlight:
         assert len(results) == 4
         assert all(r == results[0] for r in results)
         cache_mod._clear_routes_cache()
+
+
+# ---------------------------------------------------------------------------
+# GET /reliability
+# ---------------------------------------------------------------------------
+
+class TestReliabilityEndpoint:
+    """Read-only view of the counters behind a route's score. /health reports
+    only aggregate counts by source, which cannot tell you whether a route
+    scores badly from real observations or from a synthetic prior."""
+
+    def _seed(self, db, **overrides):
+        from db.models import ReliabilityRecord
+
+        fields = dict(
+            route_id="R1", stop_id="S1", time_bucket="weekday_am_peak",
+            source="observed", scheduled_departures=100, observed_departures=95,
+            total_delay_seconds=0, cancellation_count=0,
+            window_start_date="20260201", window_end_date="20260214",
+            updated_at="2026-02-14T00:00:00+00:00",
+        )
+        fields.update(overrides)
+        db.add(ReliabilityRecord(**fields))
+        db.commit()
+
+    def test_requires_a_route_or_stop_filter(self, client):
+        """Bounded lookup, not a table export."""
+        resp = client.get("/reliability")
+        assert resp.status_code == 422
+        assert "route_id or stop_id" in resp.json()["detail"]
+
+    def test_returns_counters_and_derived_score(self, client, db_session):
+        self._seed(db_session)
+        body = client.get("/reliability?route_id=R1").json()
+        assert len(body) == 1
+        rec = body[0]
+        assert rec["route_id"] == "R1"
+        assert rec["source"] == "observed"
+        assert rec["scheduled_departures"] == 100
+        assert rec["observed_departures"] == 95
+        assert rec["score"] == pytest.approx(0.95)
+        assert rec["neutral_prior_used"] is False
+
+    def test_flags_records_too_sparse_to_score(self, client, db_session):
+        """A record below the scoring threshold is where the neutral prior is
+        substituted — the endpoint must distinguish that from a real 0.8."""
+        self._seed(db_session, scheduled_departures=0, observed_departures=0)
+        rec = client.get("/reliability?route_id=R1").json()[0]
+        assert rec["score"] is None
+        assert rec["neutral_prior_used"] is True
+
+    def test_filters_by_stop_and_bucket(self, client, db_session):
+        self._seed(db_session, stop_id="S1", time_bucket="weekday_am_peak")
+        self._seed(db_session, stop_id="S2", time_bucket="weekend")
+
+        assert len(client.get("/reliability?route_id=R1").json()) == 2
+        assert len(client.get("/reliability?route_id=R1&stop_id=S2").json()) == 1
+        by_bucket = client.get("/reliability?route_id=R1&time_bucket=weekend").json()
+        assert [r["stop_id"] for r in by_bucket] == ["S2"]
+
+    def test_unknown_route_returns_empty_list(self, client, db_session):
+        self._seed(db_session)
+        assert client.get("/reliability?route_id=NOPE").json() == []
+
+    def test_limit_is_honoured_and_capped(self, client, db_session):
+        for i in range(5):
+            self._seed(db_session, stop_id=f"S{i}",
+                       updated_at=f"2026-02-1{i}T00:00:00+00:00")
+        assert len(client.get("/reliability?route_id=R1&limit=2").json()) == 2
+        over = client.get(f"/reliability?route_id=R1&limit={routes_mod._RELIABILITY_MAX_LIMIT + 1}")
+        assert over.status_code == 422
+        assert client.get("/reliability?route_id=R1&limit=0").status_code == 422
+
+    def test_newest_record_first(self, client, db_session):
+        self._seed(db_session, stop_id="OLD", updated_at="2026-02-01T00:00:00+00:00")
+        self._seed(db_session, stop_id="NEW", updated_at="2026-02-20T00:00:00+00:00")
+        assert [r["stop_id"] for r in client.get("/reliability?route_id=R1").json()] == [
+            "NEW", "OLD",
+        ]
+
+    def test_null_counters_do_not_error(self, client, db_session):
+        """Counters are nullable; a row written by raw SQL can hold NULL."""
+        from sqlalchemy import text
+
+        db_session.execute(text(
+            "INSERT INTO reliability_records (route_id, stop_id, time_bucket, source) "
+            "VALUES ('R1', 'S1', 'weekday_am_peak', 'observed')"
+        ))
+        db_session.commit()
+        rec = client.get("/reliability?route_id=R1").json()[0]
+        assert rec["scheduled_departures"] == 0.0
+        assert rec["score"] is None
