@@ -6,7 +6,9 @@ logic that lives entirely inside routing/engine.py.
 """
 
 from collections.abc import Sequence
+from datetime import date, datetime
 from typing import cast
+from unittest.mock import MagicMock, patch
 
 import networkx as nx
 import pytest
@@ -17,6 +19,7 @@ from sqlalchemy.pool import StaticPool
 from config import MIN_TRANSFER_MINUTES
 from db.models import Base, Route, ServiceCalendarDate, Stop, StopTime, Trip
 from routing.engine import (
+    ARRIVE_BY_LOOKBACK_HOURS,
     _fill_later_departures,
     _find_trip_legs,
     _hms_to_seconds,
@@ -25,6 +28,7 @@ from routing.engine import (
     _route_signature,
     _RouteQueryCache,
     count_transfers,
+    find_routes_arriving_by,
     total_travel_seconds,
     total_walk_metres,
 )
@@ -915,3 +919,101 @@ class TestFindTripLegs:
         with patch.object(eng, "_find_trip_legs", return_value=[]):
             result = eng._schedule_path(trip_db, G, ["S1", "S2"], datetime(2026, 3, 2, 8, 0, 0))
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# find_routes_arriving_by
+# ---------------------------------------------------------------------------
+
+class TestFindRoutesArrivingBy:
+    """Yen's is departure-anchored, so arrive-by searches forward from a
+    window before the deadline and keeps what still makes it."""
+
+    def _legs(self, dep, arr):
+        return [_trip("R1", dep, arr, _hms_to_seconds(arr) - _hms_to_seconds(dep))]
+
+    def _patched(self, candidates):
+        return patch("routing.engine.find_routes", return_value=candidates)
+
+    def test_drops_itineraries_that_arrive_too_late(self):
+        candidates = [
+            self._legs("08:00:00", "08:50:00"),   # in time
+            self._legs("08:30:00", "09:30:00"),   # too late
+        ]
+        with self._patched(candidates):
+            result = find_routes_arriving_by(
+                "A", "B", arrive_by_sec=_hms_to_seconds("09:00:00"),
+                travel_day=date(2026, 2, 17), session=MagicMock(),
+            )
+        assert [r[0]["arrival_time"] for r in result] == ["08:50:00"]
+
+    def test_exactly_on_the_deadline_is_accepted(self):
+        with self._patched([self._legs("08:00:00", "09:00:00")]):
+            result = find_routes_arriving_by(
+                "A", "B", arrive_by_sec=_hms_to_seconds("09:00:00"),
+                travel_day=date(2026, 2, 17), session=MagicMock(),
+            )
+        assert len(result) == 1
+
+    def test_orders_latest_departure_first(self):
+        """Both arrive in time, so the rider wants the later start."""
+        candidates = [
+            self._legs("07:00:00", "08:40:00"),
+            self._legs("08:00:00", "08:50:00"),
+            self._legs("07:30:00", "08:45:00"),
+        ]
+        with self._patched(candidates):
+            result = find_routes_arriving_by(
+                "A", "B", arrive_by_sec=_hms_to_seconds("09:00:00"),
+                travel_day=date(2026, 2, 17), session=MagicMock(),
+            )
+        assert [r[0]["departure_time"] for r in result] == [
+            "08:00:00", "07:30:00", "07:00:00",
+        ]
+
+    def test_searches_from_the_lookback_window(self):
+        with patch("routing.engine.find_routes", return_value=[]) as mock_find:
+            find_routes_arriving_by(
+                "A", "B", arrive_by_sec=_hms_to_seconds("12:00:00"),
+                travel_day=date(2026, 2, 17), session=MagicMock(),
+            )
+        called_from = mock_find.call_args.kwargs["departure_dt"]
+        assert called_from == datetime(2026, 2, 17, 12 - ARRIVE_BY_LOOKBACK_HOURS, 0, 0)
+
+    def test_early_deadline_clamps_the_window_to_midnight(self):
+        with patch("routing.engine.find_routes", return_value=[]) as mock_find:
+            find_routes_arriving_by(
+                "A", "B", arrive_by_sec=_hms_to_seconds("02:00:00"),
+                travel_day=date(2026, 2, 17), session=MagicMock(),
+            )
+        assert mock_find.call_args.kwargs["departure_dt"] == datetime(2026, 2, 17, 0, 0, 0)
+
+    def test_post_midnight_deadline_is_expressible(self):
+        """25:30 is 01:30 the next morning — the reason this takes seconds
+        rather than a datetime, which cannot hold hour 25."""
+        candidates = [self._legs("23:00:00", "25:00:00")]
+        with self._patched(candidates):
+            result = find_routes_arriving_by(
+                "A", "B", arrive_by_sec=_hms_to_seconds("25:30:00"),
+                travel_day=date(2026, 2, 17), session=MagicMock(),
+            )
+        assert len(result) == 1
+        # The window still starts inside the travel day.
+        assert result[0][0]["departure_time"] == "23:00:00"
+
+    def test_respects_max_routes(self):
+        candidates = [self._legs(f"0{h}:00:00", "08:55:00") for h in range(5, 9)]
+        with self._patched(candidates):
+            result = find_routes_arriving_by(
+                "A", "B", arrive_by_sec=_hms_to_seconds("09:00:00"),
+                travel_day=date(2026, 2, 17), session=MagicMock(), max_routes=2,
+            )
+        assert len(result) == 2
+
+    def test_walk_only_candidates_are_skipped(self):
+        with self._patched([[_walk(300)]]):
+            result = find_routes_arriving_by(
+                "A", "B", arrive_by_sec=_hms_to_seconds("09:00:00"),
+                travel_day=date(2026, 2, 17), session=MagicMock(),
+            )
+        assert result == []

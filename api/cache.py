@@ -18,7 +18,12 @@ from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger(__name__)
 
-_routes_cache: dict[tuple[str, str, str, str], tuple[list, datetime, timedelta]] = {}
+# (origin, destination, YYYY-MM-DD, HH:MM, mode).  The mode is part of the
+# key because "depart at 09:00" and "arrive by 09:00" are different questions
+# with different answers — sharing a key would serve one for the other.
+CacheKey = tuple[str, str, str, str, str]
+
+_routes_cache: dict[CacheKey, tuple[list, datetime, timedelta]] = {}
 _routes_cache_lock = threading.Lock()
 _ROUTES_CACHE_TTL = timedelta(hours=1)
 _ROUTES_CACHE_NEGATIVE_TTL = timedelta(minutes=5)
@@ -26,10 +31,10 @@ _ROUTES_CACHE_MAX_ENTRIES = 1000
 
 # Per-key in-flight locks (single-flight): concurrent requests for the same
 # cache key wait for the first one's find_routes() instead of recomputing.
-_inflight_locks: dict[tuple[str, str, str, str], threading.Lock] = {}
+_inflight_locks: dict[CacheKey, threading.Lock] = {}
 
 
-def _inflight_lock_for(key: tuple[str, str, str, str]) -> threading.Lock:
+def _inflight_lock_for(key: CacheKey) -> threading.Lock:
     with _routes_cache_lock:
         lock = _inflight_locks.get(key)
         if lock is None:
@@ -38,19 +43,27 @@ def _inflight_lock_for(key: tuple[str, str, str, str]) -> threading.Lock:
         return lock
 
 
-def _release_inflight_lock(key: tuple[str, str, str, str]) -> None:
+def _release_inflight_lock(key: CacheKey) -> None:
     """Drop the per-key lock once computation finishes so the dict stays
     bounded; waiters still hold their reference to the lock object."""
     with _routes_cache_lock:
         _inflight_locks.pop(key, None)
 
 
-def _routes_cache_key(origin: str, destination: str, departure_dt: datetime) -> tuple[str, str, str, str]:
+def _routes_cache_key(
+    origin: str, destination: str, anchor_dt: datetime, mode: str = "depart"
+) -> CacheKey:
     """Stable cache key at minute resolution."""
-    return (origin, destination, departure_dt.strftime("%Y-%m-%d"), departure_dt.strftime("%H:%M"))
+    return (
+        origin,
+        destination,
+        anchor_dt.strftime("%Y-%m-%d"),
+        anchor_dt.strftime("%H:%M"),
+        mode,
+    )
 
 
-def _get_cached_routes(key: tuple[str, str, str, str]) -> list | None:
+def _get_cached_routes(key: CacheKey) -> list | None:
     """Cached routes for key, or None on miss/expiry.  An empty list is a
     negative-cache hit ('known unroutable'), distinct from None."""
     with _routes_cache_lock:
@@ -64,7 +77,7 @@ def _get_cached_routes(key: tuple[str, str, str, str]) -> list | None:
         return cached_routes
 
 
-def _store_cached_routes(key: tuple[str, str, str, str], routes: list) -> None:
+def _store_cached_routes(key: CacheKey, routes: list) -> None:
     ttl = _ROUTES_CACHE_TTL if routes else _ROUTES_CACHE_NEGATIVE_TTL
     with _routes_cache_lock:
         _routes_cache[key] = (routes, datetime.now(timezone.utc), ttl)

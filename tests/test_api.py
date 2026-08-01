@@ -6,7 +6,7 @@ for every test.  Each test gets its own in-memory SQLite database via
 the db_session / client fixtures, so tests are fully isolated.
 """
 
-from datetime import datetime
+from datetime import date, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -445,6 +445,69 @@ class TestGetRoutes:
             "/routes?origin=UN&destination=GL&travel_date=not-a-date"
         )
         assert resp.status_code == 422
+
+    # --- arrive_by ---
+
+    def test_arrive_by_with_departure_time_returns_422(self, client):
+        resp = client.get(
+            "/routes?origin=UN&destination=GL&travel_date=2026-02-11"
+            "&departure_time=08:00&arrive_by=10:00"
+        )
+        assert resp.status_code == 422
+        assert "not both" in resp.json()["detail"].lower()
+
+    @pytest.mark.parametrize("bad", ["notATime", "10", "99:00", "10:75", "10:00:99"])
+    def test_invalid_arrive_by_returns_422(self, client, bad):
+        resp = client.get(
+            f"/routes?origin=UN&destination=GL&travel_date=2026-02-11&arrive_by={bad}"
+        )
+        assert resp.status_code == 422
+
+    def test_arrive_by_routes_through_the_arrival_search(self, client):
+        cache_mod._routes_cache.clear()
+        with (
+            patch("api.routes.find_routes_arriving_by",
+                  return_value=[_FAKE_ROUTE]) as mock_arrive,
+            patch("api.routes.find_routes") as mock_depart,
+            patch("api.routes.get_historical_reliability_batch", return_value={}),
+        ):
+            resp = client.get(
+                "/routes?origin=UN&destination=GL&travel_date=2026-02-11&arrive_by=10:30"
+            )
+        assert resp.status_code == 200
+        mock_depart.assert_not_called()
+        assert mock_arrive.call_args.kwargs["arrive_by_sec"] == 10 * 3600 + 30 * 60
+        assert mock_arrive.call_args.kwargs["travel_day"] == date(2026, 2, 11)
+
+    def test_arrive_by_accepts_post_midnight_gtfs_hours(self, client):
+        cache_mod._routes_cache.clear()
+        with (
+            patch("api.routes.find_routes_arriving_by",
+                  return_value=[_FAKE_ROUTE]) as mock_arrive,
+            patch("api.routes.get_historical_reliability_batch", return_value={}),
+        ):
+            resp = client.get(
+                "/routes?origin=UN&destination=GL&travel_date=2026-02-11&arrive_by=25:30"
+            )
+        assert resp.status_code == 200
+        assert mock_arrive.call_args.kwargs["arrive_by_sec"] == 25 * 3600 + 30 * 60
+
+    def test_arrive_by_and_depart_do_not_share_a_cache_entry(self, client):
+        """"Depart at 09:00" and "arrive by 09:00" are different questions;
+        the cache key must not conflate them."""
+        cache_mod._routes_cache.clear()
+        with (
+            patch("api.routes.find_routes", return_value=[_FAKE_ROUTE]) as mock_depart,
+            patch("api.routes.find_routes_arriving_by",
+                  return_value=[_FAKE_ROUTE]) as mock_arrive,
+            patch("api.routes.get_historical_reliability_batch", return_value={}),
+        ):
+            base = "/routes?origin=UN&destination=GL&travel_date=2026-02-11"
+            assert client.get(f"{base}&departure_time=09:00").status_code == 200
+            assert client.get(f"{base}&arrive_by=09:00").status_code == 200
+
+        assert mock_depart.call_count == 1
+        assert mock_arrive.call_count == 1
 
     # --- routing errors ---
 
@@ -960,22 +1023,22 @@ class TestRoutesCache:
         from api.cache import _routes_cache_key
         dt = datetime(2026, 2, 17, 8, 30, 0)
         key = _routes_cache_key("UN", "GL", dt)
-        assert key == ("UN", "GL", "2026-02-17", "08:30")
+        assert key == ("UN", "GL", "2026-02-17", "08:30", "depart")
 
     def test_cache_miss_returns_none(self):
         from api.cache import _get_cached_routes
-        assert _get_cached_routes(("UN", "GL", "2026-02-17", "08:30")) is None
+        assert _get_cached_routes(("UN", "GL", "2026-02-17", "08:30", "depart")) is None
 
     def test_store_and_retrieve(self):
         from api.cache import _get_cached_routes, _store_cached_routes
-        key = ("UN", "GL", "2026-02-17", "08:30")
+        key = ("UN", "GL", "2026-02-17", "08:30", "depart")
         routes = [[{"kind": "trip", "route_id": "R1"}]]
         _store_cached_routes(key, routes)
         assert _get_cached_routes(key) == routes
 
     def test_clear_removes_entries(self):
         from api.cache import _clear_routes_cache, _get_cached_routes, _store_cached_routes
-        key = ("UN", "GL", "2026-02-17", "08:30")
+        key = ("UN", "GL", "2026-02-17", "08:30", "depart")
         _store_cached_routes(key, [[]])
         _clear_routes_cache()
         assert _get_cached_routes(key) is None
@@ -985,7 +1048,7 @@ class TestRoutesCache:
 
         from api.cache import _get_cached_routes, _store_cached_routes
 
-        key = ("UN", "GL", "2026-02-17", "08:30")
+        key = ("UN", "GL", "2026-02-17", "08:30", "depart")
         # TTL is captured per entry at store time — shrink it before storing.
         monkeypatch.setattr(cache_mod, "_ROUTES_CACHE_TTL", timedelta(seconds=0))
         _store_cached_routes(key, [[]])
@@ -1009,7 +1072,7 @@ class TestRoutesCache:
     def test_negative_entries_use_short_ttl(self):
         from api.cache import _store_cached_routes
 
-        key = ("UN", "GL", "2026-02-17", "08:30")
+        key = ("UN", "GL", "2026-02-17", "08:30", "depart")
         _store_cached_routes(key, [])
         assert cache_mod._routes_cache[key][2] == cache_mod._ROUTES_CACHE_NEGATIVE_TTL
 
@@ -1018,7 +1081,7 @@ class TestRoutesCache:
 
         monkeypatch.setattr(cache_mod, "_ROUTES_CACHE_MAX_ENTRIES", 20)
         for i in range(60):
-            _store_cached_routes(("UN", f"S{i}", "2026-02-17", "08:30"), [["x"]])
+            _store_cached_routes(("UN", f"S{i}", "2026-02-17", "08:30", "depart"), [["x"]])
         assert len(cache_mod._routes_cache) <= 20
 
     def test_find_routes_called_once_on_cache_hit(self, client, monkeypatch):

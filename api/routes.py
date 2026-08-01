@@ -65,6 +65,7 @@ from reliability.live import compute_live_risk, get_live_delay, risk_label
 from routing.engine import (
     count_transfers,
     find_routes,
+    find_routes_arriving_by,
     total_travel_seconds,
     total_walk_metres,
 )
@@ -234,7 +235,30 @@ def get_alerts(_: None = Depends(_rate_limit)) -> list[dict[str, Any]]:
     ]
 
 
-def _prune_dominated(scored_routes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _parse_arrive_by(value: str) -> int:
+    """Parse an arrive_by query value to seconds past midnight.
+
+    Accepts GTFS-style hours past 23 (25:30 = 01:30 next morning), which is
+    why this returns seconds rather than a datetime.
+    """
+    parts = value.split(":")
+    try:
+        hours, minutes = int(parts[0]), int(parts[1])
+        seconds = int(parts[2]) if len(parts) > 2 else 0
+    except (ValueError, IndexError):
+        raise HTTPException(
+            status_code=422, detail=f"Invalid arrive_by value: {value!r}. Use HH:MM or HH:MM:SS."
+        )
+    if not (0 <= hours <= 47 and 0 <= minutes < 60 and 0 <= seconds < 60):
+        raise HTTPException(
+            status_code=422, detail=f"arrive_by out of range: {value!r}."
+        )
+    return hours * 3600 + minutes * 60 + seconds
+
+
+def _prune_dominated(
+    scored_routes: list[dict[str, Any]], latest_departure_first: bool = False
+) -> list[dict[str, Any]]:
     """
     Drop routes strictly worse than another on every axis, then sort by
     arrival time.
@@ -285,8 +309,13 @@ def _prune_dominated(scored_routes: list[dict[str, Any]]) -> list[dict[str, Any]
             survivors.append((m_i, route))
 
     # Earliest arrival first (ties by risk, then transfers) — Yen's path
-    # weight is not a meaningful presentation order for riders.
-    survivors.sort(key=lambda mr: (mr[0][1], mr[0][3], mr[0][2]))
+    # weight is not a meaningful presentation order for riders.  Under an
+    # arrive-by query every survivor already meets the deadline, so the useful
+    # order is instead the one that lets the rider leave latest.
+    if latest_departure_first:
+        survivors.sort(key=lambda mr: (-mr[0][0], mr[0][3], mr[0][2]))
+    else:
+        survivors.sort(key=lambda mr: (mr[0][1], mr[0][3], mr[0][2]))
     return [route for _m, route in survivors] + incomparable
 
 
@@ -295,13 +324,18 @@ def _score_routes_blocking(
     destination: str,
     departure_dt: datetime,
     session: Session,
+    arrive_by_sec: int | None = None,
 ) -> list[dict[str, Any]]:
     """
     Blocking part of GET /routes: cache lookup, route generation, and risk
     scoring.  Called via asyncio.to_thread so the event loop stays free.
     Raises HTTPException on routing failures (propagates through the await).
+
+    With arrive_by_sec set, departure_dt supplies only the travel date and the
+    search runs backwards from that deadline instead.
     """
-    cache_key = _routes_cache_key(origin, destination, departure_dt)
+    mode = "depart" if arrive_by_sec is None else "arrive"
+    cache_key = _routes_cache_key(origin, destination, departure_dt, mode)
     routes = _get_cached_routes(cache_key)
     if routes is None:
         key_lock = _inflight_lock_for(cache_key)
@@ -312,12 +346,21 @@ def _score_routes_blocking(
                 routes = _get_cached_routes(cache_key)
                 if routes is None:
                     try:
-                        routes = find_routes(
-                            origin, destination,
-                            departure_dt=departure_dt,
-                            session=session,
-                            max_routes=MAX_ROUTES,
-                        )
+                        if arrive_by_sec is None:
+                            routes = find_routes(
+                                origin, destination,
+                                departure_dt=departure_dt,
+                                session=session,
+                                max_routes=MAX_ROUTES,
+                            )
+                        else:
+                            routes = find_routes_arriving_by(
+                                origin, destination,
+                                arrive_by_sec=arrive_by_sec,
+                                travel_day=departure_dt.date(),
+                                session=session,
+                                max_routes=MAX_ROUTES,
+                            )
                     except ValueError as exc:
                         raise HTTPException(status_code=404, detail=str(exc))
                     except Exception as exc:
@@ -407,7 +450,7 @@ def _score_routes_blocking(
             "risk_label": risk_label(overall_risk),
         })
 
-    return _prune_dominated(scored_routes)
+    return _prune_dominated(scored_routes, latest_departure_first=arrive_by_sec is not None)
 
 
 @router.get("/routes", response_model=RoutesResponse)
@@ -424,6 +467,16 @@ async def get_routes(
         max_length=10,
         description="Travel date as YYYY-MM-DD. Defaults to today.",
     ),
+    arrive_by: str | None = Query(
+        None,
+        max_length=8,
+        description=(
+            "Latest acceptable arrival as HH:MM or HH:MM:SS, returning the "
+            "latest-departing options that still make it. GTFS convention "
+            "applies, so 25:30 means 01:30 the next morning. Cannot be "
+            "combined with departure_time."
+        ),
+    ),
     explain: bool = Query(False, description="Include LLM plain-language explanation"),
     session: Session = Depends(get_session),
     _: None = Depends(_rate_limit),
@@ -438,6 +491,11 @@ async def get_routes(
         raise HTTPException(
             status_code=422,
             detail="Origin and destination must be different stops.",
+        )
+    if arrive_by and departure_time:
+        raise HTTPException(
+            status_code=422,
+            detail="Specify either departure_time or arrive_by, not both.",
         )
 
     # Parse departure datetime, defaulting to now in the agency's timezone.
@@ -456,10 +514,18 @@ async def get_routes(
     except (ValueError, IndexError) as exc:
         raise HTTPException(status_code=422, detail=f"Invalid date/time parameter: {exc}")
 
+    # Kept as seconds past midnight rather than a datetime: GTFS deadlines may
+    # exceed 24:00:00, which datetime cannot represent.
+    arrive_by_sec: int | None = None
+    if arrive_by:
+        arrive_by_sec = _parse_arrive_by(arrive_by)
+        # departure_dt then carries only the travel date.
+        departure_dt = datetime(base_date.year, base_date.month, base_date.day)
+
     # Routing and risk scoring are sync DB/CPU work; run off the event loop
     # so a slow request doesn't stall concurrent ones.
     scored_routes = await asyncio.to_thread(
-        _score_routes_blocking, origin, destination, departure_dt, session
+        _score_routes_blocking, origin, destination, departure_dt, session, arrive_by_sec
     )
 
     response: dict[str, Any] = {"routes": scored_routes}
