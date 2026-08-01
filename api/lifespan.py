@@ -20,10 +20,12 @@ from datetime import datetime, timezone
 from typing import Any
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 from fastapi import FastAPI
 
 from api.cache import _clear_routes_cache
 from config import (
+    AGENCY_TZ,
     GTFS_REFRESH_HOURS,
     GTFS_RT_ALERTS_URL,
     GTFS_RT_API_KEY,
@@ -42,6 +44,27 @@ from reliability.historical import decay_reliability_records
 logger = logging.getLogger(__name__)
 
 scheduler = AsyncIOScheduler()
+
+# Agency-local hour for the daily static refresh — small hours, when a ~2M-row
+# ingest and graph rebuild disturb the fewest requests.
+_DAILY_REFRESH_HOUR = 3
+
+
+def _daily_refresh_trigger() -> CronTrigger:
+    """Wall-clock trigger for the daily static refresh.
+
+    Must be cron, not interval: an interval trigger has no anchor, so
+    APScheduler sets its first fire to boot + GTFS_REFRESH_HOURS and every
+    restart inside that window pushes it back out.  A process that redeploys
+    or reboots daily would then never refresh at all — and never decay
+    reliability counters or clear the route cache either, since this job is
+    the only caller of both.  Cron fires at absolute agency-local times, so
+    restarts cannot starve it.
+    """
+    hours = max(1, GTFS_REFRESH_HOURS)
+    if hours >= 24:
+        return CronTrigger(hour=_DAILY_REFRESH_HOUR, minute=0, timezone=AGENCY_TZ)
+    return CronTrigger(hour=f"*/{hours}", minute=0, timezone=AGENCY_TZ)
 
 # ---------------------------------------------------------------------------
 # Ingest job state — the manual endpoint and the daily scheduled refresh
@@ -215,8 +238,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Daily GTFS static refresh — always registered regardless of RT key.
     scheduler.add_job(
         _daily_gtfs_refresh,
-        "interval",
-        hours=GTFS_REFRESH_HOURS,
+        _daily_refresh_trigger(),
         id="daily_gtfs_refresh",
     )
 
@@ -237,8 +259,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         logger.info("GTFS-RT polling disabled — GTFS_RT_API_KEY not set.")
 
     scheduler.start()
+    refresh_job = scheduler.get_job("daily_gtfs_refresh")
     logger.info(
-        "Scheduler started. Daily GTFS refresh every %dh.", GTFS_REFRESH_HOURS
+        "Scheduler started. GTFS refresh every %dh; next run %s.",
+        GTFS_REFRESH_HOURS,
+        refresh_job.next_run_time.isoformat() if refresh_job else "unscheduled",
     )
 
     yield

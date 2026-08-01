@@ -19,6 +19,7 @@ import api.cache as cache_mod
 import api.lifespan as lifespan_mod
 import api.ratelimit as ratelimit_mod
 import api.routes as routes_mod
+from config import AGENCY_TZ
 from db.models import Base, Stop
 from db.session import get_session
 
@@ -817,6 +818,63 @@ class TestIngestBackground:
 # ---------------------------------------------------------------------------
 # _daily_gtfs_refresh job function
 # ---------------------------------------------------------------------------
+
+class TestDailyRefreshTrigger:
+    """The refresh trigger must be anchored to wall-clock time.
+
+    With an interval trigger APScheduler set the first fire to
+    boot + GTFS_REFRESH_HOURS, so any restart inside that window pushed it
+    out again and a daily-restarting process never refreshed — nor decayed
+    reliability counters, nor cleared the route cache, since this job is the
+    only caller of both.
+    """
+
+    def _next(self, trigger, now):
+        return trigger.get_next_fire_time(None, now)
+
+    def test_daily_fires_at_the_fixed_agency_hour(self):
+        from api.lifespan import _DAILY_REFRESH_HOUR, _daily_refresh_trigger
+
+        trigger = _daily_refresh_trigger()
+        now = datetime(2026, 7, 31, 9, 17, tzinfo=AGENCY_TZ)
+        nxt = self._next(trigger, now)
+        assert nxt.hour == _DAILY_REFRESH_HOUR
+        assert nxt.minute == 0
+
+    def test_fire_time_is_independent_of_boot_time(self):
+        """Two processes booting hours apart must target the same instant —
+        the property the interval trigger lacked."""
+        from api.lifespan import _daily_refresh_trigger
+
+        trigger = _daily_refresh_trigger()
+        early = self._next(trigger, datetime(2026, 7, 31, 4, 0, tzinfo=AGENCY_TZ))
+        late = self._next(trigger, datetime(2026, 7, 31, 23, 30, tzinfo=AGENCY_TZ))
+        assert early == late
+
+    def test_restart_does_not_push_the_run_a_full_window_away(self):
+        from api.lifespan import _daily_refresh_trigger
+
+        trigger = _daily_refresh_trigger()
+        now = datetime(2026, 7, 31, 2, 55, tzinfo=AGENCY_TZ)
+        nxt = self._next(trigger, now)
+        assert (nxt - now).total_seconds() == 5 * 60  # 5 minutes, not 24 hours
+
+    def test_sub_daily_refresh_hours_use_a_step_schedule(self):
+        from api.lifespan import _daily_refresh_trigger
+
+        with patch("api.lifespan.GTFS_REFRESH_HOURS", 6):
+            trigger = _daily_refresh_trigger()
+        now = datetime(2026, 7, 31, 7, 30, tzinfo=AGENCY_TZ)
+        nxt = self._next(trigger, now)
+        assert (nxt.hour, nxt.minute) == (12, 0)
+
+    def test_zero_refresh_hours_does_not_crash_the_trigger(self):
+        from api.lifespan import _daily_refresh_trigger
+
+        with patch("api.lifespan.GTFS_REFRESH_HOURS", 0):
+            trigger = _daily_refresh_trigger()
+        assert self._next(trigger, datetime(2026, 7, 31, 7, 30, tzinfo=AGENCY_TZ)) is not None
+
 
 class TestDailyGtfsRefreshJob:
 
