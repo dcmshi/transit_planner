@@ -14,6 +14,7 @@ On startup:
 
 import asyncio
 import logging
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
@@ -186,7 +187,7 @@ async def _rt_poll_and_observe() -> None:
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Startup — validate required config early so problems surface immediately.
     if not GTFS_STATIC_URL:
         logger.warning(

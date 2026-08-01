@@ -95,19 +95,19 @@ def _make_stop(stop_id: str, lat: float, lon: float):
 class TestAddWalkEdges:
 
     def test_no_stops_produces_no_edges(self):
-        G = nx.MultiDiGraph()
+        G: nx.MultiDiGraph[str] = nx.MultiDiGraph()
         _add_walk_edges_bisect(G, [])
         assert G.number_of_edges() == 0
 
     def test_single_stop_no_self_loop(self):
-        G = nx.MultiDiGraph()
+        G: nx.MultiDiGraph[str] = nx.MultiDiGraph()
         G.add_node("A")
         _add_walk_edges_bisect(G, [_make_stop("A", 43.6453, -79.3806)])
         assert G.number_of_edges() == 0
 
     def test_nearby_stops_get_walk_edge(self):
         # Two stops ~333 m apart — within MAX_WALK_METRES (500 m).
-        G = nx.MultiDiGraph()
+        G: nx.MultiDiGraph[str] = nx.MultiDiGraph()
         stops = [
             _make_stop("A", 43.6453, -79.3806),
             _make_stop("B", 43.6483, -79.3806),  # ~333 m north
@@ -120,7 +120,7 @@ class TestAddWalkEdges:
 
     def test_distant_stops_get_no_walk_edge(self):
         # Two stops ~5 km apart — well beyond MAX_WALK_METRES.
-        G = nx.MultiDiGraph()
+        G: nx.MultiDiGraph[str] = nx.MultiDiGraph()
         stops = [
             _make_stop("A", 43.6453, -79.3806),
             _make_stop("B", 43.6000, -79.3400),  # ~6 km away
@@ -132,7 +132,7 @@ class TestAddWalkEdges:
         assert not G.has_edge("B", "A")
 
     def test_walk_edge_attributes(self):
-        G = nx.MultiDiGraph()
+        G: nx.MultiDiGraph[str] = nx.MultiDiGraph()
         stops = [
             _make_stop("A", 43.6453, -79.3806),
             _make_stop("B", 43.6483, -79.3806),
@@ -159,7 +159,7 @@ class TestAddWalkEdges:
         ]
 
         # Spatial index result
-        G_idx = nx.MultiDiGraph()
+        G_idx: nx.MultiDiGraph[str] = nx.MultiDiGraph()
         for s in raw:
             G_idx.add_node(s.stop_id)
         _add_walk_edges_bisect(G_idx, raw)
@@ -167,7 +167,7 @@ class TestAddWalkEdges:
 
         # Brute-force reference
         from graph.builder import _haversine_metres
-        G_bf = nx.MultiDiGraph()
+        G_bf: nx.MultiDiGraph[str] = nx.MultiDiGraph()
         for a in raw:
             for b in raw:
                 if a.stop_id == b.stop_id:

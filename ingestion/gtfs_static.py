@@ -15,6 +15,7 @@ import io
 import logging
 import zipfile
 from datetime import datetime
+from typing import Any, cast
 
 import httpx
 import pandas as pd
@@ -42,7 +43,7 @@ logger = logging.getLogger(__name__)
 GTFS_ZIP_PATH = DATA_DIR / "gtfs_static.zip"
 
 
-def _int_or(value, default: int) -> int:
+def _int_or(value: Any, default: int) -> int:
     """int(value), or default for blank/garbage — one bad optional field
     must not abort a 2M-row ingest."""
     try:
@@ -241,7 +242,7 @@ def _parse_stop_times(df: pd.DataFrame, session: Session) -> None:
         try:
             # Ordering-critical — a garbage value can't be defaulted, but
             # one bad row must not abort the whole ingest either.
-            stop_sequence = int(row.stop_sequence)
+            stop_sequence = int(cast(Any, row.stop_sequence))
         except (ValueError, TypeError):
             skipped += 1
             continue

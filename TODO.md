@@ -8,6 +8,28 @@ per-item detail lives in the commit messages for 2026-07-10.
 
 ## Open items
 
+### ✅ mypy in CI (done 2026-07-31)
+
+> `uv run mypy` is clean across all 38 source files and gates CI as a `Type
+> check` step in the `lint-and-test` job.  Config in `pyproject.toml`:
+> `disallow_untyped_defs` for application code, relaxed for `tests.*` (the
+> only violations were 434 pytest functions missing `-> None`), plus
+> `ignore_missing_imports` for `google.transit` and `apscheduler`, which
+> publish no stubs.  Stub packages added as dev deps: `pandas-stubs`,
+> `types-networkx`, `types-shapely`.
+>
+> The bulk of the 60 initial errors traced to `Base = declarative_base()`,
+> which mypy cannot type at all — `db/models.py` now uses SQLAlchemy 2.0
+> `DeclarativeBase` with `Mapped[...]`/`mapped_column()`, verified DDL-neutral
+> by diffing `CreateTable`/`CreateIndex` output plus per-column nullable,
+> default, PK, and FK facts on both the SQLite and PostGIS branches.
+>
+> Two genuine defects fell out: nullable reliability counters raised
+> `TypeError` on any NULL row (`None < _MIN_SCHEDULED`) — now routed to the
+> neutral prior via `_count()`, with regression tests — and a `legs` loop
+> variable in `routing/engine.py` shadowed an `Optional` result, making the
+> `if legs is None` guard dead to the type checker.
+
 ### ✅ Split `api/main.py` into modules (done 2026-07-10)
 
 > `api/main.py` is now ~35 lines of app assembly; concerns moved to
@@ -67,5 +89,3 @@ adopting Alembic instead of manual SQL.
   Toronto–Guelph corridor where service ends before midnight.
 - **Risk aggregation: max leg risk vs weighted sum** (ADR-006) — revisit
   once enough real GTFS-RT observations accumulate.
-- **mypy** — optional; the codebase is well-annotated so it's mostly free
-  coverage on top of ruff.

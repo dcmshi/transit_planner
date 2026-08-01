@@ -5,10 +5,13 @@ These tests have no DB or graph dependency — they exercise only the
 logic that lives entirely inside routing/engine.py.
 """
 
+from collections.abc import Sequence
+from typing import cast
+
 import networkx as nx
 import pytest
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from config import MIN_TRANSFER_MINUTES
@@ -107,17 +110,19 @@ class TestFindRoutesNoPath:
         import graph.builder as builder_mod
         from routing.engine import find_routes
 
-        G = nx.MultiDiGraph()
+        G: nx.MultiDiGraph[str] = nx.MultiDiGraph()
         G.add_node("A", name="Stop A", lat=43.0, lon=-79.0)
         G.add_node("B", name="Stop B", lat=43.1, lon=-79.1)  # no edges
-        H = nx.DiGraph()
+        H: nx.DiGraph[str] = nx.DiGraph()
         H.add_nodes_from(G.nodes(data=True))
 
         old = builder_mod._graphs
         builder_mod._graphs = (G, H)
         try:
+            # No path exists, so find_routes returns before touching the session.
             routes = find_routes(
-                "A", "B", departure_dt=datetime(2026, 2, 11, 8, 0), session=None
+                "A", "B", departure_dt=datetime(2026, 2, 11, 8, 0),
+                session=cast(Session, None),
             )
         finally:
             builder_mod._graphs = old
@@ -437,7 +442,7 @@ class TestFillLaterDepartures:
             self._make_route("T1", "08:00:00", "09:00:00"),
             self._make_route("T2", "10:00:00", "11:00:00"),
         ]
-        seen = {("T1",), ("T2",)}
+        seen: set[tuple[str, ...]] = {("T1",), ("T2",)}
         result = _fill_later_departures(
             MagicMock(), nx.MultiDiGraph(),
             routes, [["A", "B"], ["A", "B"]],
@@ -467,7 +472,7 @@ class TestFillLaterDepartures:
         monkeypatch.setattr(eng, "_passes_filters", lambda legs: True)
 
         routes = [self._make_route("T1", "08:00:00", "09:00:00")]
-        seen = {("T1",)}
+        seen: set[tuple[str, ...]] = {("T1",)}
         result = _fill_later_departures(
             MagicMock(), nx.MultiDiGraph(),
             routes, [["A", "B"]],
@@ -499,7 +504,7 @@ class TestFillLaterDepartures:
         monkeypatch.setattr(eng, "_passes_filters", lambda legs: True)
 
         routes = [self._make_route("T_orig", "08:00:00", "09:00:00")]
-        seen = {("T_orig",), ("T2",)}  # T2's signature already known
+        seen: set[tuple[str, ...]] = {("T_orig",), ("T2",)}  # T2's signature already known
         result = _fill_later_departures(
             MagicMock(), nx.MultiDiGraph(),
             routes, [["A", "B"]],
@@ -535,7 +540,7 @@ class TestFillLaterDepartures:
         )
 
         routes = [self._make_route("T1", "08:00:00", "09:00:00")]
-        seen = {("T1",)}
+        seen: set[tuple[str, ...]] = {("T1",)}
         result = _fill_later_departures(
             MagicMock(), nx.MultiDiGraph(),
             routes, [["A", "B"]],
@@ -566,7 +571,7 @@ class TestFillLaterDepartures:
         monkeypatch.setattr(eng, "_passes_filters", lambda legs: False)
 
         routes = [self._make_route("T_orig", "08:00:00", "09:00:00")]
-        seen = {("T_orig",)}
+        seen: set[tuple[str, ...]] = {("T_orig",)}
         result = _fill_later_departures(
             MagicMock(), nx.MultiDiGraph(),
             routes, [["A", "B"]],
@@ -586,7 +591,7 @@ class TestFillLaterDepartures:
         monkeypatch.setattr(eng, "_schedule_path", lambda *a, **kw: None)
 
         routes = [self._make_route("T1", "08:00:00", "09:00:00")]
-        seen = {("T1",)}
+        seen: set[tuple[str, ...]] = {("T1",)}
         result = _fill_later_departures(
             MagicMock(), nx.MultiDiGraph(),
             routes, [["A", "B"]],
@@ -599,12 +604,14 @@ class TestFillLaterDepartures:
 # _pick_longest_route
 # ---------------------------------------------------------------------------
 
-def _make_graph_with_routes(stop_pairs: list[tuple[str, str, str, float]]) -> nx.MultiDiGraph:
+def _make_graph_with_routes(
+    stop_pairs: Sequence[tuple[str, str, str, float]],
+) -> nx.MultiDiGraph:
     """
     Build a MultiDiGraph from (u, v, route_id, weight) tuples.
     Each edge has kind="trip".
     """
-    G = nx.MultiDiGraph()
+    G: nx.MultiDiGraph[str] = nx.MultiDiGraph()
     for u, v, route_id, weight in stop_pairs:
         for node in (u, v):
             if node not in G:
@@ -660,7 +667,7 @@ class TestPickLongestRoute:
         route shadow a faster one."""
         from routing.engine import _rank_routes_by_coverage
 
-        G = nx.MultiDiGraph()
+        G: nx.MultiDiGraph[str] = nx.MultiDiGraph()
         for node in ("A", "B", "C"):
             G.add_node(node, name=f"Stop {node}")
         # R_slow wins hop 1 (100 vs 200) but loses the segment (100+900
@@ -678,7 +685,7 @@ class TestPickLongestRoute:
         ranked by corridor coverage first, then weight."""
         from routing.engine import _rank_routes_by_coverage
 
-        G = nx.MultiDiGraph()
+        G: nx.MultiDiGraph[str] = nx.MultiDiGraph()
         for node in ("A", "B", "C"):
             G.add_node(node, name=f"Stop {node}")
         G.add_edge("A", "B", route_id="R1", weight=10, kind="trip")
@@ -729,7 +736,7 @@ def trip_db():
 
 
 def _make_trip_graph() -> nx.MultiDiGraph:
-    G = nx.MultiDiGraph()
+    G: nx.MultiDiGraph[str] = nx.MultiDiGraph()
     for stop_id, name in [("S1", "Stop 1"), ("S2", "Stop 2"), ("S3", "Stop 3")]:
         G.add_node(stop_id, name=name)
     G.add_edge("S1", "S2", route_id="R1", weight=1800, kind="trip")

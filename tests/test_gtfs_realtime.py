@@ -490,6 +490,7 @@ class TestTimezoneHandling:
 
     def test_parse_scheduled_at_past_midnight_rolls_wall_clock(self):
         dt = rt_mod._parse_scheduled_at("25:15:00", "20260710")
+        assert dt is not None
         assert (dt.day, dt.hour, dt.minute) == (11, 1, 15)
         assert dt.tzinfo is not None
 
@@ -765,12 +766,15 @@ class TestPollAll:
                        new=AsyncMock(return_value=False)), \
                  patch("ingestion.gtfs_realtime.poll_vehicle_positions",
                        new=AsyncMock(return_value=False)):
+                # Annotated because poll_all() sets the global out of band —
+                # without it the reset below narrows backoff_2 to None.
                 await poll_all()  # failure #1 → 60s backoff
-                backoff_1 = rt_mod._backoff_until
+                backoff_1: datetime | None = rt_mod._backoff_until
                 rt_mod._backoff_until = None  # reset so next call isn't skipped
 
                 await poll_all()  # failure #2 → 120s backoff
-                backoff_2 = rt_mod._backoff_until
+                backoff_2: datetime | None = rt_mod._backoff_until
 
         # Second backoff should be further in the future than first
+        assert backoff_1 is not None and backoff_2 is not None
         assert backoff_2 > backoff_1

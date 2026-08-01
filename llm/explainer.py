@@ -93,8 +93,8 @@ def _route_number(route_id: str) -> str:
     return f"Route {suffix or route_id}"
 
 
-def _hhmm(time_str: str) -> str:
-    """Trim HH:MM:SS (or already HH:MM) to HH:MM."""
+def _hhmm(time_str: str | None) -> str | None:
+    """Trim HH:MM:SS (or already HH:MM) to HH:MM; passes None/"" through."""
     return time_str[:5] if time_str else time_str
 
 
@@ -207,8 +207,6 @@ def _build_llm_payload(
     # Reduce alerts to header text only — nested structures confuse small models
     alert_headers: list[str] = []
     for alert in active_alerts:
-        if not isinstance(alert, dict):
-            continue
         header = (
             alert.get("header_text")
             or alert.get("header")
@@ -234,7 +232,7 @@ def _build_llm_payload(
         order = sorted(
             range(len(simplified_routes)),
             key=lambda i: (
-                label_rank.get(routes_with_scores[i].get("risk_label"), 3),
+                label_rank.get(routes_with_scores[i].get("risk_label", ""), 3),
                 routes_with_scores[i].get("total_travel_seconds", 0),
             ),
         )

@@ -23,8 +23,12 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "mypy>=2.3.0",
+    "pandas-stubs>=3.0.5.260730",
     "pytest>=8.0.0",
     "ruff>=0.15.21",
+    "types-networkx>=3.6.1.20260728",
+    "types-shapely>=2.1.0.20260728",
 ]
 
 [tool.ruff]
@@ -36,6 +40,29 @@ target-version = "py311"
 # E501 (line length) intentionally not selected — docstrings and SQL
 # literals run long; readability wins.
 select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["."]
+exclude = ["^\\.venv/"]
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_unreachable = true
+no_implicit_optional = true
+check_untyped_defs = true
+disallow_untyped_defs = true
+
+# No stubs published and no py.typed marker: gtfs-realtime-bindings ships
+# generated protobuf modules, apscheduler 3.x predates inline typing.
+[[tool.mypy.overrides]]
+module = ["google.transit.*", "apscheduler.*"]
+ignore_missing_imports = true
+
+# Test bodies are still checked; only the "-> None" on every test function
+# is waived — 400+ signatures of pure ceremony that catch nothing.
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+disallow_untyped_defs = false
 
 [tool.ruff.lint.isort]
 known-first-party = [

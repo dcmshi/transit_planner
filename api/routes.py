@@ -7,6 +7,12 @@ Endpoint handlers (v1):
   POST /ingest/gtfs-static     (202 — background)
   GET  /ingest/status
   POST /ingest/reliability-seed
+
+Handlers build plain dicts and return them; the `response_model=` on each
+decorator is what validates and serialises the wire format.  The return
+annotations say `dict[str, Any]` because that is what the functions actually
+return — annotating them with the response model instead would be a lie
+FastAPI happens to paper over.
 """
 
 import asyncio
@@ -85,7 +91,7 @@ def _require_ingest_key(key: str | None = Security(_ingest_key_header)) -> None:
 
 
 @router.get("/health", response_model=HealthResponse)
-def health(session: Session = Depends(get_session)) -> HealthResponse:
+def health(session: Session = Depends(get_session)) -> dict[str, Any]:
     """
     Liveness + data-freshness check.
 
@@ -168,7 +174,7 @@ def search_stops(
     query: str = Query(..., min_length=2, max_length=128, description="Stop name substring to search"),
     session: Session = Depends(get_session),
     _: None = Depends(_rate_limit),
-) -> list[StopResult]:
+) -> list[dict[str, Any]]:
     """Search stops by name substring."""
     from collections import defaultdict
 
@@ -210,7 +216,7 @@ def search_stops(
 
 
 @router.get("/alerts", response_model=list[AlertResult])
-def get_alerts(_: None = Depends(_rate_limit)) -> list[AlertResult]:
+def get_alerts(_: None = Depends(_rate_limit)) -> list[dict[str, Any]]:
     """Active GTFS-RT service alerts — lets a frontend show a disruption
     banner without requesting routes.  Empty until RT polling is active."""
     # list(...) snapshot: this sync endpoint runs in a worker thread while
@@ -422,7 +428,7 @@ async def get_routes(
     explain: bool = Query(False, description="Include LLM plain-language explanation"),
     session: Session = Depends(get_session),
     _: None = Depends(_rate_limit),
-) -> RoutesResponse:
+) -> dict[str, Any]:
     """
     Return top-N scored routes from origin to destination.
 
@@ -482,7 +488,7 @@ async def get_routes(
 @router.post("/ingest/gtfs-static", response_model=IngestResponse, status_code=202)
 async def trigger_gtfs_ingest(
     _: None = Depends(_require_ingest_key),
-) -> IngestResponse:
+) -> dict[str, Any]:
     """
     Trigger a GTFS static data refresh, graph rebuild, and reliability
     reseed in the background.  (In production this also runs on a daily
@@ -505,7 +511,7 @@ async def trigger_gtfs_ingest(
 
 
 @router.get("/ingest/status", response_model=IngestStatusResponse)
-def ingest_status(_: None = Depends(_require_ingest_key)) -> IngestStatusResponse:
+def ingest_status(_: None = Depends(_require_ingest_key)) -> dict[str, Any]:
     """State of the current/most recent ingest (manual or daily refresh)."""
     return dict(_ingest_state)
 
@@ -515,7 +521,7 @@ def trigger_reliability_seed(
     window_days: int = Query(14, ge=1, le=90, description="Days of schedule to sample"),
     session: Session = Depends(get_session),
     _: None = Depends(_require_ingest_key),
-) -> SeedResponse:
+) -> dict[str, Any]:
     """
     Seed reliability_records from the static GTFS schedule.
 

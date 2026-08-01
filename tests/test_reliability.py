@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from unittest.mock import patch
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -658,6 +658,33 @@ class TestGetHistoricalReliability:
         score = get_historical_reliability("R1", "S1", "weekday_pm_peak", hist_db)
         # observed_rate=1.0, cancel_rate=0.0, delay_penalty=0.2 → 0.8
         assert score == pytest.approx(0.8, abs=1e-6)
+
+    def test_null_counters_return_neutral_prior(self, hist_db):
+        """The four counter columns are nullable, so a row written by raw SQL
+        (or an ALTER that back-filled nothing) can hold NULL.  That used to
+        raise TypeError comparing None < _MIN_SCHEDULED."""
+        hist_db.execute(text(
+            "INSERT INTO reliability_records "
+            "(route_id, stop_id, time_bucket, source) VALUES "
+            "('R1', 'S1', 'weekday_am_peak', 'observed')"
+        ))
+        hist_db.commit()
+        score = get_historical_reliability("R1", "S1", "weekday_am_peak", hist_db)
+        assert score == pytest.approx(0.8)
+
+    def test_null_counters_skipped_by_batch_lookup(self, hist_db):
+        from reliability.historical import get_historical_reliability_batch
+
+        hist_db.execute(text(
+            "INSERT INTO reliability_records "
+            "(route_id, stop_id, time_bucket, source) VALUES "
+            "('R1', 'S1', 'weekday_am_peak', 'observed')"
+        ))
+        hist_db.commit()
+        scores = get_historical_reliability_batch(
+            [("R1", "S1", "weekday_am_peak")], hist_db
+        )
+        assert scores == {}
 
 
 # ---------------------------------------------------------------------------

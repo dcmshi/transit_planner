@@ -418,7 +418,7 @@ def _find_trip_legs(
                 .order_by(StopTime.stop_sequence)
                 .all()
             )
-            full_stop_map = {st.stop_id: st for st in stop_rows}
+            full_stop_map = {st.stop_id: st for st in stop_rows if st.stop_id is not None}
             if cache is not None:
                 cache.stop_times[trip_id] = full_stop_map
 
@@ -600,8 +600,8 @@ def _fill_later_departures(
 
     # Seed each path's not_before with 1 second past its first trip departure.
     path_not_before: list[int | None] = []
-    for legs in routes:
-        first_trip = next((leg for leg in legs if leg["kind"] == "trip"), None)
+    for seed_legs in routes:
+        first_trip = next((leg for leg in seed_legs if leg["kind"] == "trip"), None)
         if first_trip:
             path_not_before.append(_hms_to_seconds(first_trip["departure_time"]) + 1)
         else:

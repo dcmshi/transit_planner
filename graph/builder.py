@@ -75,7 +75,7 @@ def build_graph(session: Session) -> nx.MultiDiGraph:
     Returns the graph and stores it in the module-level cache.
     """
     global _graphs, _last_built_at
-    G = nx.MultiDiGraph()
+    G: nx.MultiDiGraph[str] = nx.MultiDiGraph()
 
     stops = session.query(Stop).all()
     _add_stop_nodes(G, stops)
@@ -83,7 +83,7 @@ def build_graph(session: Session) -> nx.MultiDiGraph:
     _add_walk_edges(G, session, stops)
 
     # Pre-compute the min-weight DiGraph projection used by Yen's algorithm.
-    H = nx.DiGraph()
+    H: nx.DiGraph[str] = nx.DiGraph()
     H.add_nodes_from(G.nodes(data=True))
     for u, v, edge_data in G.edges(data=True):
         w = edge_data.get("weight", float("inf"))

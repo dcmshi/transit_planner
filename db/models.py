@@ -4,10 +4,16 @@ SQLAlchemy ORM models for GTFS static data and reliability tracking.
 GTFS time fields (arrival_time, departure_time) are stored as HH:MM:SS strings
 because the GTFS spec allows values >= 24:00:00 for trips crossing midnight.
 Application code converts to integer seconds-past-midnight when needed.
+
+Column types come from the `Mapped[...]` annotations: `Mapped[str]` is a
+NOT NULL VARCHAR, `Mapped[str | None]` a nullable one.  Annotate nullability
+deliberately — it is the DDL, not a hint.
 """
 
-from sqlalchemy import Boolean, Column, Float, ForeignKey, Index, Integer, String
-from sqlalchemy.orm import declarative_base, relationship
+from typing import Any
+
+from sqlalchemy import ForeignKey, Index, String
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from config import DATABASE_URL
 
@@ -17,88 +23,92 @@ try:
 except ImportError:
     _HAS_POSTGIS = False
 
-Base = declarative_base()
+
+class Base(DeclarativeBase):
+    pass
 
 
 class Stop(Base):
     __tablename__ = "stops"
 
-    stop_id = Column(String, primary_key=True)
-    stop_name = Column(String, nullable=False)
-    stop_lat = Column(Float, nullable=False)
-    stop_lon = Column(Float, nullable=False)
-    stop_code = Column(String, nullable=True)
+    stop_id: Mapped[str] = mapped_column(primary_key=True)
+    stop_name: Mapped[str]
+    stop_lat: Mapped[float]
+    stop_lon: Mapped[float]
+    stop_code: Mapped[str | None]
     # PostGIS geography column — populated during ingestion when using PostgreSQL.
     # On SQLite (tests/dev) the column is a plain String and is not used.
-    geog = Column(
+    geog: Mapped[Any | None] = mapped_column(
         _Geography(geometry_type="POINT", srid=4326) if _HAS_POSTGIS else String,
         nullable=True,
     )
 
-    stop_times = relationship("StopTime", back_populates="stop")
+    stop_times: Mapped[list["StopTime"]] = relationship(back_populates="stop")
 
 
 class Route(Base):
     __tablename__ = "routes"
 
-    route_id = Column(String, primary_key=True)
-    route_short_name = Column(String)
-    route_long_name = Column(String)
-    route_type = Column(Integer)  # 3 = bus
+    route_id: Mapped[str] = mapped_column(primary_key=True)
+    route_short_name: Mapped[str | None]
+    route_long_name: Mapped[str | None]
+    route_type: Mapped[int | None]  # 3 = bus
 
-    trips = relationship("Trip", back_populates="route")
+    trips: Mapped[list["Trip"]] = relationship(back_populates="route")
 
 
 class Trip(Base):
     __tablename__ = "trips"
 
-    trip_id = Column(String, primary_key=True)
-    route_id = Column(String, ForeignKey("routes.route_id"), index=True)
-    service_id = Column(String, index=True)
-    trip_headsign = Column(String)
-    direction_id = Column(Integer)
-    shape_id = Column(String, nullable=True)
+    trip_id: Mapped[str] = mapped_column(primary_key=True)
+    route_id: Mapped[str | None] = mapped_column(ForeignKey("routes.route_id"), index=True)
+    service_id: Mapped[str | None] = mapped_column(index=True)
+    trip_headsign: Mapped[str | None]
+    direction_id: Mapped[int | None]
+    shape_id: Mapped[str | None]
 
-    route = relationship("Route", back_populates="trips")
-    stop_times = relationship("StopTime", back_populates="trip", order_by="StopTime.stop_sequence")
+    route: Mapped["Route | None"] = relationship(back_populates="trips")
+    stop_times: Mapped[list["StopTime"]] = relationship(
+        back_populates="trip", order_by="StopTime.stop_sequence"
+    )
 
 
 class StopTime(Base):
     __tablename__ = "stop_times"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    trip_id = Column(String, ForeignKey("trips.trip_id"), index=True)
-    arrival_time = Column(String, nullable=False)    # HH:MM:SS (may exceed 24:00:00)
-    departure_time = Column(String, nullable=False)  # HH:MM:SS (may exceed 24:00:00)
-    stop_id = Column(String, ForeignKey("stops.stop_id"), index=True)
-    stop_sequence = Column(Integer)
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    trip_id: Mapped[str | None] = mapped_column(ForeignKey("trips.trip_id"), index=True)
+    arrival_time: Mapped[str]    # HH:MM:SS (may exceed 24:00:00)
+    departure_time: Mapped[str]  # HH:MM:SS (may exceed 24:00:00)
+    stop_id: Mapped[str | None] = mapped_column(ForeignKey("stops.stop_id"), index=True)
+    stop_sequence: Mapped[int | None]
 
-    trip = relationship("Trip", back_populates="stop_times")
-    stop = relationship("Stop", back_populates="stop_times")
+    trip: Mapped["Trip | None"] = relationship(back_populates="stop_times")
+    stop: Mapped["Stop | None"] = relationship(back_populates="stop_times")
 
 
 class ServiceCalendar(Base):
     __tablename__ = "service_calendar"
 
-    service_id = Column(String, primary_key=True)
-    monday = Column(Boolean)
-    tuesday = Column(Boolean)
-    wednesday = Column(Boolean)
-    thursday = Column(Boolean)
-    friday = Column(Boolean)
-    saturday = Column(Boolean)
-    sunday = Column(Boolean)
-    start_date = Column(String, nullable=False)  # YYYYMMDD
-    end_date = Column(String, nullable=False)    # YYYYMMDD
+    service_id: Mapped[str] = mapped_column(primary_key=True)
+    monday: Mapped[bool | None]
+    tuesday: Mapped[bool | None]
+    wednesday: Mapped[bool | None]
+    thursday: Mapped[bool | None]
+    friday: Mapped[bool | None]
+    saturday: Mapped[bool | None]
+    sunday: Mapped[bool | None]
+    start_date: Mapped[str]  # YYYYMMDD
+    end_date: Mapped[str]    # YYYYMMDD
 
 
 class ServiceCalendarDate(Base):
     __tablename__ = "service_calendar_dates"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    service_id = Column(String, index=True)
-    date = Column(String, index=True)  # YYYYMMDD
-    exception_type = Column(Integer)   # 1 = service added, 2 = service removed
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    service_id: Mapped[str | None] = mapped_column(index=True)
+    date: Mapped[str | None] = mapped_column(index=True)  # YYYYMMDD
+    exception_type: Mapped[int | None]  # 1 = service added, 2 = service removed
 
 
 class ObservedTrip(Base):
@@ -111,8 +121,8 @@ class ObservedTrip(Base):
     """
     __tablename__ = "observed_trips"
 
-    trip_id = Column(String, primary_key=True)
-    recorded_date = Column(String, primary_key=True)  # YYYYMMDD (agency-local)
+    trip_id: Mapped[str] = mapped_column(primary_key=True)
+    recorded_date: Mapped[str] = mapped_column(primary_key=True)  # YYYYMMDD (agency-local)
 
 
 class ReliabilityRecord(Base):
@@ -125,22 +135,22 @@ class ReliabilityRecord(Base):
         Index("ix_reliability_route_stop_bucket", "route_id", "stop_id", "time_bucket"),
     )
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    route_id = Column(String)
-    stop_id = Column(String)
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    route_id: Mapped[str | None]
+    stop_id: Mapped[str | None]
     # e.g. "weekday_am_peak", "weekday_pm_peak", "weekday_offpeak", "weekend"
-    time_bucket = Column(String)
+    time_bucket: Mapped[str | None]
     # Provenance of the counts: "seed" = synthetic prior from the static
     # schedule, "observed" = built from real GTFS-RT observations only,
     # "mixed" = seeded record that has since absorbed real observations.
-    source = Column(String, nullable=False, default="observed")
+    source: Mapped[str] = mapped_column(default="observed")
     # Float, not Integer: the daily exponential decay multiplies these by
     # ~0.95 — integer rounding made every value <= 10 a fixed point that
     # never decayed, permanently freezing sparse (often bad) records.
-    observed_departures = Column(Float, default=0)
-    scheduled_departures = Column(Float, default=0)
-    total_delay_seconds = Column(Float, default=0)
-    cancellation_count = Column(Float, default=0)
-    window_start_date = Column(String)  # YYYYMMDD
-    window_end_date = Column(String)    # YYYYMMDD
-    updated_at = Column(String)         # ISO 8601 timestamp
+    observed_departures: Mapped[float | None] = mapped_column(default=0)
+    scheduled_departures: Mapped[float | None] = mapped_column(default=0)
+    total_delay_seconds: Mapped[float | None] = mapped_column(default=0)
+    cancellation_count: Mapped[float | None] = mapped_column(default=0)
+    window_start_date: Mapped[str | None]  # YYYYMMDD
+    window_end_date: Mapped[str | None]    # YYYYMMDD
+    updated_at: Mapped[str | None]         # ISO 8601 timestamp

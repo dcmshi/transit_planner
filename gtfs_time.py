@@ -11,13 +11,14 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def hms_to_seconds(hms: str) -> int:
+def hms_to_seconds(hms: str | None) -> int:
     """
     Convert HH:MM:SS (possibly HH > 23) to integer seconds past midnight.
-    Returns 0 (and logs a warning) on parse failure.
+    Returns 0 (and logs a warning) on parse failure, including None — the
+    nullable stop_times columns can hand one over.
     """
     try:
-        parts = hms.strip().split(":")
+        parts = hms.strip().split(":") if hms is not None else []
         return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
     except (ValueError, IndexError, AttributeError):
         logger.warning("hms_to_seconds: could not parse %r, defaulting to 0", hms)

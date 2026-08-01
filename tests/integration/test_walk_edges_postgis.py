@@ -8,11 +8,14 @@ Run with:
 """
 
 import os
+from typing import cast
 
 import networkx as nx
 import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
+
+from db.models import Stop
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
@@ -58,7 +61,7 @@ class TestWalkEdgesPostGIS:
         _insert_stop(pg_session, "_TEST_A", 43.6453, -79.3806)
         _insert_stop(pg_session, "_TEST_B", 43.6483, -79.3806)
         try:
-            G = nx.MultiDiGraph()
+            G: nx.MultiDiGraph[str] = nx.MultiDiGraph()
             G.add_node("_TEST_A")
             G.add_node("_TEST_B")
             _add_walk_edges_postgis(G, pg_session)
@@ -78,7 +81,7 @@ class TestWalkEdgesPostGIS:
         _insert_stop(pg_session, "_TEST_C", 43.6453, -79.3806)
         _insert_stop(pg_session, "_TEST_D", 43.6000, -79.3400)
         try:
-            G = nx.MultiDiGraph()
+            G: nx.MultiDiGraph[str] = nx.MultiDiGraph()
             G.add_node("_TEST_C")
             G.add_node("_TEST_D")
             _add_walk_edges_postgis(G, pg_session)
@@ -103,21 +106,21 @@ class TestWalkEdgesPostGIS:
 
         try:
             # PostGIS result
-            G_pg = nx.MultiDiGraph()
+            G_pg: nx.MultiDiGraph[str] = nx.MultiDiGraph()
             for sid, *_ in stops_data:
                 G_pg.add_node(sid)
             _add_walk_edges_postgis(G_pg, pg_session)
             pg_edges = {(u, v) for u, v, _ in G_pg.edges(data=True)}
 
             # Bisect result (in-process, no DB)
-            mock_stops = []
+            mock_stops: list[Stop] = []
             for sid, lat, lon in stops_data:
                 s = MagicMock()
                 s.stop_id = sid
                 s.stop_lat = lat
                 s.stop_lon = lon
-                mock_stops.append(s)
-            G_bx = nx.MultiDiGraph()
+                mock_stops.append(cast(Stop, s))
+            G_bx: nx.MultiDiGraph[str] = nx.MultiDiGraph()
             for sid, *_ in stops_data:
                 G_bx.add_node(sid)
             _add_walk_edges_bisect(G_bx, mock_stops)

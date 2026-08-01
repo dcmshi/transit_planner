@@ -18,8 +18,9 @@ Reliability score (0–1, higher = more reliable) is derived from:
 
 import logging
 from datetime import datetime, timezone
+from typing import Any, cast
 
-from sqlalchemy import text
+from sqlalchemy import CursorResult, text
 from sqlalchemy.orm import Session
 
 from config import AGENCY_TZ
@@ -53,13 +54,25 @@ NEUTRAL_PRIOR = 0.8
 _MIN_SCHEDULED = 0.5
 
 
+def _count(value: float | None) -> float:
+    """
+    Read a counter column as a number.  The four counters are nullable, so a
+    row inserted outside the ORM (raw SQL, or an ALTER that back-filled no
+    default) can hold NULL; treating that as 0 keeps it below _MIN_SCHEDULED
+    and routes it to the neutral prior instead of raising.
+    """
+    return value or 0.0
+
+
 def _score_record(record: ReliabilityRecord) -> float:
     """0–1 reliability score from a record's counters (see module docstring)."""
-    observed_rate = record.observed_departures / record.scheduled_departures
-    cancel_rate = record.cancellation_count / record.scheduled_departures
+    scheduled = _count(record.scheduled_departures)
+    observed = _count(record.observed_departures)
+    observed_rate = observed / scheduled
+    cancel_rate = _count(record.cancellation_count) / scheduled
     avg_delay_min = (
-        record.total_delay_seconds / record.observed_departures / 60
-        if record.observed_departures > 0 else 0
+        _count(record.total_delay_seconds) / observed / 60
+        if observed > 0 else 0
     )
 
     # Simple weighted combination — tunable
@@ -84,7 +97,7 @@ def get_historical_reliability(
         .order_by(ReliabilityRecord.updated_at.desc())
         .first()
     )
-    if record is None or record.scheduled_departures < _MIN_SCHEDULED:
+    if record is None or _count(record.scheduled_departures) < _MIN_SCHEDULED:
         logger.debug(
             "No historical data for route=%s stop=%s bucket=%s; using neutral prior.",
             route_id, stop_id, time_bucket,
@@ -121,11 +134,16 @@ def get_historical_reliability_batch(
         .order_by(ReliabilityRecord.updated_at.asc())
         .all()
     )
-    return {
-        (r.route_id, r.stop_id, r.time_bucket): _score_record(r)
-        for r in records
-        if r.scheduled_departures >= _MIN_SCHEDULED
-    }
+    scored: dict[tuple[str, str, str], float] = {}
+    for r in records:
+        # A NULL component cannot match the tuple_(...).in_() filter above, so
+        # this guard only ever re-states an invariant the query already holds.
+        if r.route_id is None or r.stop_id is None or r.time_bucket is None:
+            continue
+        if _count(r.scheduled_departures) < _MIN_SCHEDULED:
+            continue
+        scored[(r.route_id, r.stop_id, r.time_bucket)] = _score_record(r)
+    return scored
 
 
 def record_observed_departure(
@@ -176,14 +194,14 @@ def record_observed_departure(
     elif record.source == "seed":
         record.source = "mixed"  # synthetic prior now blended with real data
 
-    record.scheduled_departures += 1
+    record.scheduled_departures = _count(record.scheduled_departures) + 1
     if was_cancelled:
-        record.cancellation_count += 1
+        record.cancellation_count = _count(record.cancellation_count) + 1
     elif was_missed:
         pass  # no-show: scheduled but never seen — observed_rate drops
     else:
-        record.observed_departures += 1
-        record.total_delay_seconds += delay_seconds
+        record.observed_departures = _count(record.observed_departures) + 1
+        record.total_delay_seconds = _count(record.total_delay_seconds) + delay_seconds
 
     record.window_end_date = date_str
     record.updated_at = datetime.now(timezone.utc).isoformat()
@@ -218,7 +236,9 @@ def decay_reliability_records(session: Session, days_elapsed: float = 1.0) -> in
     # Counters are Float columns — no rounding, so decay applies uniformly
     # at every magnitude (integer ROUND made every value <= 10 immortal).
     factor = 0.5 ** (days_elapsed / WINDOW_DAYS)
-    result = session.execute(
+    # Session.execute() is typed Result[Any]; DML always yields a CursorResult,
+    # which is where rowcount lives.
+    result = cast(CursorResult[Any], session.execute(
         text("""
             UPDATE reliability_records SET
                 scheduled_departures = scheduled_departures * :f,
@@ -227,13 +247,13 @@ def decay_reliability_records(session: Session, days_elapsed: float = 1.0) -> in
                 cancellation_count   = cancellation_count   * :f
         """),
         {"f": factor},
-    )
+    ))
     # Fully-faded records carry no signal — remove them so scoring falls
     # back to the neutral prior instead of ratios over fractional counts.
-    purged = session.execute(
+    purged = cast(CursorResult[Any], session.execute(
         text("DELETE FROM reliability_records WHERE scheduled_departures < :min"),
         {"min": _MIN_SCHEDULED},
-    )
+    ))
     session.commit()
     _last_decay_date = today
     logger.info(
