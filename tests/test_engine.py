@@ -24,11 +24,13 @@ from routing.engine import (
     _find_trip_legs,
     _hms_to_seconds,
     _keep_if_not_dominated,
+    _leg_geometry,
     _passes_filters,
     _pick_longest_route,
     _route_signature,
     _RouteQueryCache,
     _schedule_path,
+    _TripShape,
     count_transfers,
     dominates,
     find_routes_arriving_by,
@@ -1188,3 +1190,76 @@ class TestLegCoordinates:
         assert legs is not None
         assert legs[0]["from_lat"] is None
         assert legs[0]["to_lat"] == 43.6
+
+
+# ---------------------------------------------------------------------------
+# Leg track geometry
+# ---------------------------------------------------------------------------
+
+def _straight_shape(n=11):
+    """West-to-east polyline at constant latitude, 0.01 deg per step."""
+    return _TripShape(
+        points=[[-79.0 + i * 0.01, 43.0] for i in range(n)],
+        stop_indices={"S1": 0, "S2": 5, "S3": 10},
+    )
+
+
+class TestLegGeometry:
+    """A leg is a slice of its trip's shape, per leg so the map can colour
+    each one by its own risk label."""
+
+    def test_slice_covers_only_the_leg(self):
+        geom = _leg_geometry(_straight_shape(), "S1", "S2")
+        assert geom is not None
+        assert geom[0] == [-79.0, 43.0]
+        assert geom[-1] == [-78.95, 43.0]
+
+    def test_consecutive_legs_join_up(self):
+        """The map draws legs separately; a gap between them would show."""
+        first = _leg_geometry(_straight_shape(), "S1", "S2")
+        second = _leg_geometry(_straight_shape(), "S2", "S3")
+        assert first is not None and second is not None
+        assert first[-1] == second[0]
+
+    def test_reversed_stop_order_returns_forward_geometry(self):
+        forward = _leg_geometry(_straight_shape(), "S1", "S2")
+        backward = _leg_geometry(_straight_shape(), "S2", "S1")
+        assert forward is not None and backward is not None
+        assert backward == forward[::-1]
+
+    def test_no_shape_gives_none(self):
+        assert _leg_geometry(None, "S1", "S2") is None
+
+    def test_stop_absent_from_shape_gives_none(self):
+        assert _leg_geometry(_straight_shape(), "S1", "NOT_ON_SHAPE") is None
+
+    def test_zero_length_slice_gives_none(self):
+        """Two stops projecting onto the same vertex cannot make a line."""
+        shape = _TripShape(points=[[-79.0, 43.0], [-78.99, 43.0]],
+                           stop_indices={"A": 0, "B": 0})
+        assert _leg_geometry(shape, "A", "B") is None
+
+    def test_geometry_is_simplified(self):
+        """Douglas-Peucker collapses collinear points; a straight run of 101
+        vertices carries no more information than its endpoints."""
+        shape = _TripShape(
+            points=[[-79.0 + i * 0.001, 43.0] for i in range(101)],
+            stop_indices={"A": 0, "B": 100},
+        )
+        geom = _leg_geometry(shape, "A", "B")
+        assert geom is not None
+        assert len(geom) == 2
+
+    def test_curvature_is_preserved(self):
+        """Simplification must not straighten a genuine bend."""
+        points = [[-79.0, 43.0], [-78.99, 43.0], [-78.98, 43.05], [-78.97, 43.0]]
+        shape = _TripShape(points=points, stop_indices={"A": 0, "B": 3})
+        geom = _leg_geometry(shape, "A", "B")
+        assert geom is not None
+        assert [-78.98, 43.05] in geom
+
+    def test_points_are_lon_lat(self):
+        geom = _leg_geometry(_straight_shape(), "S1", "S2")
+        assert geom is not None
+        lon, lat = geom[0]
+        assert -80 < lon < -78 and 42 < lat < 44

@@ -7,6 +7,7 @@ parse_and_store() is tested via a minimal in-memory zip.
 """
 
 import io
+import json
 import zipfile
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -21,16 +22,20 @@ from db.models import (
     Route,
     ServiceCalendar,
     ServiceCalendarDate,
+    Shape,
+    ShapeStopPosition,
     Stop,
     StopRoute,
     StopTime,
     Trip,
 )
 from ingestion.gtfs_static import (
+    _build_shape_stop_positions,
     _build_stop_routes,
     _parse_calendar,
     _parse_calendar_dates,
     _parse_routes,
+    _parse_shapes,
     _parse_stop_times,
     _parse_stops,
     _parse_trips,
@@ -836,3 +841,113 @@ class TestBuildStopRoutes:
         self._seed(db)
         _build_stop_routes(db)
         assert self._pairs(db) == []
+
+
+# ---------------------------------------------------------------------------
+# shapes.txt → Shape, and the derived stop projections
+# ---------------------------------------------------------------------------
+
+def _shape_df(rows):
+    return pd.DataFrame(
+        [{"shape_id": sid, "shape_pt_lat": str(lat), "shape_pt_lon": str(lon),
+          "shape_pt_sequence": str(seq)} for sid, lat, lon, seq in rows]
+    )
+
+
+class TestParseShapes:
+    def test_points_stored_in_sequence_order(self, db):
+        """GO ships some shapes with descending sequence; a polyline stored in
+        file order would draw as a scribble."""
+        _parse_shapes(_shape_df([
+            ("SH1", 43.2, -79.2, 3),
+            ("SH1", 43.0, -79.0, 1),
+            ("SH1", 43.1, -79.1, 2),
+        ]), db)
+        db.flush()
+        points = json.loads(db.query(Shape).one().points)
+        assert points == [[-79.0, 43.0], [-79.1, 43.1], [-79.2, 43.2]]
+
+    def test_points_are_lon_lat_order(self, db):
+        """GeoJSON order, which is what the map consumes."""
+        _parse_shapes(_shape_df([("SH1", 43.5, -80.2, 1), ("SH1", 43.6, -80.3, 2)]), db)
+        db.flush()
+        assert json.loads(db.query(Shape).one().points)[0] == [-80.2, 43.5]
+
+    def test_single_point_shape_skipped(self, db):
+        _parse_shapes(_shape_df([("SH1", 43.0, -79.0, 1)]), db)
+        db.flush()
+        assert db.query(Shape).count() == 0
+
+    def test_unparseable_rows_dropped_not_fatal(self, db):
+        df = _shape_df([("SH1", 43.0, -79.0, 1), ("SH1", 43.1, -79.1, 2)])
+        df.loc[len(df)] = {"shape_id": "SH1", "shape_pt_lat": "nope",
+                           "shape_pt_lon": "-79.2", "shape_pt_sequence": "3"}
+        _parse_shapes(df, db)
+        db.flush()
+        assert len(json.loads(db.query(Shape).one().points)) == 2
+
+    def test_rebuild_clears_old_shapes(self, db):
+        _parse_shapes(_shape_df([("OLD", 43.0, -79.0, 1), ("OLD", 43.1, -79.1, 2)]), db)
+        db.flush()
+        _parse_shapes(_shape_df([("NEW", 43.0, -79.0, 1), ("NEW", 43.1, -79.1, 2)]), db)
+        db.flush()
+        assert [s.shape_id for s in db.query(Shape).all()] == ["NEW"]
+
+
+class TestBuildShapeStopPositions:
+    """Neither shapes.txt nor stop_times.txt carries shape_dist_traveled in
+    the GO feed, so stop positions along a shape have to be derived."""
+
+    def _seed(self, db):
+        # A straight west-to-east shape at constant latitude.
+        _parse_shapes(_shape_df(
+            [("SH1", 43.0, -79.0 + i * 0.01, i) for i in range(11)]
+        ), db)
+        db.add(Route(route_id="R1", route_short_name="1", route_long_name="", route_type=3))
+        db.add(Trip(trip_id="T1", route_id="R1", service_id="20260209",
+                    trip_headsign="", direction_id=0, shape_id="SH1"))
+        # Stops sitting on the line at 0.00, 0.05 and 0.10 degrees east.
+        for stop_id, lon in (("S1", -79.0), ("S2", -78.95), ("S3", -78.90)):
+            db.add(Stop(stop_id=stop_id, stop_name=stop_id, stop_lat=43.0, stop_lon=lon))
+        for seq, stop_id in enumerate(("S1", "S2", "S3"), start=1):
+            db.add(StopTime(trip_id="T1", stop_id=stop_id, stop_sequence=seq,
+                            arrival_time="08:00:00", departure_time="08:00:00"))
+        db.flush()
+
+    def test_stops_project_to_their_vertex(self, db):
+        self._seed(db)
+        _build_shape_stop_positions(db)
+        db.flush()
+        by_stop = {p.stop_id: p.point_index for p in db.query(ShapeStopPosition).all()}
+        assert by_stop == {"S1": 0, "S2": 5, "S3": 10}
+
+    def test_positions_increase_along_the_trip(self, db):
+        self._seed(db)
+        _build_shape_stop_positions(db)
+        db.flush()
+        by_stop = {p.stop_id: p.point_index for p in db.query(ShapeStopPosition).all()}
+        assert by_stop["S1"] < by_stop["S2"] < by_stop["S3"]
+
+    def test_stop_off_the_line_still_projects(self, db):
+        """Real stops sit metres off the track — median offset on the GO feed
+        is ~23 m — so projection must tolerate that."""
+        self._seed(db)
+        db.query(Stop).filter_by(stop_id="S2").one().stop_lat = 43.001  # ~110 m north
+        db.flush()
+        _build_shape_stop_positions(db)
+        db.flush()
+        assert {p.stop_id: p.point_index for p in db.query(ShapeStopPosition).all()}["S2"] == 5
+
+    def test_no_shapes_is_not_an_error(self, db):
+        _build_shape_stop_positions(db)
+        db.flush()
+        assert db.query(ShapeStopPosition).count() == 0
+
+    def test_rebuild_clears_stale_positions(self, db):
+        self._seed(db)
+        _build_shape_stop_positions(db)
+        db.flush()
+        before = db.query(ShapeStopPosition).count()
+        _build_shape_stop_positions(db)
+        db.flush()
+        assert db.query(ShapeStopPosition).count() == before

@@ -116,6 +116,23 @@ Every leg carries `from_lat`/`from_lon`/`to_lat`/`to_lon` alongside the stop
 ids and names, so a map client can draw a route without resolving each
 intermediate stop through `/stops`. They are null only if a graph node is
 missing coordinates, which does not happen for ingested stops.
+
+Trip legs also carry `geometry` — the stretch of the trip's GTFS shape between
+that leg's two stops, as ordered `[lon, lat]` pairs, so the map follows the
+track rather than drawing a chord between stations. Per leg, so each keeps its
+own risk colour.
+
+The GO feed publishes `shapes.txt` but no `shape_dist_traveled` in either
+`shapes.txt` or `stop_times.txt`, so ingest projects each stop onto its shape
+and stores the resulting index (`shape_stop_positions`); slicing a leg is then
+a list slice. Geometry is simplified with Douglas–Peucker at 0.0001° — about
+11 m, sub-pixel at city zoom — which takes a typical inter-stop slice from ~120
+points to ~28.
+
+`geometry` is null whenever the trip has no usable shape: no `shape_id`, no
+`shapes.txt` in the feed, or a database ingested before shapes were stored.
+Clients should fall back to a straight line between the leg's stop
+coordinates. Walk legs never have it — GTFS publishes no pedestrian geometry.
 - `404` — unknown stop ID, or no routes exist between the stops
 - `422` — invalid parameter format
 - `429` — per-IP rate limit exceeded (see `RATE_LIMIT_PER_MINUTE`)
@@ -407,7 +424,7 @@ transit_planner/
 │   ├── env.py               Migration environment (URL from config.DATABASE_URL)
 │   └── versions/            Migration scripts
 ├── db/
-│   ├── models.py            SQLAlchemy ORM (GTFS + reliability + stop_routes)
+│   ├── models.py            SQLAlchemy ORM (GTFS + reliability + shapes)
 │   ├── alembic_hooks.py     Autogenerate filter (ignores extension tables)
 │   └── session.py           Engine, SessionLocal, get_session
 ├── graph/

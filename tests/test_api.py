@@ -1360,3 +1360,70 @@ class TestLegCoordinatesInResponse:
             for field in ("from_lat", "from_lon", "to_lat", "to_lon"):
                 assert field in props, f"{model}.{field} missing from OpenAPI"
                 assert {"type": "number"} in props[field]["anyOf"]
+
+
+# ---------------------------------------------------------------------------
+# Track geometry on /routes legs
+# ---------------------------------------------------------------------------
+
+class TestLegGeometryInResponse:
+    """Each leg carries its own slice of the trip's GTFS shape, so the map can
+    follow the track and still colour per leg by risk."""
+
+    _GEOM = [[-80.2469, 43.5443], [-80.1, 43.58], [-79.3806, 43.6453]]
+
+    def _get(self, client, legs):
+        with (
+            patch("api.routes.find_routes", return_value=[legs]),
+            patch("api.routes.get_historical_reliability_batch", return_value={}),
+        ):
+            return client.get(
+                "/routes?origin=UN&destination=GL"
+                "&travel_date=2026-02-11&departure_time=08:00"
+            )
+
+    def test_geometry_is_serialised(self, client):
+        leg = {**_FAKE_ROUTE[0], "geometry": self._GEOM}
+        resp = self._get(client, [leg])
+        assert resp.status_code == 200
+        assert resp.json()["routes"][0]["legs"][0]["geometry"] == self._GEOM
+
+    def test_leg_without_geometry_still_returns(self, client):
+        """Partial coverage is explicitly fine — a trip with no shape must not
+        fail the response, the client falls back to a straight chord."""
+        resp = self._get(client, list(_FAKE_ROUTE))
+        assert resp.status_code == 200
+        assert resp.json()["routes"][0]["legs"][0]["geometry"] is None
+
+    def test_mixed_coverage_in_one_route(self, client):
+        with_geom = {**_FAKE_ROUTE[0], "geometry": self._GEOM}
+        without = {**_FAKE_ROUTE[0], "trip_id": "T2"}
+        resp = self._get(client, [with_geom, without])
+        assert resp.status_code == 200
+        legs = resp.json()["routes"][0]["legs"]
+        assert legs[0]["geometry"] == self._GEOM
+        assert legs[1]["geometry"] is None
+
+    def test_walk_legs_have_no_geometry_field_set(self, client):
+        """Non-goal by agreement: GTFS publishes no pedestrian geometry."""
+        walk = {
+            "kind": "walk",
+            "from_stop_id": "UN", "to_stop_id": "GL",
+            "from_stop_name": "Union Station GO", "to_stop_name": "Guelph Central GO",
+            "from_lat": 43.6453, "from_lon": -79.3806,
+            "to_lat": 43.5443, "to_lon": -80.2469,
+            "distance_m": 250.0, "walk_seconds": 200,
+        }
+        resp = self._get(client, [{**_FAKE_ROUTE[0], "geometry": self._GEOM}, walk])
+        assert resp.status_code == 200
+        assert "geometry" not in resp.json()["routes"][0]["legs"][1]
+
+    def test_openapi_advertises_geometry(self, client):
+        schemas = client.get("/openapi.json").json()["components"]["schemas"]
+        prop = schemas["TripLeg"]["properties"]["geometry"]
+        # array of [lon, lat] pairs, nullable
+        assert {"type": "null"} in prop["anyOf"]
+        array = next(a for a in prop["anyOf"] if a.get("type") == "array")
+        assert array["items"]["type"] == "array"
+        assert array["items"]["items"]["type"] == "number"
+        assert "geometry" not in schemas["WalkLeg"]["properties"]

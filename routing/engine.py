@@ -28,6 +28,9 @@ A "route" is a list of legs. Each leg is one edge traversal:
     "to_lat":         float | None,
     "to_lon":         float | None,
     # trip legs only:
+    #   "geometry": ordered [[lon, lat], ...] along the track between the two
+    #   stops, simplified; None when the trip has no usable shape.
+    # trip legs only:
     "trip_id":        str,
     "route_id":       str,
     "service_id":     str,   # YYYYMMDD — the date this trip runs
@@ -40,17 +43,20 @@ A "route" is a list of legs. Each leg is one edge traversal:
   }
 """
 
+import json
 import logging
 from collections.abc import Sequence
 from datetime import date, datetime, timedelta
-from typing import Any
+from typing import Any, NamedTuple
 
 import networkx as nx
+from shapely.geometry import LineString
+from sqlalchemy import select as sa_select
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from config import MAX_ROUTES, MAX_TRANSFERS, MIN_TRANSFER_MINUTES
-from db.models import StopTime
+from db.models import Shape, ShapeStopPosition, StopTime, Trip
 from graph.builder import get_graphs
 from gtfs_time import hms_to_seconds as _hms_to_seconds
 
@@ -92,13 +98,19 @@ class _RouteQueryCache:
         cached. Subsequent calls for different stop subsets on the same trip
         (common in _fill_later_departures) filter the dict in Python rather
         than re-issuing a DB query.
+
+    shapes: trip_id → (polyline points, {stop_id: index into points}) | None
+        A trip's shape is fetched once and reused for every leg of that trip,
+        rather than re-read per stop pair.  None marks a trip with no usable
+        shape so the miss is not retried.
     """
 
-    __slots__ = ("trip_select", "stop_times")
+    __slots__ = ("trip_select", "stop_times", "shapes")
 
     def __init__(self) -> None:
         self.trip_select: dict[tuple[str, str, str, str, int], str | None] = {}
         self.stop_times: dict[str, dict[str, StopTime]] = {}
+        self.shapes: dict[str, _TripShape | None] = {}
 
 
 def find_routes(
@@ -460,6 +472,9 @@ def _find_trip_legs(
     if stop_map is None or trip_id is None:
         return None
 
+    # One shape lookup per trip, reused for every leg below.
+    shape = _load_trip_shape(session, trip_id, cache)
+
     legs: Route = []
     for k in range(len(stops) - 1):
         a, b = stops[k], stops[k + 1]
@@ -483,9 +498,103 @@ def _find_trip_legs(
             "departure_time": dep,
             "arrival_time":   arr,
             "travel_seconds": max(0, arr_sec - dep_sec),
+            "geometry":       _leg_geometry(shape, a, b),
         })
 
     return legs
+
+
+
+# ---------------------------------------------------------------------------
+# Track geometry
+# ---------------------------------------------------------------------------
+
+# Douglas-Peucker tolerance in degrees.  ~0.0001 deg is roughly 11 m at this
+# latitude, which is invisible at the city zoom a route overview is drawn at
+# and takes a typical inter-stop slice from a few hundred points to a few
+# dozen.  Not survey-grade, deliberately.
+GEOMETRY_SIMPLIFY_TOLERANCE = 0.0001
+
+
+class _TripShape(NamedTuple):
+    """A trip's polyline plus where each of its stops falls along it."""
+
+    points: list[list[float]]
+    stop_indices: dict[str, int]
+
+
+def _load_trip_shape(
+    session: Session, trip_id: str, cache: _RouteQueryCache | None
+) -> "_TripShape | None":
+    """
+    The shape for a trip, or None when it has no usable geometry.
+
+    Missing geometry is normal, not an error: a trip may have no shape_id, the
+    feed may ship no shapes.txt at all, and a database ingested before shapes
+    were stored has neither.  Callers omit the leg polyline in that case.
+    """
+    if cache is not None and trip_id in cache.shapes:
+        return cache.shapes[trip_id]
+
+    row = session.execute(
+        sa_select(Shape.shape_id, Shape.points)
+        .join(Trip, Trip.shape_id == Shape.shape_id)
+        .where(Trip.trip_id == trip_id)
+    ).first()
+
+    shape: _TripShape | None = None
+    if row is not None:
+        shape_id, raw = row
+        try:
+            points = json.loads(raw)
+        except (TypeError, ValueError):
+            logger.warning("Shape %s has unreadable points; ignoring.", shape_id)
+            points = []
+        if len(points) >= 2:
+            indices = {
+                stop_id: index
+                for stop_id, index in session.execute(
+                    sa_select(ShapeStopPosition.stop_id, ShapeStopPosition.point_index)
+                    .where(ShapeStopPosition.shape_id == shape_id)
+                )
+            }
+            shape = _TripShape(points, indices)
+
+    if cache is not None:
+        cache.shapes[trip_id] = shape
+    return shape
+
+
+def _leg_geometry(shape: "_TripShape | None", from_stop: str, to_stop: str) -> list[list[float]] | None:
+    """
+    The stretch of a trip's polyline between two of its stops, simplified.
+
+    Per leg rather than per route because the API colours each leg by its own
+    risk; one polyline for the whole journey would collapse that.
+
+    Returns None when either stop was never projected onto this shape, which
+    happens for a stop the shape does not actually pass.
+    """
+    if shape is None:
+        return None
+    start = shape.stop_indices.get(from_stop)
+    end = shape.stop_indices.get(to_stop)
+    if start is None or end is None:
+        return None
+
+    # Shapes are stored in travel order, but a stop pair can still resolve
+    # backwards on a loop or a badly projected stop; slice the span either way.
+    lo, hi = (start, end) if start <= end else (end, start)
+    span = shape.points[lo:hi + 1]
+    if len(span) < 2:
+        return None
+    if start > end:
+        span = span[::-1]
+
+    simplified = LineString(span).simplify(
+        GEOMETRY_SIMPLIFY_TOLERANCE, preserve_topology=False
+    )
+    return [[round(x, 6), round(y, 6)] for x, y in simplified.coords]
 
 
 # ---------------------------------------------------------------------------

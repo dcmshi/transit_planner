@@ -87,6 +87,36 @@ class StopTime(Base):
     stop: Mapped["Stop | None"] = relationship(back_populates="stop_times")
 
 
+class Shape(Base):
+    """
+    One GTFS shape as an ordered polyline.
+
+    Stored as a single JSON `[[lon, lat], ...]` row rather than the feed's
+    one-row-per-point form: every read wants the whole polyline, and the GO
+    feed's 502,060 points collapse to 314 rows this way.
+    """
+    __tablename__ = "shapes"
+
+    shape_id: Mapped[str] = mapped_column(primary_key=True)
+    points: Mapped[str]  # JSON [[lon, lat], ...] in shape_pt_sequence order
+
+
+class ShapeStopPosition(Base):
+    """
+    Where a stop falls along a shape, as an index into Shape.points.
+
+    This is the `shape_dist_traveled` the GO feed does not publish — neither
+    shapes.txt nor stop_times.txt carries it, so each stop is projected onto
+    the polyline at ingest.  Doing it here keeps request-time slicing to a
+    list slice instead of a projection per leg.
+    """
+    __tablename__ = "shape_stop_positions"
+
+    shape_id: Mapped[str] = mapped_column(ForeignKey("shapes.shape_id"), primary_key=True)
+    stop_id: Mapped[str] = mapped_column(ForeignKey("stops.stop_id"), primary_key=True)
+    point_index: Mapped[int]
+
+
 class StopRoute(Base):
     """
     Which routes call at which stop — derived, not from the feed directly.

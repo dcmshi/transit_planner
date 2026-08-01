@@ -6,20 +6,26 @@ Feed contents used:
   routes.txt         → Route
   trips.txt          → Trip
   stop_times.txt     → StopTime (and the derived StopRoute lookup)
+  shapes.txt         → Shape (+ derived ShapeStopPosition projections)
   calendar.txt       → ServiceCalendar
   calendar_dates.txt → ServiceCalendarDate
 """
 
 import asyncio
+import bisect
 import io
+import json
 import logging
+import math
 import re
 import zipfile
+from collections import defaultdict
 from datetime import datetime
 from typing import Any, cast
 
 import httpx
 import pandas as pd
+from shapely.geometry import LineString, Point
 from sqlalchemy import CursorResult
 from sqlalchemy import insert as sa_insert
 from sqlalchemy import select as sa_select
@@ -30,15 +36,18 @@ from db.models import (
     Route,
     ServiceCalendar,
     ServiceCalendarDate,
+    Shape,
+    ShapeStopPosition,
     Stop,
     StopRoute,
     StopTime,
     Trip,
 )
 
+# shapely (imported above) is a hard dependency and shape projection needs it
+# on every backend; only the geoalchemy2 bridge is optional.
 try:
     from geoalchemy2.shape import from_shape
-    from shapely.geometry import Point
     _HAS_POSTGIS = DATABASE_URL.startswith("postgresql")
 except ImportError:
     _HAS_POSTGIS = False
@@ -110,6 +119,7 @@ def parse_and_store(zip_bytes: bytes, session: Session) -> None:
         # trips references routes.  The parsers below delete their own table
         # before inserting, but they run parents-first, which violates FK
         # constraints on PostgreSQL when data already exists (re-ingest).
+        session.query(ShapeStopPosition).delete()
         session.query(StopRoute).delete()
         session.query(StopTime).delete()
         session.query(Trip).delete()
@@ -126,6 +136,15 @@ def parse_and_store(zip_bytes: bytes, session: Session) -> None:
         _parse_trips(read("trips.txt"), session)
         _parse_stop_times(read("stop_times.txt"), session)
         _build_stop_routes(session)
+
+        # Track geometry is optional: a feed without shapes.txt still routes,
+        # its legs simply carry no polyline.
+        if "shapes.txt" in names:
+            _parse_shapes(read("shapes.txt"), session)
+            _build_shape_stop_positions(session)
+        else:
+            session.query(Shape).delete()
+            logger.info("Feed has no shapes.txt; legs will carry no geometry.")
 
         if "calendar.txt" in names:
             _parse_calendar(read("calendar.txt"), session)
@@ -305,6 +324,114 @@ def _parse_stop_times(df: pd.DataFrame, session: Session) -> None:
             "Skipped %d stop_times whose times are not H:MM:SS or HH:MM:SS.", malformed_times
         )
     logger.info("Loaded %d stop times.", loaded)
+
+
+def _parse_shapes(df: pd.DataFrame, session: Session) -> None:
+    """Store each shape as one ordered polyline row."""
+    session.query(Shape).delete()
+    session.flush()
+
+    df = df.copy()
+    for column in ("shape_pt_lat", "shape_pt_lon", "shape_pt_sequence"):
+        df[column] = pd.to_numeric(df[column], errors="coerce")
+    # The feed does not guarantee sequence order — GO ships some shapes
+    # descending — and a mis-ordered polyline would draw as a scribble.
+    df = df.dropna(subset=["shape_pt_lat", "shape_pt_lon", "shape_pt_sequence"])
+    df = df.sort_values(["shape_id", "shape_pt_sequence"])
+
+    shapes = []
+    for shape_id, group in df.groupby("shape_id", sort=False):
+        points = [
+            [round(lon, 6), round(lat, 6)]
+            for lon, lat in zip(group["shape_pt_lon"], group["shape_pt_lat"])
+        ]
+        if len(points) < 2:
+            continue  # a single point is not a line
+        shapes.append(Shape(shape_id=str(shape_id), points=json.dumps(points)))
+    session.bulk_save_objects(shapes)
+    logger.info("Loaded %d shapes (%d points).", len(shapes), len(df))
+
+
+def _build_shape_stop_positions(session: Session) -> None:
+    """
+    Project every stop onto the shapes whose trips serve it.
+
+    Neither shapes.txt nor stop_times.txt carries shape_dist_traveled in the
+    GO feed, so the position of a stop along its shape has to be derived.
+    Without it a leg cannot be cut out of the trip's polyline.
+    """
+    session.query(ShapeStopPosition).delete()
+    session.flush()
+
+    shapes = {s.shape_id: json.loads(s.points) for s in session.query(Shape).all()}
+    if not shapes:
+        logger.info("No shapes ingested; skipping stop projection.")
+        return
+
+    stop_xy = {
+        stop_id: (lon, lat)
+        for stop_id, lat, lon in session.query(Stop.stop_id, Stop.stop_lat, Stop.stop_lon)
+    }
+    # Which stops each shape actually serves, via the trips that use it.
+    pairs = session.execute(
+        sa_select(Trip.shape_id, StopTime.stop_id)
+        .join(StopTime, StopTime.trip_id == Trip.trip_id)
+        .where(Trip.shape_id.isnot(None), Trip.shape_id != "")
+        .distinct()
+    ).all()
+
+    served_by_shape: dict[str, set[str]] = defaultdict(set)
+    for shape_id, stop_id in pairs:
+        served_by_shape[shape_id].add(stop_id)
+
+    positions: list[ShapeStopPosition] = []
+    unmatched = 0
+    for shape_id, points in shapes.items():
+        served = served_by_shape.get(shape_id)
+        if not served:
+            continue
+        line = LineString(points)
+        vertex_distances = _cumulative_distances(points)
+        for stop_id in served:
+            xy = stop_xy.get(stop_id)
+            if xy is None:
+                unmatched += 1
+                continue
+            positions.append(ShapeStopPosition(
+                shape_id=shape_id,
+                stop_id=stop_id,
+                point_index=_nearest_vertex(vertex_distances, line.project(Point(*xy))),
+            ))
+
+    session.bulk_save_objects(positions)
+    if unmatched:
+        logger.warning("%d shape/stop pairs had no stop coordinates.", unmatched)
+    logger.info("Projected %d stop positions onto %d shapes.", len(positions), len(shapes))
+
+
+def _cumulative_distances(points: list[list[float]]) -> list[float]:
+    """Planar distance to each vertex, matching LineString.project()'s units."""
+    distances = [0.0]
+    for (x0, y0), (x1, y1) in zip(points, points[1:]):
+        distances.append(distances[-1] + math.hypot(x1 - x0, y1 - y0))
+    return distances
+
+
+def _nearest_vertex(vertex_distances: list[float], distance: float) -> int:
+    """Index of the vertex nearest `distance` along the line.
+
+    Binary search rather than scanning: shapes run to 4,600 points and every
+    stop on every shape is projected, so a linear scan here would dominate
+    the ingest.  An index rather than the raw distance keeps request-time
+    slicing to a plain list slice.
+    """
+    i = bisect.bisect_left(vertex_distances, distance)
+    if i == 0:
+        return 0
+    if i >= len(vertex_distances):
+        return len(vertex_distances) - 1
+    before, after = vertex_distances[i - 1], vertex_distances[i]
+    return i - 1 if (distance - before) <= (after - distance) else i
 
 
 def _build_stop_routes(session: Session) -> None:
