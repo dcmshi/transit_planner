@@ -466,28 +466,40 @@ every push; suite at 369 passing tests.
 Whole-repo sweep for bugs, refactors, optimisations, and feature gaps, run
 against the live stack (889-stop PostGIS Docker DB, 1,589,171 stop_times)
 rather than by reading alone — every finding below was reproduced before it
-was filed.  Seven defects plus three feature proposals, **all still open**;
-detail and fixes in `TODO.md` under "Tenth-pass audit".
+was filed.  Seven defects plus three feature proposals, **all now closed**;
+detail in `TODO.md` under "Tenth-pass audit" and in the commit messages.
 
-- [ ] **LLM read timeout 500s `/routes?explain=true`** — `_post_llm_request`
-  catches `ConnectError` but not the `TransportError` siblings; injection
-  shows `ReadTimeout` propagating out of `explain_routes` while
-  `ConnectError` degrades correctly
-- [ ] **Single-digit-hour GTFS times break the SQL time arithmetic** — same
-  `"9:30:00"` yields a PostgreSQL cast error, a silent 30-minute SQLite
-  error, and the correct answer in Python
-- [ ] **Daily refresh never fires under frequent restarts** — interval
-  trigger first-fires at boot + 24 h, so decay and cache invalidation are
-  skipped too
-- [ ] **Service alerts ignore `active_period`** — never parsed, and the
-  bump is not same-day gated like every other live signal
-- [ ] **`_add_trip_edges` buffers the whole join** — 749 MB resident /
-  929 MB peak measured, reduced into just 1,927 edges
-- [ ] **Risk-label thresholds duplicated** across `live.py` and `routes.py`
-- [ ] **Documented zero-second-leg filter does not exist** in
-  `_passes_filters`
-- [ ] Feature proposals: `arrive_by` on `/routes`, a read-only reliability
-  endpoint, Alembic
+All closed the same day, one commit each, every fix carrying a regression
+test that fails without it:
+
+- [x] **LLM read timeout 500s `/routes?explain=true`** — `_post_llm_request`
+  caught `ConnectError` but not its `TransportError` siblings; now catches
+  `httpx.HTTPError`, with all five escaping types tested (2026-07-31)
+- [x] **Single-digit-hour GTFS times break the SQL time arithmetic** — the
+  same `"9:30:00"` gave a PostgreSQL cast error, a silent 30-minute SQLite
+  error, and the correct answer in Python; normalised at ingest (2026-07-31)
+- [x] **Daily refresh never fires under frequent restarts** — interval
+  trigger first-fired at boot + 24 h, skipping decay and cache invalidation
+  with it; now a wall-clock cron trigger in `AGENCY_TZ` (2026-07-31)
+- [x] **Service alerts ignore `active_period`** — now parsed and tested
+  against the leg's scheduled time, and the bump is capped (2026-07-31)
+- [x] **`_add_trip_edges` buffers the whole join** — `yield_per` streaming
+  took peak from 929 MB to 13 MB with the graph byte-identical (2026-07-31)
+- [x] **Risk-label thresholds duplicated** — one shared `risk_label()`; a
+  test asserts the API imports the same object (2026-07-31)
+- [x] **Documented zero-second-leg filter does not exist** — *the docstring
+  was the defect*.  353 of 1,927 trip edges (18%) are legitimately
+  zero-second at minute resolution, and no row has an arrival preceding its
+  departure, so adding the advertised filter would have deleted a fifth of
+  the network (2026-07-31)
+- [x] **Features shipped**: `arrive_by` on `/routes` (latest-departing
+  itineraries that still make a deadline, GTFS hours supported, cache key
+  separated by mode), `GET /reliability` (counters and derived score behind
+  a route's risk, filter-required and capped — a lookup, not an export), and
+  Alembic (baseline verified by `compare_metadata` finding zero drift;
+  PostgreSQL-only because `geog` is a Geography column) (2026-07-31)
+
+Suite at 428 unit tests + 8 integration; ruff and mypy clean.
 
 Fixed earlier the same day, before the audit: mypy adopted and gating CI
 (`db/models.py` migrated to SQLAlchemy 2.0 `Mapped[]`, verified DDL-neutral
