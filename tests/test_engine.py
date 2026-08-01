@@ -190,7 +190,20 @@ class TestPassesFilters:
 
     def test_zero_second_leg_passes(self):
         # Two stops sharing the same scheduled minute is valid GTFS data.
+        # The module docstring used to claim these were filtered out; on the
+        # current GO feed 353 of 1,927 trip edges (18%) are zero-second, so
+        # "restoring" that filter would delete a fifth of the network.
         legs = [_trip("R1", "08:00:00", "08:00:00", 0)]
+        assert _passes_filters(legs) is True
+
+    def test_run_of_zero_second_legs_passes(self):
+        """Closely-spaced stops produce several in a row, which is the shape
+        the real feed actually yields."""
+        legs = [
+            _trip("R1", "08:00:00", "08:00:00", 0),
+            _trip("R1", "08:00:00", "08:00:00", 0),
+            _trip("R1", "08:00:00", "08:05:00", 300),
+        ]
         assert _passes_filters(legs) is True
 
     def test_nonzero_leg_passes(self):

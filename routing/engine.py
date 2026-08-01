@@ -8,8 +8,9 @@ Algorithm:
      run on the requested date and depart at or after the requested time
      (_schedule_path).  This replaces the previous time-agnostic leg assembly
      and ensures every route has coherent, real departure/arrival times.
-  3. Filter routes that violate hard constraints (zero-second legs, too many
-     transfers, tight connections).
+  3. Filter routes that violate hard constraints (too many transfers, tight
+     connections).  See _passes_filters for why zero-second legs are not
+     among them.
   4. Return routes as structured dicts ready for reliability scoring.
 
 A "route" is a list of legs. Each leg is one edge traversal:
@@ -476,6 +477,13 @@ def _passes_filters(legs: Route) -> bool:
       - Each transfer must have at least MIN_TRANSFER_MINUTES of wait time
         between the arriving trip's last arrival and the connecting trip's
         first departure.
+
+    Deliberately NOT filtered: zero-second trip legs.  GO publishes its
+    timetable at minute resolution, so consecutive stops routinely share a
+    time — 353 of the 1,927 trip edges (18%) built from the current feed have
+    travel_seconds == 0, all with equal departure and arrival rather than
+    corrupt data (a survey found no row whose next arrival precedes its
+    departure).  Rejecting them would delete a fifth of the network.
     """
     trip_legs = [leg for leg in legs if leg["kind"] == "trip"]
     if not trip_legs:
