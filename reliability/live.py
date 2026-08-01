@@ -18,6 +18,7 @@ from datetime import date as Date
 from datetime import datetime, timedelta
 from typing import Any
 
+from config import AGENCY_TZ
 from gtfs_time import hms_to_seconds as _hms_to_seconds
 from ingestion.gtfs_realtime import (
     ServiceAlertState,
@@ -30,6 +31,9 @@ logger = logging.getLogger(__name__)
 
 # Risk adjustment constants (tunable)
 ALERT_RISK_BUMP = 0.10
+# Alerts are a soft signal.  Uncapped, a stop touched by ten of them
+# saturates the score on that one input and drowns out everything else.
+MAX_ALERT_RISK_BUMP = 0.30
 CANCELLATION_RISK_BUMP = 0.15
 MISSING_VEHICLE_RISK_BUMP = 0.08
 LATE_EVENING_RISK_BUMP = 0.05
@@ -116,10 +120,13 @@ def compute_live_risk(
             "is_cancelled": True,
         }
 
-    # 2. Active service alerts touching this route or stop
-    active_alerts = _alerts_for(route_id, stop_id)
+    # 2. Service alerts touching this route or stop and covering the leg's
+    #    scheduled departure — an alert about today's closure must not raise
+    #    the risk of a trip three weeks out, and a planned closure announced
+    #    for next month must not raise today's.
+    active_alerts = _alerts_for(route_id, stop_id, scheduled_dt)
     if active_alerts:
-        total_adjustment += ALERT_RISK_BUMP * len(active_alerts)
+        total_adjustment += min(ALERT_RISK_BUMP * len(active_alerts), MAX_ALERT_RISK_BUMP)
         for a in active_alerts:
             modifiers.append(f"Service alert: {a.header}")
 
@@ -172,13 +179,20 @@ def compute_live_risk(
     }
 
 
-def _alerts_for(route_id: str, stop_id: str) -> list[ServiceAlertState]:
+def _alerts_for(
+    route_id: str, stop_id: str, scheduled_dt: datetime
+) -> list[ServiceAlertState]:
     # list(...) snapshot: this runs in request worker threads while the
     # poller clears/extends the shared list on the event loop — iterating
     # the live object can raise "changed size during iteration".
+    #
+    # scheduled_dt is naive agency-local wall clock while active_period
+    # bounds are absolute UTC instants, so attach the agency zone first.
+    moment = scheduled_dt.replace(tzinfo=AGENCY_TZ)
     return [
         a for a in list(service_alerts)
-        if route_id in a.affected_route_ids or stop_id in a.affected_stop_ids
+        if (route_id in a.affected_route_ids or stop_id in a.affected_stop_ids)
+        and a.is_active_at(moment)
     ]
 
 

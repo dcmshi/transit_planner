@@ -51,7 +51,21 @@ class ServiceAlertState:
     description: str
     affected_route_ids: list[str] = field(default_factory=list)
     affected_stop_ids: list[str] = field(default_factory=list)
+    # GTFS-RT active_period windows as (start, end) UTC instants; either bound
+    # may be None for an open-ended window.  An empty list means the feed
+    # published no active_period at all, which the spec defines as
+    # "always active" — hence is_active_at() returning True for it.
+    active_periods: list[tuple[datetime | None, datetime | None]] = field(default_factory=list)
     fetched_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+    def is_active_at(self, moment: datetime) -> bool:
+        """Whether this alert covers an aware instant."""
+        if not self.active_periods:
+            return True
+        return any(
+            (start is None or moment >= start) and (end is None or moment <= end)
+            for start, end in self.active_periods
+        )
 
 
 # Module-level live state — read by the reliability layer
@@ -177,12 +191,20 @@ async def poll_service_alerts() -> bool:
         ]
         header = a.header_text.translation[0].text if a.header_text.translation else ""
         desc = a.description_text.translation[0].text if a.description_text.translation else ""
+        periods: list[tuple[datetime | None, datetime | None]] = [
+            (
+                datetime.fromtimestamp(tr.start, timezone.utc) if tr.HasField("start") else None,
+                datetime.fromtimestamp(tr.end, timezone.utc) if tr.HasField("end") else None,
+            )
+            for tr in a.active_period
+        ]
         alerts.append(ServiceAlertState(
             alert_id=entity.id,
             header=header,
             description=desc,
             affected_route_ids=route_ids,
             affected_stop_ids=stop_ids,
+            active_periods=periods,
         ))
 
     service_alerts.clear()

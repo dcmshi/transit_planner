@@ -572,6 +572,17 @@ def _make_alert_feed(alerts):
         else:
             alert.header_text.translation = []
         alert.description_text.translation = []
+        # active_period: list of (start, end) POSIX seconds, either may be None
+        periods = []
+        for start, end in a.get("active_period", []):
+            tr = MagicMock()
+            tr.start = start or 0
+            tr.end = end or 0
+            tr.HasField.side_effect = lambda f, s=start, e=end: (
+                s is not None if f == "start" else e is not None
+            )
+            periods.append(tr)
+        alert.active_period = periods
         entities.append(entity)
     feed.entity = entities
     return feed
@@ -668,6 +679,49 @@ class TestPollServiceAlerts:
             result = await poll_service_alerts()
 
         assert result is False
+
+    @pytest.mark.anyio
+    async def test_active_period_is_parsed(self, reset_poll_state):
+        """active_period was never read, so a today-only alert inflated risk
+        for travel weeks out."""
+        start, end = 1_770_000_000, 1_770_086_400
+        feed = _make_alert_feed([
+            {"id": "A1", "route_ids": ["R1"], "header": "Closure",
+             "active_period": [(start, end)]},
+        ])
+        with patch("ingestion.gtfs_realtime._fetch_feed", new=AsyncMock(return_value=feed)):
+            await poll_service_alerts()
+
+        alert = rt_mod.service_alerts[0]
+        assert alert.active_periods == [
+            (datetime.fromtimestamp(start, timezone.utc),
+             datetime.fromtimestamp(end, timezone.utc)),
+        ]
+        assert alert.is_active_at(datetime.fromtimestamp(start + 60, timezone.utc))
+        assert not alert.is_active_at(datetime.fromtimestamp(end + 60, timezone.utc))
+
+    @pytest.mark.anyio
+    async def test_open_ended_active_period_parses_to_none(self, reset_poll_state):
+        feed = _make_alert_feed([
+            {"id": "A1", "route_ids": ["R1"], "header": "Ongoing",
+             "active_period": [(1_770_000_000, None)]},
+        ])
+        with patch("ingestion.gtfs_realtime._fetch_feed", new=AsyncMock(return_value=feed)):
+            await poll_service_alerts()
+
+        alert = rt_mod.service_alerts[0]
+        assert alert.active_periods[0][1] is None
+        assert alert.is_active_at(datetime(2099, 1, 1, tzinfo=timezone.utc))
+
+    @pytest.mark.anyio
+    async def test_absent_active_period_means_always_active(self, reset_poll_state):
+        feed = _make_alert_feed([{"id": "A1", "route_ids": ["R1"], "header": "Always"}])
+        with patch("ingestion.gtfs_realtime._fetch_feed", new=AsyncMock(return_value=feed)):
+            await poll_service_alerts()
+
+        alert = rt_mod.service_alerts[0]
+        assert alert.active_periods == []
+        assert alert.is_active_at(datetime(2099, 1, 1, tzinfo=timezone.utc))
 
     @pytest.mark.anyio
     async def test_clears_previous_alerts(self, reset_poll_state):

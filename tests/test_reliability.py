@@ -6,7 +6,7 @@ reliability.live       — compute_live_risk, which reads module-level
                          GTFS-RT state; patched via unittest.mock.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 import pytest
@@ -14,6 +14,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from config import AGENCY_TZ
 from db.models import Base, ReliabilityRecord
 from ingestion.gtfs_realtime import ServiceAlertState, TripUpdateState
 from reliability.historical import (
@@ -25,6 +26,7 @@ from reliability.live import (
     ALERT_RISK_BUMP,
     CANCELLATION_RISK_BUMP,
     LATE_EVENING_RISK_BUMP,
+    MAX_ALERT_RISK_BUMP,
     MISSING_VEHICLE_RISK_BUMP,
     WEEKEND_RISK_BUMP,
     compute_live_risk,
@@ -170,6 +172,93 @@ class TestComputeLiveRisk:
         expected = pytest.approx(0.2 + ALERT_RISK_BUMP, abs=1e-9)
         assert result["risk_score"] == expected
         assert any("alert" in m.lower() for m in result["modifiers"])
+
+    def test_alert_outside_its_active_period_is_ignored(self):
+        """An alert covering only today must not inflate a trip weeks out.
+        Every other live signal is gated on the service day; the alert bump
+        was not, and active_period was never parsed at all."""
+        travel = datetime(2026, 2, 9, 14, 0, tzinfo=AGENCY_TZ)
+        alert = ServiceAlertState(
+            alert_id="A1",
+            header="Closure on route R1",
+            description="",
+            affected_route_ids=["R1"],
+            active_periods=[(
+                travel - timedelta(days=21),
+                travel - timedelta(days=20),
+            )],
+        )
+        with patch(f"{_LIVE}.trip_updates", {}), \
+             patch(f"{_LIVE}.service_alerts", [alert]), \
+             patch(f"{_LIVE}.vehicle_positions", {}):
+            result = _compute(hist=0.8)
+
+        assert result["risk_score"] == pytest.approx(0.2, abs=1e-9)
+        assert result["modifiers"] == []
+
+    def test_alert_inside_its_active_period_still_bumps(self):
+        travel = datetime(2026, 2, 9, 14, 0, tzinfo=AGENCY_TZ)
+        alert = ServiceAlertState(
+            alert_id="A1",
+            header="Closure on route R1",
+            description="",
+            affected_route_ids=["R1"],
+            active_periods=[(travel - timedelta(hours=2), travel + timedelta(hours=2))],
+        )
+        with patch(f"{_LIVE}.trip_updates", {}), \
+             patch(f"{_LIVE}.service_alerts", [alert]), \
+             patch(f"{_LIVE}.vehicle_positions", {}):
+            result = _compute(hist=0.8)
+
+        assert result["risk_score"] == pytest.approx(0.2 + ALERT_RISK_BUMP, abs=1e-9)
+
+    def test_alert_with_no_active_period_is_always_active(self):
+        """GTFS-RT: an absent active_period means the alert always applies."""
+        alert = ServiceAlertState(
+            alert_id="A1", header="Ongoing", description="",
+            affected_route_ids=["R1"], active_periods=[],
+        )
+        with patch(f"{_LIVE}.trip_updates", {}), \
+             patch(f"{_LIVE}.service_alerts", [alert]), \
+             patch(f"{_LIVE}.vehicle_positions", {}):
+            result = _compute(hist=0.8)
+
+        assert result["risk_score"] == pytest.approx(0.2 + ALERT_RISK_BUMP, abs=1e-9)
+
+    def test_open_ended_active_period_bounds_are_honoured(self):
+        travel = datetime(2026, 2, 9, 14, 0, tzinfo=AGENCY_TZ)
+        started = ServiceAlertState(
+            alert_id="A1", header="Started, no end", description="",
+            affected_route_ids=["R1"],
+            active_periods=[(travel - timedelta(days=1), None)],
+        )
+        not_yet = ServiceAlertState(
+            alert_id="A2", header="Future, no end", description="",
+            affected_route_ids=["R1"],
+            active_periods=[(travel + timedelta(days=1), None)],
+        )
+        for alert, expected in ((started, ALERT_RISK_BUMP), (not_yet, 0.0)):
+            with patch(f"{_LIVE}.trip_updates", {}), \
+                 patch(f"{_LIVE}.service_alerts", [alert]), \
+                 patch(f"{_LIVE}.vehicle_positions", {}):
+                result = _compute(hist=0.8)
+            assert result["risk_score"] == pytest.approx(0.2 + expected, abs=1e-9)
+
+    def test_alert_bump_is_capped(self):
+        """Ten alerts on one stop must not saturate the score on that signal
+        alone — the bump was previously unbounded."""
+        alerts = [
+            ServiceAlertState(alert_id=f"A{i}", header=f"Alert {i}", description="",
+                              affected_route_ids=["R1"])
+            for i in range(10)
+        ]
+        with patch(f"{_LIVE}.trip_updates", {}), \
+             patch(f"{_LIVE}.service_alerts", alerts), \
+             patch(f"{_LIVE}.vehicle_positions", {}):
+            result = _compute(hist=0.8)
+
+        assert result["risk_score"] == pytest.approx(0.2 + MAX_ALERT_RISK_BUMP, abs=1e-9)
+        assert len(result["modifiers"]) == 10  # still all reported to the rider
 
     def test_same_route_cancellation_bumps_risk(self):
         """Earlier cancellation on the same route should add CANCELLATION_RISK_BUMP."""
