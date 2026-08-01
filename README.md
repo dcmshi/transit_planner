@@ -104,7 +104,8 @@ Return up to N reliability-scored routes between two stops.
 |-----------|----------|---------|-------------|
 | `origin` | yes | — | GTFS `stop_id` of departure stop |
 | `destination` | yes | — | GTFS `stop_id` of arrival stop |
-| `departure_time` | no | now | Earliest departure as `HH:MM` or `HH:MM:SS` |
+| `departure_time` | no | now | Earliest departure as `HH:MM` or `HH:MM:SS`. Mutually exclusive with `arrive_by` |
+| `arrive_by` | no | — | Latest acceptable arrival as `HH:MM` or `HH:MM:SS`, returning the latest-departing options that still make it. GTFS hours apply, so `25:30` is 01:30 next morning |
 | `travel_date` | no | today | Travel date as `YYYY-MM-DD` |
 | `explain` | no | `false` | `true` to include LLM explanation (Ollama bundled in Docker; set `LLM_PROVIDER` in `.env`) |
 
@@ -237,6 +238,26 @@ routes. Empty until RT polling is active.
 
 ---
 
+### `GET /reliability`
+
+Inspect the stored counters behind a route's risk score — enough to tell
+whether a route scores badly from real GTFS-RT observations or from a
+synthetic prior, which `/health` (aggregate counts only) cannot.
+
+| Parameter | Required | Default | Description |
+|-----------|----------|---------|-------------|
+| `route_id` | one of these | — | GTFS `route_id` |
+| `stop_id` | one of these | — | GTFS `stop_id` |
+| `time_bucket` | no | — | `weekday_am_peak`, `weekday_pm_peak`, `weekday_offpeak`, `weekend` |
+| `limit` | no | `50` | Max records, capped at 200 |
+
+At least one of `route_id` or `stop_id` is required and results are capped —
+this is a lookup for tuning, not a bulk export. `score` is `null` with
+`neutral_prior_used: true` when a record holds too little data to score, which
+is exactly where the scorer substitutes the neutral prior.
+
+---
+
 ### `POST /ingest/reliability-seed`
 
 Seed the reliability database from the static GTFS schedule. No GTFS-RT
@@ -335,6 +356,32 @@ All settings are environment variables (see `.env.example`):
 
 ---
 
+## Schema migrations
+
+Schema changes are managed with [Alembic](https://alembic.sqlalchemy.org/).
+
+```bash
+uv run alembic upgrade head          # apply pending migrations
+uv run alembic revision --autogenerate -m "what changed"
+uv run alembic downgrade -1          # roll back one
+```
+
+The URL comes from `config.DATABASE_URL` via `alembic/env.py`, not from
+`alembic.ini`, so migrations always target the same database as the app.
+
+Two things worth knowing:
+
+- **A database created before Alembic** already has every table, because
+  `init_db()` builds the schema with `create_all`. Mark it current once with
+  `uv run alembic stamp head` rather than running the baseline migration,
+  which would try to re-create what is already there.
+- **Migrations are PostgreSQL-only.** `Stop.geog` is a GeoAlchemy2
+  `Geography` column when `DATABASE_URL` points at PostgreSQL, so the
+  baseline emits geospatial DDL that plain SQLite cannot execute. SQLite
+  (tests, local dev) keeps using `init_db()`/`create_all`.
+
+---
+
 ## Project structure
 
 ```
@@ -346,6 +393,9 @@ transit_planner/
 │   ├── cache.py             Route cache (TTL, negative, single-flight)
 │   ├── ratelimit.py         Per-IP sliding-window rate limiting
 │   └── schemas.py           Pydantic response models
+├── alembic/
+│   ├── env.py               Migration environment (URL from config.DATABASE_URL)
+│   └── versions/            Migration scripts
 ├── db/
 │   ├── models.py            SQLAlchemy ORM (GTFS + reliability)
 │   └── session.py           Engine, SessionLocal, get_session
@@ -362,6 +412,7 @@ transit_planner/
 ├── routing/
 │   └── engine.py            Yen's k-shortest paths + risk filters
 ├── config.py                All env-backed configuration
+├── alembic.ini              Alembic config (URL comes from env.py)
 ├── pyproject.toml           Dependencies (managed with uv)
 └── .env.example             Environment variable template
 ```
