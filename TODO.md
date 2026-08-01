@@ -136,6 +136,34 @@ which is true of its distance to `_TEST_E` but not to `_TEST_F` at ~467 m, so
 an `F`↔`G` edge is expected.  Both implementations agree on it; the comment is
 just narrower than it reads.)
 
+### The last departure of the service day is never dominated
+
+`_prune_dominated` treats a later departure as strictly better, so the final
+departure of the day cannot be dominated on that axis by anything.  On the
+current feed a `25:43 -> 26:05` itinerary (01:43 next morning) therefore
+survives into `/routes` results for an 08:00 query, occupying one of the five
+slots with an option nobody asked for.
+
+Not wrong by the dominance definition — it genuinely is the latest departure —
+but it is not a useful suggestion either.  Options: exclude departures beyond
+some horizon from the caller's requested time, or stop treating departure as a
+benefit axis once a route already arrives far later than the alternatives.
+Costs one slot per query; low priority.
+
+### Out-of-band ingest leaves the running graph stale
+
+`POST /ingest/gtfs-static` and the daily job both rebuild the graph in-process
+and clear the route cache after ingesting.  Ingesting any other way — a script
+calling `parse_and_store` directly, `alembic` plus a manual load — does not,
+and the running app keeps serving a graph built from data that no longer
+exists.  Observed on 2026-08-01: `/health` reported `graph_nodes=889` against
+a database holding 886 stops, and the app was routing against three stops that
+had been removed.
+
+`/health` already exposes both numbers, so the mismatch is visible; nothing
+warns about it.  Either have `build_graph` notice the drift, or document that
+out-of-band ingest requires a restart.
+
 ### Schema migration for other existing deployments
 
 This machine's Docker DB is fully migrated in place (2026-06-10 and
