@@ -509,10 +509,11 @@ def record_no_shows(session: Session) -> int:
     Each stop of the trip is recorded with was_missed=True (scheduled += 1,
     observed += 0).  Runs at most once per NO_SHOW_SWEEP_SECONDS.
 
-    Trips with post-midnight (>24:00:00) final departures are never swept —
-    their service day ends before they can satisfy the cutoff.  This is a
-    known small gap, acceptable for the Toronto–Guelph corridor where
-    service ends before midnight.
+    Post-midnight (>= 24:00:00) departures are swept on the following day:
+    a trip whose last departure is 25:30 runs at 01:30 the next morning, so
+    it is judged against yesterday's service day with the clock shifted a day
+    forward.  Previously such trips were never swept at all, so reliability
+    silently under-counted the late-evening network.
 
     Returns the number of missed departures recorded.
     """
@@ -534,40 +535,68 @@ def record_no_shows(session: Session) -> int:
     today = now_local.strftime("%Y%m%d")
     midnight = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
     now_sec = (now_local - midnight).total_seconds()
-    cutoff_sec = now_sec - NO_SHOW_GRACE_MINUTES * 60
-
     polling_local = _polling_since.astimezone(AGENCY_TZ)
-    coverage_start_sec = (
-        0.0 if polling_local < midnight else (polling_local - midnight).total_seconds()
+
+    # Two service days, because GTFS times run past 24:00:00.  A trip whose
+    # last departure is 25:30 belongs to yesterday's service day and only runs
+    # at 01:30 this morning, so today's clock never reaches 25:30 and the
+    # sweep used to skip it forever.  Judging it needs yesterday's service_id
+    # with today's elapsed time shifted a day forward.
+    #
+    #   (service day, seconds elapsed on it, earliest departure to consider)
+    #
+    # Yesterday's pass only looks at departures at or after 24:00:00 —
+    # everything earlier was already sweepable during yesterday itself.
+    yesterday = (now_local - timedelta(days=1)).strftime("%Y%m%d")
+    day_midnight = {today: midnight, yesterday: midnight - timedelta(days=1)}
+    passes = (
+        (today, now_sec, 0.0),
+        (yesterday, now_sec + 24 * 3600, 24 * 3600.0),
     )
 
-    # NOT EXISTS mirrors the routing query: trips removed for this date via
-    # calendar_dates (exception_type=2 — holiday schedules, planned
-    # closures) were never supposed to run and must not become no-shows.
-    candidates = session.execute(
-        text(f"""
-            SELECT t.trip_id, t.route_id
-            FROM trips t
-            JOIN stop_times st ON st.trip_id = t.trip_id
-            WHERE t.service_id = :today
-              AND NOT EXISTS (
-                    SELECT 1 FROM service_calendar_dates scd
-                    WHERE scd.service_id   = t.service_id
-                      AND scd.date         = :today
-                      AND scd.exception_type = 2
-                  )
-            GROUP BY t.trip_id, t.route_id
-            HAVING MAX({_DEP_SEC_SQL}) <= :cutoff
-               AND MIN({_DEP_SEC_SQL}) >= :coverage_start
-        """),
-        {"today": today, "cutoff": cutoff_sec, "coverage_start": coverage_start_sec},
-    ).fetchall()
+    route_by_trip: dict[str, str] = {}
+    service_day_of: dict[str, str] = {}
+    for service_day, elapsed_sec, min_departure_sec in passes:
+        cutoff_sec = elapsed_sec - NO_SHOW_GRACE_MINUTES * 60
+        start = day_midnight[service_day]
+        coverage_start_sec = (
+            0.0 if polling_local < start else (polling_local - start).total_seconds()
+        )
 
-    route_by_trip = {
-        trip_id: route_id
-        for trip_id, route_id in candidates
-        if trip_id not in _recorded_today and trip_id not in _seen_in_rt_today
-    }
+        # NOT EXISTS mirrors the routing query: trips removed for this date via
+        # calendar_dates (exception_type=2 — holiday schedules, planned
+        # closures) were never supposed to run and must not become no-shows.
+        candidates = session.execute(
+            text(f"""
+                SELECT t.trip_id, t.route_id
+                FROM trips t
+                JOIN stop_times st ON st.trip_id = t.trip_id
+                WHERE t.service_id = :service_day
+                  AND NOT EXISTS (
+                        SELECT 1 FROM service_calendar_dates scd
+                        WHERE scd.service_id   = t.service_id
+                          AND scd.date         = :service_day
+                          AND scd.exception_type = 2
+                      )
+                GROUP BY t.trip_id, t.route_id
+                HAVING MAX({_DEP_SEC_SQL}) <= :cutoff
+                   AND MAX({_DEP_SEC_SQL}) >= :min_departure
+                   AND MIN({_DEP_SEC_SQL}) >= :coverage_start
+            """),
+            {
+                "service_day": service_day,
+                "cutoff": cutoff_sec,
+                "min_departure": min_departure_sec,
+                "coverage_start": coverage_start_sec,
+            },
+        ).fetchall()
+
+        for trip_id, route_id in candidates:
+            if trip_id in _recorded_today or trip_id in _seen_in_rt_today:
+                continue
+            route_by_trip[trip_id] = route_id
+            service_day_of[trip_id] = service_day
+
     if not route_by_trip:
         return 0
 
@@ -580,7 +609,7 @@ def record_no_shows(session: Session) -> int:
     recorded = 0
     newly_recorded: set[str] = set()
     for trip_id, stop_id, dep_time in stop_rows:
-        scheduled_at = _parse_scheduled_at(dep_time, today, trip_id)
+        scheduled_at = _parse_scheduled_at(dep_time, service_day_of[trip_id], trip_id)
         if scheduled_at is None:
             continue
         record_observed_departure(
@@ -599,7 +628,10 @@ def record_no_shows(session: Session) -> int:
         # Same commit discipline as observe_departures: markers persist in
         # the same transaction; in-memory state updates only after commit.
         for trip_id in newly_recorded:
-            session.add(ObservedTrip(trip_id=trip_id, recorded_date=today))
+            # Marker keyed by the trip's service date, matching
+            # observe_departures, so the rollover purge ages it correctly.
+            session.add(ObservedTrip(trip_id=trip_id,
+                                     recorded_date=service_day_of[trip_id]))
         session.commit()
         _recorded_today |= newly_recorded
         logger.info(

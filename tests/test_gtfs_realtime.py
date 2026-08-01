@@ -832,3 +832,91 @@ class TestPollAll:
         # Second backoff should be further in the future than first
         assert backoff_1 is not None and backoff_2 is not None
         assert backoff_2 > backoff_1
+
+
+# ---------------------------------------------------------------------------
+# No-show sweep — post-midnight departures
+# ---------------------------------------------------------------------------
+
+def _add_yesterdays_trip(session, trip_id, dep1, dep2):
+    """Seed a trip on YESTERDAY's service date, times in GTFS seconds-past
+    that day's midnight (so >= 24:00:00 means this morning)."""
+    yesterday = (_FROZEN_LOCAL - timedelta(days=1)).strftime("%Y%m%d")
+    session.add(Trip(trip_id=trip_id, route_id="R1", service_id=yesterday,
+                     trip_headsign="GL", direction_id=0))
+    session.add(StopTime(trip_id=trip_id, stop_id="S1", stop_sequence=1,
+                         departure_time=dep1, arrival_time=dep1))
+    session.add(StopTime(trip_id=trip_id, stop_id="S2", stop_sequence=2,
+                         departure_time=dep2, arrival_time=dep2))
+    session.commit()
+    return yesterday
+
+
+class TestNoShowsPastMidnight:
+    """A trip whose last departure is 25:30 belongs to yesterday's service day
+    and runs at 01:30 this morning.  Today's clock never reaches 25:30, so the
+    sweep used to skip such trips forever and reliability silently
+    under-counted the late-evening network."""
+
+    def _arm_polling(self, hours_before=24):
+        rt_mod._polling_since = _FROZEN_UTC - timedelta(hours=hours_before)
+        rt_mod._recorded_date = _FROZEN_LOCAL.strftime("%Y%m%d")
+
+    def test_post_midnight_trip_is_swept(self, obs_db, frozen_now):
+        from db.models import ReliabilityRecord
+
+        # 24:30 / 25:00 on yesterday's service day = 00:30 / 01:00 today,
+        # both long past the frozen 15:00 plus grace.
+        _add_yesterdays_trip(obs_db, "T_owl", "24:30:00", "25:00:00")
+        self._arm_polling()
+
+        assert rt_mod.record_no_shows(obs_db) == 2
+        recs = obs_db.query(ReliabilityRecord).all()
+        assert sum(r.scheduled_departures for r in recs) == 2
+        assert sum(r.observed_departures for r in recs) == 0
+
+    def test_marker_uses_the_trips_service_date(self, obs_db, frozen_now):
+        """Not today's date — observe_departures keys markers by service date
+        and the rollover purge ages them on that basis."""
+        from db.models import ObservedTrip
+
+        yesterday = _add_yesterdays_trip(obs_db, "T_owl", "24:30:00", "25:00:00")
+        self._arm_polling()
+        rt_mod.record_no_shows(obs_db)
+
+        marker = obs_db.query(ObservedTrip).filter_by(trip_id="T_owl").one()
+        assert marker.recorded_date == yesterday
+
+    def test_yesterdays_daytime_trips_are_not_reswept(self, obs_db, frozen_now):
+        """Everything before 24:00:00 was already sweepable during yesterday;
+        re-sweeping would double-count it."""
+        _add_yesterdays_trip(obs_db, "T_daytime", "12:00:00", "12:10:00")
+        self._arm_polling()
+        assert rt_mod.record_no_shows(obs_db) == 0
+
+    def test_post_midnight_trip_still_in_the_future_is_left_alone(self, obs_db, frozen_now):
+        """A 38:00 departure on yesterday's day is 14:00 today — inside the
+        grace period at the frozen 15:00, so not yet a no-show."""
+        _add_yesterdays_trip(obs_db, "T_soon", "38:00:00", "38:50:00")
+        self._arm_polling()
+        assert rt_mod.record_no_shows(obs_db) == 0
+
+    def test_post_midnight_trip_seen_in_rt_is_not_marked(self, obs_db, frozen_now):
+        _add_yesterdays_trip(obs_db, "T_owl", "24:30:00", "25:00:00")
+        self._arm_polling()
+        rt_mod._seen_in_rt_today.add("T_owl")
+        assert rt_mod.record_no_shows(obs_db) == 0
+
+    def test_coverage_gap_before_the_trip_ran_excludes_it(self, obs_db, frozen_now):
+        """Polling only started this morning at 09:00, after the 00:30
+        departure — we were not watching, so it cannot be judged."""
+        _add_yesterdays_trip(obs_db, "T_owl", "24:30:00", "25:00:00")
+        self._arm_polling(hours_before=6)  # 09:00 today
+        assert rt_mod.record_no_shows(obs_db) == 0
+
+    def test_todays_trips_still_swept_alongside(self, obs_db, frozen_now):
+        """The second pass must not displace the first."""
+        _add_todays_trip(obs_db, "T_ghost")
+        _add_yesterdays_trip(obs_db, "T_owl", "24:30:00", "25:00:00")
+        self._arm_polling()
+        assert rt_mod.record_no_shows(obs_db) == 4  # two stops each

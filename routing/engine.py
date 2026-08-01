@@ -154,6 +154,11 @@ def find_routes(
 
     raw_paths = nx.shortest_simple_paths(H, origin_stop_id, destination_stop_id, weight="weight")
 
+    service_date = departure_dt.strftime("%Y%m%d")
+    requested_not_before = (
+        departure_dt.hour * 3600 + departure_dt.minute * 60 + departure_dt.second
+    )
+
     # Per-call cache eliminates redundant DB queries across candidate paths.
     cache = _RouteQueryCache()
 
@@ -164,7 +169,9 @@ def find_routes(
         for examined, node_path in enumerate(raw_paths):
             if examined >= MAX_CANDIDATES:
                 break
-            legs = _schedule_path(session, G, node_path, departure_dt, cache)
+            legs = _schedule_path(
+                session, G, node_path, service_date, requested_not_before, cache
+            )
             if legs is None:
                 continue
             if not _passes_filters(legs):
@@ -273,24 +280,26 @@ def _schedule_path(
     session: Session,
     G: nx.MultiDiGraph,
     node_path: list[str],
-    departure_dt: datetime,
+    service_date: str,
+    not_before_sec: int,
     cache: _RouteQueryCache | None = None,
 ) -> Route | None:
     """
     Convert a graph node-path into time-coherent legs.
 
     Groups consecutive trip-edge stops by route_id into segments.  For each
-    segment, queries the database for the earliest real trip running on
-    departure_dt's date that departs from the segment's first stop at or after
-    the running not_before time.  Walk legs are threaded in between.
+    segment, queries the database for the earliest real trip on service_date
+    departing the segment's first stop at or after not_before_sec.  Walk legs
+    are threaded in between.
+
+    Takes the service date and an offset in seconds rather than a datetime
+    because GTFS times run past 24:00:00 and datetime cannot hold hour 25 —
+    a 25:30 departure belongs to its service date at 91800s, not to the next
+    calendar day at 5400s.
 
     Returns None if any trip segment has no viable trip (no service on that
     date, or last departure already passed).
     """
-    service_date = departure_dt.strftime("%Y%m%d")
-    not_before_sec = (
-        departure_dt.hour * 3600 + departure_dt.minute * 60 + departure_dt.second
-    )
 
     legs: Route = []
     i = 0
@@ -945,11 +954,14 @@ def _fill_later_departures(
     Terminates when the target count is reached or every path is exhausted
     (no more trips in the timetable for that date).
 
-    Note: datetime cannot represent hours >= 24, so fill stops at 23:59:59.
-    GO Transit Toronto–Guelph service ends well before midnight, so this is
-    not a practical limitation.
+    Post-midnight departures are included.  This used to stop at 23:59:59
+    because it built a datetime per candidate and datetime cannot hold hour
+    25; the cap silently dropped every GTFS time past midnight, of which the
+    loaded feed has 81,531 across 5,995 trips.  _schedule_path now takes the
+    service date and an offset in seconds, so a 25:30 departure stays on its
+    own service day instead of rolling onto the next.
     """
-    travel_day = departure_dt.date()
+    service_date = departure_dt.strftime("%Y%m%d")
 
     # Seed each path's not_before with 1 second past its first trip departure.
     path_not_before: list[int | None] = []
@@ -960,7 +972,10 @@ def _fill_later_departures(
         else:
             path_not_before.append(None)
 
-    MAX_SECONDS = 23 * 3600 + 59 * 60 + 59  # 23:59:59
+    # Backstop only: the loop really ends when _schedule_path runs out of
+    # trips and marks the path exhausted.  GTFS permits times past 24:00:00
+    # for trips that cross midnight; 48h covers any realistic service day.
+    MAX_SECONDS = 48 * 3600 - 1
 
     while len(routes) < max_routes:
         any_active = False
@@ -971,9 +986,7 @@ def _fill_later_departures(
             if nb is None or nb > MAX_SECONDS:
                 continue
             any_active = True
-            h, m, s = nb // 3600, (nb % 3600) // 60, nb % 60
-            next_dt = datetime(travel_day.year, travel_day.month, travel_day.day, h, m, s)
-            legs = _schedule_path(session, G, node_path, next_dt, cache)
+            legs = _schedule_path(session, G, node_path, service_date, nb, cache)
             if legs is None:
                 path_not_before[i] = None  # no more trips on this path today
                 continue

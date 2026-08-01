@@ -487,9 +487,9 @@ class TestFillLaterDepartures:
         later_legs = self._make_route("T2", "10:00:00", "11:00:00")
 
         call_count = {"n": 0}
-        def fake_schedule(session, G, node_path, dt, cache=None):
+        def fake_schedule(session, G, node_path, service_date, not_before, cache=None):
             call_count["n"] += 1
-            if dt.hour >= 10:
+            if not_before >= 10 * 3600:
                 return None  # exhausted after T2
             return later_legs
 
@@ -518,10 +518,10 @@ class TestFillLaterDepartures:
         seen_legs = self._make_route("T2", "10:00:00", "11:00:00")
         fresh_legs = self._make_route("T3", "11:00:00", "12:00:00")
 
-        def fake_schedule(session, G, node_path, dt, cache=None):
-            if dt.hour < 10 or (dt.hour == 10 and dt.minute == 0 and dt.second <= 1):
+        def fake_schedule(session, G, node_path, service_date, not_before, cache=None):
+            if not_before <= 10 * 3600 + 1:
                 return seen_legs
-            if dt.hour < 11 or (dt.hour == 11 and dt.minute == 0 and dt.second <= 1):
+            if not_before <= 11 * 3600 + 1:
                 return fresh_legs
             return None
 
@@ -552,10 +552,10 @@ class TestFillLaterDepartures:
         bad_legs = self._make_route("T_bad", "09:00:00", "10:00:00")
         good_legs = self._make_route("T_good", "10:00:00", "11:00:00")
 
-        def fake_schedule(session, G, node_path, dt, cache=None):
-            if dt.hour < 9 or (dt.hour == 9 and dt.minute == 0 and dt.second <= 1):
+        def fake_schedule(session, G, node_path, service_date, not_before, cache=None):
+            if not_before <= 9 * 3600 + 1:
                 return bad_legs
-            if dt.hour < 10 or (dt.hour == 10 and dt.minute == 0 and dt.second <= 1):
+            if not_before <= 10 * 3600 + 1:
                 return good_legs
             return None
 
@@ -587,8 +587,8 @@ class TestFillLaterDepartures:
 
         bad_legs = self._make_route("T_bad", "10:00:00", "11:00:00")
 
-        def fake_schedule(session, G, node_path, dt, cache=None):
-            if dt.hour < 10 or (dt.hour == 10 and dt.minute == 0 and dt.second <= 1):
+        def fake_schedule(session, G, node_path, service_date, not_before, cache=None):
+            if not_before <= 10 * 3600 + 1:
                 return bad_legs
             return None  # timetable exhausted
 
@@ -623,6 +623,75 @@ class TestFillLaterDepartures:
             seen, datetime(2026, 2, 17, 8, 0, 0), max_routes=3,
         )
         assert len(result) == 1
+
+
+class TestFillLaterDeparturesPastMidnight:
+    """GTFS times run past 24:00:00 for trips crossing midnight. The fill loop
+    used to build a datetime per candidate, and datetime cannot hold hour 25,
+    so it capped at 23:59:59 and silently dropped every such departure — the
+    loaded feed has 81,531 of them across 5,995 trips."""
+
+    def _route(self, trip_id, dep, arr):
+        return [_trip("R1", dep, arr, 3600, trip_id=trip_id)]
+
+    def test_post_midnight_departure_is_reachable(self, monkeypatch):
+        import routing.engine as eng
+
+        late = self._route("T_LATE", "25:30:00", "26:10:00")
+
+        def fake_schedule(session, G, node_path, service_date, not_before, cache=None):
+            # Only a post-midnight departure remains.
+            if not_before <= _hms_to_seconds("25:30:00"):
+                return late
+            return None
+
+        monkeypatch.setattr(eng, "_schedule_path", fake_schedule)
+        monkeypatch.setattr(eng, "_passes_filters", lambda legs: True)
+
+        routes = [self._route("T1", "23:00:00", "23:40:00")]
+        seen: set[tuple[str, ...]] = {("T1",)}
+        out = eng._fill_later_departures(
+            MagicMock(), nx.MultiDiGraph(), routes, [["A", "B"]], seen,
+            datetime(2026, 2, 17, 22, 0), max_routes=2,
+        )
+        assert [r[0]["departure_time"] for r in out] == ["23:00:00", "25:30:00"]
+
+    def test_service_date_stays_on_the_travel_day(self, monkeypatch):
+        """A 25:30 departure belongs to its own service date, not to the next
+        calendar day — rolling the datetime over would query the wrong day."""
+        import routing.engine as eng
+
+        seen_dates = []
+
+        def fake_schedule(session, G, node_path, service_date, not_before, cache=None):
+            seen_dates.append(service_date)
+            return None
+
+        monkeypatch.setattr(eng, "_schedule_path", fake_schedule)
+        eng._fill_later_departures(
+            MagicMock(), nx.MultiDiGraph(),
+            [self._route("T1", "23:50:00", "24:30:00")], [["A", "B"]],
+            {("T1",)}, datetime(2026, 2, 17, 22, 0), max_routes=3,
+        )
+        assert seen_dates and set(seen_dates) == {"20260217"}
+
+    def test_not_before_passed_as_gtfs_seconds(self, monkeypatch):
+        import routing.engine as eng
+
+        seen_offsets = []
+
+        def fake_schedule(session, G, node_path, service_date, not_before, cache=None):
+            seen_offsets.append(not_before)
+            return None
+
+        monkeypatch.setattr(eng, "_schedule_path", fake_schedule)
+        eng._fill_later_departures(
+            MagicMock(), nx.MultiDiGraph(),
+            [self._route("T1", "24:30:00", "25:00:00")], [["A", "B"]],
+            {("T1",)}, datetime(2026, 2, 17, 22, 0), max_routes=3,
+        )
+        # 24:30:00 + 1s, well past the old 23:59:59 ceiling.
+        assert seen_offsets == [_hms_to_seconds("24:30:00") + 1]
 
 
 # ---------------------------------------------------------------------------
@@ -845,7 +914,6 @@ class TestFindTripLegs:
         period); the candidate ranked first has no trips on the travel date.
         _schedule_path must fall back to the other candidate instead of
         returning None (regression — found live with the June 2026 feed)."""
-        from datetime import datetime
 
         import routing.engine as eng
 
@@ -861,7 +929,7 @@ class TestFindTripLegs:
 
         assert eng._rank_routes_by_coverage(G, ["S1", "S2", "S3"], 0) == ["00-FUTURE", "R1"]
 
-        legs = eng._schedule_path(trip_db, G, ["S1", "S2", "S3"], datetime(2026, 3, 2, 7, 0, 0))
+        legs = eng._schedule_path(trip_db, G, ["S1", "S2", "S3"], "20260302", 7 * 3600)
         assert legs is not None
         assert all(leg["route_id"] == "R1" for leg in legs)
 
@@ -871,7 +939,6 @@ class TestFindTripLegs:
         times (weight 600 vs 900) was the sole candidate — and when it had
         no trips on the travel date, the whole path died despite a valid
         slower alternative."""
-        from datetime import datetime
 
         import routing.engine as eng
 
@@ -887,7 +954,7 @@ class TestFindTripLegs:
         assert ranked == ["R_fast", "R1"]  # both candidates, fastest first
 
         legs = eng._schedule_path(trip_db, G, ["S1", "S2", "S3"],
-                                  datetime(2026, 3, 2, 7, 0, 0))
+                                  "20260302", 7 * 3600)
         assert legs is not None
         assert all(leg["route_id"] == "R1" for leg in legs)
 
@@ -917,7 +984,6 @@ class TestFindTripLegs:
         # _find_trip_legs can theoretically return [] (empty, not None) for a
         # degenerate single-stop segment on a circular trip. _schedule_path must
         # handle this without raising IndexError on trip_legs[-1].
-        from datetime import datetime
         from unittest.mock import patch
 
         import routing.engine as eng
@@ -925,7 +991,7 @@ class TestFindTripLegs:
         G = _make_trip_graph()
 
         with patch.object(eng, "_find_trip_legs", return_value=[]):
-            result = eng._schedule_path(trip_db, G, ["S1", "S2"], datetime(2026, 3, 2, 8, 0, 0))
+            result = eng._schedule_path(trip_db, G, ["S1", "S2"], "20260302", 8 * 3600)
         assert result is None
 
 
@@ -1221,7 +1287,7 @@ class TestLegCoordinates:
         G = self._graph()
         G.add_edge("A", "B", kind="walk", distance_m=250.0, walk_seconds=200, weight=200)
 
-        legs = _schedule_path(MagicMock(), G, ["A", "B"], datetime(2026, 2, 17, 8, 0))
+        legs = _schedule_path(MagicMock(), G, ["A", "B"], "20260217", 8 * 3600)
 
         assert legs is not None
         leg = legs[0]
@@ -1251,7 +1317,7 @@ class TestLegCoordinates:
         G.add_node("B", name="Stop B", lat=43.6, lon=-79.8)
         G.add_edge("A", "B", kind="walk", distance_m=100.0, walk_seconds=80, weight=80)
 
-        legs = _schedule_path(MagicMock(), G, ["A", "B"], datetime(2026, 2, 17, 8, 0))
+        legs = _schedule_path(MagicMock(), G, ["A", "B"], "20260217", 8 * 3600)
 
         assert legs is not None
         assert legs[0]["from_lat"] is None

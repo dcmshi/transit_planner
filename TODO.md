@@ -76,13 +76,16 @@ premise is false for the feed already loaded: **81,531 stop_times across
 
 Work needed to honestly support the whole network:
 
-- `routing/engine.py` `_fill_later_departures` caps `not_before` at
-  `MAX_SECONDS = 23:59:59`, so any path whose next departure is a >= 24:00:00
-  GTFS time is dropped instead of returned.
-- The no-show sweep in `ingestion/gtfs_realtime.py` skips >= 24:00:00 final
-  departures (currently listed below as deferred on the same false premise) —
-  those trips never get their `scheduled_departures` incremented, so
-  reliability silently under-counts the late-evening network.
+- ✅ **Done 2026-08-01.** `routing/engine.py` `_fill_later_departures` capped
+  `not_before` at `MAX_SECONDS = 23:59:59`, dropping every >= 24:00:00 GTFS
+  departure.  `_schedule_path` now takes a service date and an offset in
+  seconds instead of a datetime, so hour 25 is representable.  On five probe
+  pairs queried at 23:00 the result count went from 2–4 to a full 5, the extra
+  departures all post-midnight.
+- ✅ **Done 2026-08-01.** The no-show sweep now judges yesterday's
+  post-midnight tail against yesterday's service day with the clock shifted a
+  day forward, so those trips get `scheduled_departures` incremented instead
+  of being skipped forever.
 - `calendar.txt` / `exception_type` service resolution (also deferred below)
   matters more once trips outside the corridor are in scope, since the
   service_id-is-a-date convention was only validated against it.
@@ -219,11 +222,5 @@ needs.  See "Schema migrations" in the README.
   service_id-is-a-date convention is now validated at ingest (aborts
   loudly on a convention change), but full ServiceCalendar-based service
   resolution only becomes necessary if Metrolinx actually changes format.
-- **No-show sweep skips >24:00:00 final departures** — their service day
-  ends before the cutoff can pass.  Was deferred as "irrelevant for the
-  Toronto–Guelph corridor where service ends before midnight"; that premise
-  does not hold for the feed actually ingested (5,995 trips have
-  >= 24:00:00 departures), so this is now tracked under the corridor item
-  above rather than deferred on those grounds.
 - **Risk aggregation: max leg risk vs weighted sum** (ADR-006) — revisit
   once enough real GTFS-RT observations accumulate.
