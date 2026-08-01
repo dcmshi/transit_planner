@@ -56,6 +56,17 @@ Route = list[dict[str, Any]]
 # intermediate stop of the segment.
 _MAX_TRIP_ATTEMPTS = 5
 
+# Hard cap on candidate paths examined, as a multiple of max_routes — stops
+# Yen's running away on graphs where walk edges create heavy branching.  Each
+# candidate costs DB queries, so this is the main lever on /routes latency.
+#
+# Was 15 while most candidates were being spent on itineraries _prune_dominated
+# would later discard.  With dominance applied during generation a sweep over
+# hub pairs returned identical routes at 3; the lowest value that still matched
+# 15 everywhere tested — including an obscure pair that lost a route at 3 — was
+# 4, and 5 leaves margin for roughly a 2.5x speedup.
+CANDIDATE_PATH_MULTIPLIER = 5
+
 
 class _RouteQueryCache:
     """
@@ -120,11 +131,7 @@ def find_routes(
     if destination_stop_id not in G:
         raise ValueError(f"Destination stop '{destination_stop_id}' not found in graph.")
 
-    # Hard cap on total candidate paths examined — prevents hanging on graphs
-    # with many walk edges.  15× gives a good balance: enough candidates to
-    # find max_routes distinct results while keeping Yen's iterations (and the
-    # DB queries each path triggers) well under the old 40× ceiling.
-    MAX_CANDIDATES = max_routes * 15
+    MAX_CANDIDATES = max_routes * CANDIDATE_PATH_MULTIPLIER
 
     raw_paths = nx.shortest_simple_paths(H, origin_stop_id, destination_stop_id, weight="weight")
 
