@@ -164,6 +164,11 @@ Search stops by name substring. Use this to find `stop_id` values.
 
 **Responses:** `200` with array of `{stop_id, stop_name, lat, lon, routes_served}` objects; empty array if no match.
 
+`routes_served` is read from the `stop_routes` table, which ingest
+materialises from `stop_times` × `trips`. Deriving it per request meant a
+`DISTINCT` over ~72,000 rows to produce a few dozen pairs (~46 ms); reading
+it back takes ~5 ms.
+
 ```bash
 curl "http://localhost:8000/stops?query=Guelph"
 curl "http://localhost:8000/stops?query=Union"
@@ -397,7 +402,8 @@ transit_planner/
 │   ├── env.py               Migration environment (URL from config.DATABASE_URL)
 │   └── versions/            Migration scripts
 ├── db/
-│   ├── models.py            SQLAlchemy ORM (GTFS + reliability)
+│   ├── models.py            SQLAlchemy ORM (GTFS + reliability + stop_routes)
+│   ├── alembic_hooks.py     Autogenerate filter (ignores extension tables)
 │   └── session.py           Engine, SessionLocal, get_session
 ├── graph/
 │   └── builder.py           networkx MultiDiGraph construction

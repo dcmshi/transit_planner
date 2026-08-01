@@ -1254,3 +1254,43 @@ class TestReliabilityEndpoint:
         rec = client.get("/reliability?route_id=R1").json()[0]
         assert rec["scheduled_departures"] == 0.0
         assert rec["score"] is None
+
+
+# ---------------------------------------------------------------------------
+# /stops routes_served, from the materialised stop_routes lookup
+# ---------------------------------------------------------------------------
+
+class TestStopRoutesLookup:
+    """routes_served used to come from a DISTINCT over the stop_times/trips
+    join — ~72,000 rows scanned per request to produce a few dozen pairs.
+    It is now materialised at ingest and simply read back."""
+
+    def _seed(self, db):
+        from db.models import Route, StopRoute
+
+        db.add(Stop(stop_id="UN", stop_name="Union Station GO",
+                    stop_lat=43.6453, stop_lon=-79.3806))
+        db.add(Stop(stop_id="GL", stop_name="Guelph Central GO",
+                    stop_lat=43.5448, stop_lon=-80.2482))
+        for rid in ("R1", "R2"):
+            db.add(Route(route_id=rid, route_short_name=rid, route_long_name="", route_type=3))
+        db.add(StopRoute(stop_id="UN", route_id="R2"))
+        db.add(StopRoute(stop_id="UN", route_id="R1"))
+        db.commit()
+
+    def test_routes_served_comes_from_the_lookup(self, client, db_session):
+        self._seed(db_session)
+        result = client.get("/stops?query=Union").json()[0]
+        assert result["routes_served"] == ["R1", "R2"]  # sorted for stable output
+
+    def test_stop_with_no_routes_returns_empty_list(self, client, db_session):
+        self._seed(db_session)
+        result = client.get("/stops?query=Guelph").json()[0]
+        assert result["routes_served"] == []
+
+    def test_lookup_is_not_consulted_for_other_stops(self, client, db_session):
+        self._seed(db_session)
+        by_name = {s["stop_name"]: s["routes_served"]
+                   for s in client.get("/stops?query=GO").json()}
+        assert by_name["Union Station GO"] == ["R1", "R2"]
+        assert by_name["Guelph Central GO"] == []

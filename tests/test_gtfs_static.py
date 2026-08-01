@@ -22,10 +22,12 @@ from db.models import (
     ServiceCalendar,
     ServiceCalendarDate,
     Stop,
+    StopRoute,
     StopTime,
     Trip,
 )
 from ingestion.gtfs_static import (
+    _build_stop_routes,
     _parse_calendar,
     _parse_calendar_dates,
     _parse_routes,
@@ -503,6 +505,23 @@ class TestParseAndStore:
         assert db.query(ServiceCalendar).count() == 1
         assert db.query(ServiceCalendarDate).count() == 2
 
+    def test_stop_routes_lookup_built_during_ingest(self, db):
+        """/stops reads this table; nothing else populates it, so a full
+        ingest has to leave it consistent with the stop_times just loaded."""
+        parse_and_store(_make_gtfs_zip(), db)
+        pairs = sorted((sr.stop_id, sr.route_id) for sr in db.query(StopRoute).all())
+        expected = sorted(
+            {(st.stop_id, "R1") for st in db.query(StopTime).all()}
+        )
+        assert pairs == expected
+        assert pairs  # the fixture does produce calls
+
+    def test_reingest_rebuilds_the_lookup(self, db):
+        parse_and_store(_make_gtfs_zip(), db)
+        before = db.query(StopRoute).count()
+        parse_and_store(_make_gtfs_zip(), db)
+        assert db.query(StopRoute).count() == before  # not doubled
+
     def test_orphaned_trip_excluded(self, db):
         parse_and_store(_make_gtfs_zip(), db)
         trip_ids = [t.trip_id for t in db.query(Trip).all()]
@@ -745,3 +764,75 @@ class TestDownloadGtfsZip:
             result = await download_gtfs_zip(url="https://example.com/gtfs.zip")
 
         assert result == fake_zip
+
+
+# ---------------------------------------------------------------------------
+# _build_stop_routes — the materialised stop -> routes lookup
+# ---------------------------------------------------------------------------
+
+class TestBuildStopRoutes:
+    """/stops reads this instead of running a DISTINCT over the
+    stop_times/trips join on every request."""
+
+    def _seed(self, db):
+        db.add(Stop(stop_id="S1", stop_name="Stop 1", stop_lat=43.0, stop_lon=-79.0))
+        db.add(Stop(stop_id="S2", stop_name="Stop 2", stop_lat=43.1, stop_lon=-79.1))
+        db.add(Stop(stop_id="S3", stop_name="Stop 3", stop_lat=43.2, stop_lon=-79.2))
+        for rid in ("R1", "R2"):
+            db.add(Route(route_id=rid, route_short_name=rid, route_long_name="", route_type=3))
+        db.add(Trip(trip_id="T1", route_id="R1", service_id="20260209",
+                    trip_headsign="", direction_id=0))
+        db.add(Trip(trip_id="T2", route_id="R2", service_id="20260209",
+                    trip_headsign="", direction_id=0))
+        db.flush()
+
+    def _pairs(self, db):
+        return sorted(
+            (sr.stop_id, sr.route_id) for sr in db.query(StopRoute).all()
+        )
+
+    def test_pairs_match_the_join_it_replaces(self, db):
+        self._seed(db)
+        # T1 (R1) calls at S1, S2; T2 (R2) calls at S2 only.  S3 is unserved.
+        for trip_id, stop_id, seq in (("T1", "S1", 1), ("T1", "S2", 2), ("T2", "S2", 1)):
+            db.add(StopTime(trip_id=trip_id, stop_id=stop_id, stop_sequence=seq,
+                            arrival_time="08:00:00", departure_time="08:00:00"))
+        db.flush()
+
+        _build_stop_routes(db)
+        assert self._pairs(db) == [("S1", "R1"), ("S2", "R1"), ("S2", "R2")]
+
+    def test_repeated_calls_collapse_to_one_pair(self, db):
+        """A route calling at a stop on many trips is still one pair."""
+        self._seed(db)
+        for seq, (trip_id, stop_id) in enumerate(
+            [("T1", "S1"), ("T1", "S1"), ("T1", "S1")], start=1
+        ):
+            db.add(StopTime(trip_id=trip_id, stop_id=stop_id, stop_sequence=seq,
+                            arrival_time="08:00:00", departure_time="08:00:00"))
+        db.flush()
+
+        _build_stop_routes(db)
+        assert self._pairs(db) == [("S1", "R1")]
+
+    def test_rebuild_clears_stale_pairs(self, db):
+        """Re-ingest must not leave a stop mapped to a route that no longer
+        calls there — the table is derived, so it cannot accumulate."""
+        self._seed(db)
+        db.add(StopTime(trip_id="T1", stop_id="S1", stop_sequence=1,
+                        arrival_time="08:00:00", departure_time="08:00:00"))
+        db.flush()
+        _build_stop_routes(db)
+        assert self._pairs(db) == [("S1", "R1")]
+
+        db.query(StopTime).delete()
+        db.add(StopTime(trip_id="T2", stop_id="S3", stop_sequence=1,
+                        arrival_time="09:00:00", departure_time="09:00:00"))
+        db.flush()
+        _build_stop_routes(db)
+        assert self._pairs(db) == [("S3", "R2")]
+
+    def test_empty_stop_times_yields_no_pairs(self, db):
+        self._seed(db)
+        _build_stop_routes(db)
+        assert self._pairs(db) == []

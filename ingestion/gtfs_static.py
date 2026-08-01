@@ -5,7 +5,7 @@ Feed contents used:
   stops.txt          → Stop
   routes.txt         → Route
   trips.txt          → Trip
-  stop_times.txt     → StopTime
+  stop_times.txt     → StopTime (and the derived StopRoute lookup)
   calendar.txt       → ServiceCalendar
   calendar_dates.txt → ServiceCalendarDate
 """
@@ -20,6 +20,9 @@ from typing import Any, cast
 
 import httpx
 import pandas as pd
+from sqlalchemy import CursorResult
+from sqlalchemy import insert as sa_insert
+from sqlalchemy import select as sa_select
 from sqlalchemy.orm import Session
 
 from config import DATA_DIR, DATABASE_URL, GTFS_STATIC_URL
@@ -28,6 +31,7 @@ from db.models import (
     ServiceCalendar,
     ServiceCalendarDate,
     Stop,
+    StopRoute,
     StopTime,
     Trip,
 )
@@ -106,6 +110,7 @@ def parse_and_store(zip_bytes: bytes, session: Session) -> None:
         # trips references routes.  The parsers below delete their own table
         # before inserting, but they run parents-first, which violates FK
         # constraints on PostgreSQL when data already exists (re-ingest).
+        session.query(StopRoute).delete()
         session.query(StopTime).delete()
         session.query(Trip).delete()
         # Calendar tables are cleared unconditionally: their parsers only
@@ -120,6 +125,7 @@ def parse_and_store(zip_bytes: bytes, session: Session) -> None:
         _parse_routes(read("routes.txt"), session)
         _parse_trips(read("trips.txt"), session)
         _parse_stop_times(read("stop_times.txt"), session)
+        _build_stop_routes(session)
 
         if "calendar.txt" in names:
             _parse_calendar(read("calendar.txt"), session)
@@ -299,6 +305,30 @@ def _parse_stop_times(df: pd.DataFrame, session: Session) -> None:
             "Skipped %d stop_times whose times are not H:MM:SS or HH:MM:SS.", malformed_times
         )
     logger.info("Loaded %d stop times.", loaded)
+
+
+def _build_stop_routes(session: Session) -> None:
+    """
+    Materialise the stop → routes mapping that /stops used to derive per
+    request from a DISTINCT over the stop_times/trips join.
+
+    Computed in SQL rather than pulled into Python: the source is the largest
+    table in the database and the result is a few thousand rows.
+    """
+    session.query(StopRoute).delete()
+    session.flush()
+    # Session.execute() is typed Result[Any]; DML always yields a CursorResult,
+    # which is where rowcount lives.
+    result = cast(CursorResult[Any], session.execute(
+        sa_insert(StopRoute).from_select(
+            ["stop_id", "route_id"],
+            sa_select(StopTime.stop_id, Trip.route_id)
+            .join(Trip, Trip.trip_id == StopTime.trip_id)
+            .where(StopTime.stop_id.isnot(None), Trip.route_id.isnot(None))
+            .distinct(),
+        )
+    ))
+    logger.info("Built %d stop/route pairs.", result.rowcount)
 
 
 def _parse_calendar(df: pd.DataFrame, session: Session) -> None:

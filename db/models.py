@@ -87,6 +87,21 @@ class StopTime(Base):
     stop: Mapped["Stop | None"] = relationship(back_populates="stop_times")
 
 
+class StopRoute(Base):
+    """
+    Which routes call at which stop — derived, not from the feed directly.
+
+    /stops answers this by joining stop_times to trips and taking DISTINCT,
+    which reads ~72,000 stop_times rows to produce a few dozen pairs.  The
+    answer changes only when the schedule does, so it is materialised here at
+    ingest instead of recomputed per request.
+    """
+    __tablename__ = "stop_routes"
+
+    stop_id: Mapped[str] = mapped_column(ForeignKey("stops.stop_id"), primary_key=True)
+    route_id: Mapped[str] = mapped_column(ForeignKey("routes.route_id"), primary_key=True)
+
+
 class ServiceCalendar(Base):
     __tablename__ = "service_calendar"
 

@@ -188,7 +188,7 @@ def search_stops(
     """Search stops by name substring."""
     from collections import defaultdict
 
-    from db.models import Stop, StopTime, Trip
+    from db.models import Stop, StopRoute
 
     # Escape LIKE wildcards so a stray % or _ in the user's query matches
     # literally instead of changing the pattern semantics.
@@ -200,13 +200,13 @@ def search_stops(
         .all()
     )
 
-    # Fetch distinct route_ids for all matching stops in one query.
+    # Read the mapping materialised at ingest.  Deriving it here meant a
+    # DISTINCT over the stop_times/trips join — ~72,000 rows scanned to
+    # produce a few dozen pairs.
     stop_ids = [s.stop_id for s in results]
     route_rows = (
-        session.query(StopTime.stop_id, Trip.route_id)
-        .join(Trip, Trip.trip_id == StopTime.trip_id)
-        .filter(StopTime.stop_id.in_(stop_ids))
-        .distinct()
+        session.query(StopRoute.stop_id, StopRoute.route_id)
+        .filter(StopRoute.stop_id.in_(stop_ids))
         .all()
     )
     routes_by_stop: dict[str, list[str]] = defaultdict(list)
