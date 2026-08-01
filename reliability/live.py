@@ -26,6 +26,7 @@ from ingestion.gtfs_realtime import (
     trip_updates,
     vehicle_positions,
 )
+from reliability.historical import classify_time_bucket
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +91,14 @@ def compute_live_risk(
           "risk_label":   "Low" | "Medium" | "High",
           "modifiers":    list[str],  # human-readable modifier notes
           "is_cancelled": bool,
+          "time_bucket":  str,        # bucket whose history fed the score
         }
+
+    time_bucket is derived here, from the same scheduled_dt the caller used to
+    look up historical_reliability, so a client can fetch /reliability and
+    pick the row that actually produced this score instead of re-deriving the
+    bucketing rules.  Always populated, including when the record was too
+    sparse to score and the neutral prior stood in.
     """
     # Normalise to naive agency-local wall clock for datetime arithmetic.
     query_naive = query_dt.replace(tzinfo=None) if query_dt.tzinfo else query_dt
@@ -100,6 +108,8 @@ def compute_live_risk(
         ) + timedelta(seconds=_hms_to_seconds(departure_time_str))
     elif scheduled_dt.tzinfo:
         scheduled_dt = scheduled_dt.replace(tzinfo=None)
+
+    time_bucket = classify_time_bucket(scheduled_dt)
 
     # Start from the inverse of historical reliability
     base_risk = 1.0 - historical_reliability
@@ -121,6 +131,7 @@ def compute_live_risk(
             "risk_label": "High",
             "modifiers": ["Trip is currently marked as cancelled in GTFS-RT."],
             "is_cancelled": True,
+            "time_bucket": time_bucket,
         }
 
     # 2. Service alerts touching this route or stop and covering the leg's
@@ -179,6 +190,7 @@ def compute_live_risk(
         "risk_label": risk_label(final_risk),
         "modifiers": modifiers,
         "is_cancelled": False,
+        "time_bucket": time_bucket,
     }
 
 

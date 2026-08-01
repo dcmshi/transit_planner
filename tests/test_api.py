@@ -420,6 +420,7 @@ _FAKE_LIVE_RISK = {
     "risk_label": "Low",
     "modifiers": [],
     "is_cancelled": False,
+    "time_bucket": "weekday_am_peak",
 }
 
 
@@ -1173,6 +1174,7 @@ class TestRoutesCache:
         monkeypatch.setattr(routes_mod, "get_historical_reliability_batch", lambda *a, **kw: {})
         monkeypatch.setattr(routes_mod, "compute_live_risk", lambda **kw: {
             "risk_score": 0.1, "risk_label": "Low", "modifiers": [], "is_cancelled": False,
+            "time_bucket": "weekday_am_peak",
         })
 
         params = "origin=UN&destination=GL&travel_date=2026-02-17&departure_time=08:00"
@@ -1495,3 +1497,64 @@ class TestLegGeometryInResponse:
         assert array["items"]["type"] == "array"
         assert array["items"]["items"]["type"] == "number"
         assert "geometry" not in schemas["WalkLeg"]["properties"]
+
+
+# ---------------------------------------------------------------------------
+# LiveRisk.time_bucket <-> /reliability
+# ---------------------------------------------------------------------------
+
+class TestRiskTimeBucketContract:
+    """The whole point of the field: fetch /reliability for the leg's
+    (route_id, stop_id) and pick the row that produced the score."""
+
+    def _seed_all_buckets(self, db):
+        from db.models import ReliabilityRecord
+
+        for bucket in ("weekday_am_peak", "weekday_pm_peak",
+                       "weekday_offpeak", "weekend"):
+            db.add(ReliabilityRecord(
+                route_id="GT1", stop_id="UN", time_bucket=bucket, source="observed",
+                scheduled_departures=100, observed_departures=95,
+                total_delay_seconds=0, cancellation_count=0,
+                updated_at="2026-02-14T00:00:00+00:00",
+            ))
+        db.commit()
+
+    def test_leg_bucket_selects_exactly_one_reliability_row(self, client, db_session):
+        self._seed_all_buckets(db_session)
+
+        with (
+            patch("api.routes.find_routes", return_value=[_FAKE_ROUTE]),
+            patch("api.routes.get_historical_reliability_batch", return_value={}),
+        ):
+            resp = client.get(
+                "/routes?origin=UN&destination=GL"
+                "&travel_date=2026-02-11&departure_time=08:00"
+            )
+        assert resp.status_code == 200
+        leg = resp.json()["routes"][0]["legs"][0]
+        bucket = leg["risk"]["time_bucket"]
+
+        rows = client.get("/reliability?route_id=GT1&stop_id=UN").json()
+        assert len(rows) == 4, "all four buckets exist for this pair"
+        matching = [r for r in rows if r["time_bucket"] == bucket]
+        assert len(matching) == 1, f"{bucket} should select exactly one row"
+
+    def test_bucket_reflects_the_legs_departure_not_the_query_time(self, client, db_session):
+        """_FAKE_ROUTE departs 08:00 — am peak — regardless of when asked."""
+        self._seed_all_buckets(db_session)
+        with (
+            patch("api.routes.find_routes", return_value=[_FAKE_ROUTE]),
+            patch("api.routes.get_historical_reliability_batch", return_value={}),
+        ):
+            resp = client.get(
+                "/routes?origin=UN&destination=GL"
+                "&travel_date=2026-02-11&departure_time=08:00"
+            )
+        assert resp.json()["routes"][0]["legs"][0]["risk"]["time_bucket"] == "weekday_am_peak"
+
+    def test_openapi_advertises_time_bucket(self, client):
+        props = client.get("/openapi.json").json()["components"]["schemas"]["LiveRisk"]["properties"]
+        assert props["time_bucket"]["type"] == "string"
+        required = client.get("/openapi.json").json()["components"]["schemas"]["LiveRisk"]["required"]
+        assert "time_bucket" in required

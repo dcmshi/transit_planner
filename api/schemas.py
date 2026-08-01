@@ -25,6 +25,12 @@ class LiveRisk(BaseModel):
     risk_label: Literal["Low", "Medium", "High"]
     modifiers: list[str]
     is_cancelled: bool
+    # Which reliability bucket produced risk_score.  Matches the time_bucket
+    # of the /reliability row for this leg's (route_id, from_stop_id), so a
+    # client can show the counters behind the score without re-deriving the
+    # bucketing rules.  Populated even when the bucket had too little data and
+    # the neutral prior was used.
+    time_bucket: str
 
 
 class TripLeg(BaseModel):

@@ -117,6 +117,12 @@ ids and names, so a map client can draw a route without resolving each
 intermediate stop through `/stops`. They are null only if a graph node is
 missing coordinates, which does not happen for ingested stops.
 
+Each trip leg's `risk` carries `time_bucket` — the reliability bucket whose
+history produced `risk_score`. Fetch `/reliability?route_id=&stop_id=` for the
+leg and select the row with that bucket to show the counters behind the score.
+Always populated, including when the bucket had too little data and the neutral
+prior stood in.
+
 Trip legs also carry `geometry` — the stretch of the trip's GTFS shape between
 that leg's two stops, as ordered `[lon, lat]` pairs, so the map follows the
 track rather than drawing a chord between stations. Per leg, so each keeps its

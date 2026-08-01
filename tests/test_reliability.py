@@ -18,6 +18,7 @@ from config import AGENCY_TZ
 from db.models import Base, ReliabilityRecord
 from ingestion.gtfs_realtime import ServiceAlertState, TripUpdateState
 from reliability.historical import (
+    NEUTRAL_PRIOR,
     classify_time_bucket,
     get_historical_reliability,
     record_observed_departure,
@@ -924,3 +925,72 @@ class TestRecordObservedDeparture:
             route_id="R1", stop_id="S1"
         ).first()
         assert rec.window_end_date == "20260209"
+
+
+class TestRiskTimeBucket:
+    """LiveRisk reports which bucket produced its score, so a client can pull
+    the matching /reliability row instead of re-deriving the bucketing rules."""
+
+    def _bucket(self, **kw):
+        with patch(f"{_LIVE}.trip_updates", {}), \
+             patch(f"{_LIVE}.service_alerts", []), \
+             patch(f"{_LIVE}.vehicle_positions", {}):
+            return _compute(**kw)["time_bucket"]
+
+    @pytest.mark.parametrize("departure,query,expected", [
+        ("08:00:00", datetime(2026, 2, 9, 7, 0), "weekday_am_peak"),
+        ("12:00:00", datetime(2026, 2, 9, 7, 0), "weekday_offpeak"),
+        ("17:00:00", datetime(2026, 2, 9, 7, 0), "weekday_pm_peak"),
+        ("12:00:00", datetime(2026, 2, 7, 7, 0), "weekend"),
+    ])
+    def test_matches_classify_time_bucket(self, departure, query, expected):
+        assert self._bucket(departure=departure, query_dt=query) == expected
+
+    def test_agrees_with_the_lookup_key_the_api_builds(self):
+        """The API keys its historical lookup on classify_time_bucket of the
+        leg's scheduled datetime; the reported bucket has to be that same one
+        or the client fetches the wrong /reliability row."""
+        leg_dt = datetime(2026, 2, 9, 17, 30)
+        with patch(f"{_LIVE}.trip_updates", {}), \
+             patch(f"{_LIVE}.service_alerts", []), \
+             patch(f"{_LIVE}.vehicle_positions", {}):
+            risk = compute_live_risk(
+                route_id="R1", stop_id="S1", trip_id="T1",
+                departure_time_str="17:30:00",
+                query_dt=datetime(2026, 2, 9, 8, 0),
+                historical_reliability=0.8,
+                scheduled_dt=leg_dt,
+            )
+        assert risk["time_bucket"] == classify_time_bucket(leg_dt)
+
+    def test_present_when_the_neutral_prior_was_used(self):
+        """Acceptance: the UI must be able to say "no observations yet for
+        this bucket" rather than showing nothing."""
+        assert self._bucket(hist=NEUTRAL_PRIOR) == "weekday_offpeak"
+
+    def test_present_on_a_cancelled_trip(self):
+        """The cancellation short-circuit returns early — it must still say
+        which bucket it looked at."""
+        cancelled = TripUpdateState(trip_id="T1", route_id="R1", is_cancelled=True)
+        with patch(f"{_LIVE}.trip_updates", {"T1": cancelled}), \
+             patch(f"{_LIVE}.service_alerts", []), \
+             patch(f"{_LIVE}.vehicle_positions", {}):
+            risk = _compute(trip="T1")
+        assert risk["is_cancelled"] is True
+        assert risk["time_bucket"] == "weekday_offpeak"
+
+    def test_uses_the_travel_day_not_the_query_day(self):
+        """A Friday query for Saturday travel must report the weekend bucket,
+        matching the row the weekend history came from."""
+        saturday = datetime(2026, 2, 7, 14, 0)
+        with patch(f"{_LIVE}.trip_updates", {}), \
+             patch(f"{_LIVE}.service_alerts", []), \
+             patch(f"{_LIVE}.vehicle_positions", {}):
+            risk = compute_live_risk(
+                route_id="R1", stop_id="S1", trip_id="T1",
+                departure_time_str="14:00:00",
+                query_dt=datetime(2026, 2, 6, 9, 0),  # Friday
+                historical_reliability=0.8,
+                scheduled_dt=saturday,
+            )
+        assert risk["time_bucket"] == "weekend"
