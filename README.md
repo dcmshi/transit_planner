@@ -1,6 +1,6 @@
 # GO Transit Reliability Router
 
-Reliability-first routing for GO bus routes between Toronto and Guelph.
+Reliability-first routing across the GO Transit network.
 
 Most routing tools optimise for scheduled travel time. This one models
 **real-world reliability** — ranking routes by their likelihood of actually
@@ -10,7 +10,7 @@ working, surfacing active alerts, and explaining tradeoffs in plain language.
 
 ## Problem
 
-GO Transit buses between Toronto and Guelph regularly suffer from:
+GO Transit services regularly suffer from:
 
 - Bus no-shows despite showing "on time" in apps
 - Vague service alerts ("operational issues")
@@ -116,6 +116,11 @@ Every leg carries `from_lat`/`from_lon`/`to_lat`/`to_lon` alongside the stop
 ids and names, so a map client can draw a route without resolving each
 intermediate stop through `/stops`. They are null only if a graph node is
 missing coordinates, which does not happen for ingested stops.
+
+Times follow the GTFS convention, so a departure or arrival after midnight
+on the service day reads as `24:00:00` and up — a `25:14:00` departure is
+01:14 the following morning, still on the requested `travel_date`'s service
+day. Clients parsing these as wall-clock times must handle hours past 23.
 
 Each trip leg's `risk` explains itself: `time_bucket` names the reliability
 bucket whose history produced `risk_score`, and the counters behind it
@@ -324,7 +329,11 @@ curl -X POST "http://localhost:8000/ingest/reliability-seed?window_days=30"
 
 ---
 
-## Key stop IDs (Toronto ↔ Guelph corridor)
+## Key stop IDs
+
+`/routes` accepts any two `stop_id`s in the ingested feed — 886 stops across
+44 routes at the time of writing. These are just the ones used throughout
+this README, along the Kitchener line.
 
 | Stop | stop_id |
 |------|---------|
@@ -464,6 +473,10 @@ transit_planner/
 - **Stop-level routing only** — no within-stop platform logic.
 - **GO buses only** — TTC, Brampton Transit, etc. are excluded from routing
   but their stops may appear in the graph via walk edges.
+- **`calendar.txt` is unused by routing** — trips are selected by the GO
+  convention that `service_id` is a `YYYYMMDD` date, validated at ingest.
+  A feed switching to standard weekly service_ids would need
+  `ServiceCalendar`-based resolution.
 - **Single uvicorn worker** — APScheduler runs in-process; scaling to multiple
   workers would require moving the scheduler to a separate process.
 

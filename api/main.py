@@ -22,7 +22,11 @@ logging.basicConfig(level=logging.INFO)
 
 app = FastAPI(
     title="GO Transit Reliability Router",
-    description="Reliability-first routing for GO bus routes (Toronto ↔ Guelph).",
+    description=(
+        "Reliability-first routing across the GO Transit network. Accepts any "
+        "two stop_ids; the Toronto–Guelph corridor is the worked example in "
+        "the docs, not a restriction."
+    ),
     version="0.1.0",
     lifespan=lifespan,
 )

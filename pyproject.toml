@@ -1,7 +1,7 @@
 [project]
 name = "transit-planner"
 version = "0.1.0"
-description = "Reliability-first routing for GO Transit buses (Toronto ↔ Guelph)"
+description = "Reliability-first routing across the GO Transit network"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.110.0",

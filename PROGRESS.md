@@ -510,6 +510,75 @@ because CI's database is empty.  Suite at 371 unit tests + 4 integration.
 
 ---
 
+## Frontend Support & Past-Midnight Fixes (2026-08-01)
+
+Driven by requests from the frontend, plus the highest-value item left over
+from the tenth-pass audit.  Everything below was verified against the live
+PostGIS stack, not only in tests, and the app container was rebuilt after each
+change — code changes do not reach a running deployment without
+`docker compose up -d --build app`.
+
+### API additions
+
+- [x] **Stop coordinates on every leg** — `from_lat`/`from_lon`/`to_lat`/
+  `to_lon` on both leg types, read from graph nodes the engine already holds.
+  Took the frontend's planning flow from 8 requests to 3 and removed a
+  substring search being used as a primary-key lookup.
+- [x] **Per-leg track geometry** — the stretch of the trip's GTFS shape
+  between a leg's two stops.  The GO feed publishes `shapes.txt` but no
+  `shape_dist_traveled` in either file, so ingest projects every stop onto
+  its shape (`shape_stop_positions`) and slicing becomes a list slice.
+  Encoded as a polyline (precision 5), 4.4x smaller than raw pairs.
+- [x] **`arrive_by`** on `/routes`, latest-departing options that still make a
+  deadline, GTFS hours past 23 supported.
+- [x] **`GET /reliability`** — counters behind a score, filter-required and
+  capped; a lookup, not an export.
+- [x] **`LiveRisk` explains itself** — `time_bucket` plus the counters
+  (`scheduled_departures`, `observed_departures`, `total_delay_seconds`,
+  `cancellation_count`, `source`, `neutral_prior_used`), derived from the same
+  values the scorer used so they cannot disagree.
+
+### Bugs found and fixed
+
+- [x] **`arrive_by` served one cached answer for every deadline** — the cache
+  key was built from a `departure_dt` that carries only the travel date under
+  `arrive_by`.  Reported as 404s on 4+ leg journeys; leg count was
+  coincidental.  With a fresh cache it returned an itinerary arriving ten
+  hours past the requested deadline, which is worse than the reported symptom.
+- [x] **`arrive_by`'s fixed four-hour lookback** missed sparse service; the
+  window now widens until it has enough or reaches the start of the day.
+- [x] **Post-midnight departures dropped from route fill** —
+  `_fill_later_departures` built a `datetime` per candidate and capped at
+  23:59:59.  Five probe pairs queried at 23:00 went from 2–4 routes to a
+  full 5.
+- [x] **Post-midnight trips never swept for no-shows** — reliability
+  under-counted the late-evening network in one direction, making it look
+  better than it was.  The sweep now runs a second pass over yesterday's
+  service day with the clock shifted a day forward.
+- [x] **Alembic autogenerate proposed dropping 64 PostGIS extension tables** —
+  found while preparing to stamp the live database; a migration generated
+  then would have deleted the tiger geocoder.
+
+### Performance
+
+Measured back to back in one session on the 889-stop database:
+
+| Endpoint | Before | After |
+|---|---|---|
+| `/routes?arrive_by` cold | 4958 ms | 671 ms |
+| `/routes` cold | 895 ms | 341 ms |
+| `/stops` | 46 ms | 5 ms |
+
+Three changes did it: dominance pruning moved into route generation (the
+engine had been spending its budget on itineraries `_prune_dominated` would
+discard), the candidate-path cap dropped from 15x to 5x once that waste was
+gone, and `/stops` reads a materialised `stop_routes` table instead of a
+`DISTINCT` over 72,000 rows per request.
+
+Suite at 539 unit + 9 integration tests; ruff and mypy clean.
+
+---
+
 ## Environment Setup
 
 ```bash

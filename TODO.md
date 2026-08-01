@@ -88,9 +88,12 @@ Work needed to honestly support the whole network:
   of being skipped forever.
 - `calendar.txt` / `exception_type` service resolution (also deferred below)
   matters more once trips outside the corridor are in scope, since the
-  service_id-is-a-date convention was only validated against it.
-- Docs and the FastAPI `description` in `api/main.py` still say
-  "Toronto ↔ Guelph".
+  service_id-is-a-date convention was only validated against it.  **This is
+  all that remains of this item.**
+- ✅ **Done 2026-08-01.** Docs, the FastAPI `description` and the package
+  description no longer describe the project as Toronto–Guelph-only; the
+  corridor is now presented as the worked example rather than the scope.
+  README also documents that GTFS times run past 24:00:00 on the wire.
 
 ### ✅ `test_matches_bisect_result` only passed on an empty stops table (done 2026-07-31)
 
