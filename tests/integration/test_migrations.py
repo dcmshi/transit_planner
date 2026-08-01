@@ -122,6 +122,34 @@ class TestMigrations:
 
         assert remaining == 0
 
+    def test_foreign_tables_do_not_show_up_as_drops(self, scratch_db_url):
+        """PostGIS extensions leave their own tables in `public`.  Autogenerate
+        must ignore them — unfiltered, a database with postgis_tiger_geocoder
+        installed produced 64 proposed drop_table operations."""
+        _run(scratch_db_url, "head")
+
+        engine = create_engine(scratch_db_url, isolation_level="AUTOCOMMIT")
+        with engine.connect() as conn:
+            conn.execute(text(
+                "CREATE TABLE not_ours (gid integer PRIMARY KEY, label text)"
+            ))
+            conn.execute(text("CREATE INDEX not_ours_label_idx ON not_ours (label)"))
+
+        from alembic.autogenerate import compare_metadata
+        from alembic.migration import MigrationContext
+
+        from db.alembic_hooks import include_object
+        from db.models import Base
+
+        with engine.connect() as conn:
+            ctx = MigrationContext.configure(
+                conn, opts={"include_object": include_object}
+            )
+            diff = compare_metadata(ctx, Base.metadata)
+        engine.dispose()
+
+        assert diff == [], f"autogenerate wants to touch tables it does not own: {diff}"
+
     def test_geography_column_survives_the_round_trip(self, scratch_db_url):
         """geog is the column autogenerate is most likely to get wrong, and
         the GIST index is created by GeoAlchemy2 rather than by the model."""

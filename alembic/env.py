@@ -4,9 +4,11 @@ The database URL comes from config.DATABASE_URL (i.e. the same .env the app
 reads) rather than alembic.ini, so migrations can never be pointed at a
 different database than the application by accident.
 
-GeoAlchemy2's alembic helpers are installed because Stop.geog is a Geography
-column on PostgreSQL: without them autogenerate emits an unusable type and
-tries to manage the GIST index GeoAlchemy2 creates for itself.
+Autogenerate is filtered by db.alembic_hooks.include_object, which keeps it to
+the tables db/models.py declares and defers to GeoAlchemy2 for the rest —
+Stop.geog is a Geography column on PostgreSQL, and without GeoAlchemy2's
+helpers autogenerate emits an unusable type and tries to manage the GIST index
+GeoAlchemy2 creates for itself.
 """
 
 from logging.config import fileConfig
@@ -16,6 +18,7 @@ from sqlalchemy import engine_from_config, pool
 
 from alembic import context
 from config import DATABASE_URL
+from db.alembic_hooks import include_object
 from db.models import Base
 
 config = context.config
@@ -34,7 +37,7 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
-        include_object=alembic_helpers.include_object,
+        include_object=include_object,
         render_item=alembic_helpers.render_item,
     )
 
@@ -53,7 +56,7 @@ def run_migrations_online() -> None:
         context.configure(
             connection=connection,
             target_metadata=target_metadata,
-            include_object=alembic_helpers.include_object,
+            include_object=include_object,
             render_item=alembic_helpers.render_item,
             process_revision_directives=alembic_helpers.writer,
             # SQLite cannot ALTER most things in place; batch mode rewrites
