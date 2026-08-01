@@ -39,6 +39,9 @@ logger = logging.getLogger(__name__)
 _graphs: Optional[tuple[nx.MultiDiGraph, nx.DiGraph]] = None
 _last_built_at: Optional[datetime] = None
 
+# Rows per fetch when streaming the stop_times join in _add_trip_edges.
+_STOP_TIME_STREAM_CHUNK = 10_000
+
 
 def get_graphs() -> tuple[nx.MultiDiGraph, nx.DiGraph]:
     """Return the cached (graph, projection) pair from one consistent build.
@@ -129,6 +132,11 @@ def _add_trip_edges(G: nx.MultiDiGraph, session: Session) -> None:
     travel-time edge per route per stop pair. This gives the graph one edge per
     route for each physical connection — enough for reliable pathfinding and
     reliability scoring — without bloating to 2M+ edges.
+
+    Streams the result rather than materialising it: rows arrive in trip_id
+    order and are reduced into `best` as they go, so only one trip's rows are
+    ever resident.  Buffering the whole join with .all() held 749 MB on the GO
+    feed (1.59M rows) to produce fewer than 2,000 edges.
     """
     rows = session.execute(
         sa_select(
@@ -142,7 +150,8 @@ def _add_trip_edges(G: nx.MultiDiGraph, session: Session) -> None:
         )
         .join(Trip, StopTime.trip_id == Trip.trip_id)
         .order_by(StopTime.trip_id, StopTime.stop_sequence)
-    ).all()
+        .execution_options(yield_per=_STOP_TIME_STREAM_CHUNK)
+    )
 
     # Best edge per (from_stop, to_stop, route_id) — minimum travel time
     best: dict[tuple[str, str, str], dict] = {}

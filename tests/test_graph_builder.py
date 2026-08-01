@@ -5,6 +5,8 @@ _haversine_metres and _hms_to_seconds are private helpers but are
 tested directly since they encapsulate meaningful logic.
 """
 
+from unittest.mock import patch
+
 import networkx as nx
 import pytest
 from sqlalchemy import create_engine
@@ -291,3 +293,53 @@ class TestBuildGraph:
         # Only one edge per (from_stop, to_stop, route_id) — the 30-min one
         assert len(trip_edges) == 1
         assert trip_edges[0]["travel_seconds"] == 30 * 60
+
+
+# ---------------------------------------------------------------------------
+# _add_trip_edges — streaming
+# ---------------------------------------------------------------------------
+
+class TestAddTripEdgesStreaming:
+    """The stop_times join must stream, not buffer.
+
+    It is the largest query in the system (1.59M rows on the GO feed) and it
+    reduces to fewer than 2,000 edges, so materialising it with .all() held
+    749 MB to produce almost nothing — the opposite of what the function's
+    docstring claims it does.
+    """
+
+    def test_query_sets_yield_per(self, graph_db):
+        from graph.builder import _STOP_TIME_STREAM_CHUNK, _add_trip_edges
+
+        seen = {}
+        real_execute = graph_db.execute
+
+        def capture(statement, *args, **kwargs):
+            seen["options"] = statement.get_execution_options()
+            return real_execute(statement, *args, **kwargs)
+
+        with patch.object(graph_db, "execute", side_effect=capture):
+            _add_trip_edges(nx.MultiDiGraph(), graph_db)
+
+        assert seen["options"].get("yield_per") == _STOP_TIME_STREAM_CHUNK
+
+    def test_streaming_produces_the_same_edges(self, graph_db):
+        """Guards the reduction itself: rows are grouped by trip_id as they
+        arrive, so a chunk boundary must not split a trip's edges."""
+        from graph.builder import _add_trip_edges
+
+        streamed: nx.MultiDiGraph[str] = nx.MultiDiGraph()
+        _add_trip_edges(streamed, graph_db)
+
+        with patch("graph.builder._STOP_TIME_STREAM_CHUNK", 1):
+            one_at_a_time: nx.MultiDiGraph[str] = nx.MultiDiGraph()
+            _add_trip_edges(one_at_a_time, graph_db)
+
+        def edge_set(g):
+            return {
+                (u, v, d["route_id"], d["travel_seconds"])
+                for u, v, d in g.edges(data=True)
+            }
+
+        assert edge_set(streamed) == edge_set(one_at_a_time)
+        assert edge_set(streamed)
